@@ -6,17 +6,24 @@
  * - Mọi write best-effort — lỗi DB KHÔNG làm chết run, retry tối đa 1 lần, log cảnh báo.
  * - Single-writer: chỉ coordinator ghi DB (worker không chạm DB).
  * - JSON payload lưu TEXT (schema.sql) — parse/stringify ở lớp này.
+ *
+ * T-05 (D-5/D-6/D-7/D-10, Q-2):
+ * - `query<T>` trả `QueryResult<T>` = `{ ok: true; rows } | { ok: false; error }` —
+ *   caller phân biệt "no rows" vs "DB fail" (không trả 0 giả).
+ * - Retry ≥ 1 chỉ cho transient error; KHÔNG retry 23505/23503/22P02 (business error).
+ * - B-1: QueryError KHÔNG bao giờ chứa sql/params/raw pg error (chống leak
+ *   password/secret/hash — insertPoolAccounts/createAdmin).
+ * - Bỏ global int8 type parser (OID 20) — parse BIGINT ở biên qua `parseBigInt`
+ *   (db/int.ts) cho đúng cột int8 (epoch ms, an toàn < 2^53).
+ * - `connect()` fail + `dbRequired` → THROW (server fail-fast, exit ≠ 0).
  */
 
-import * as fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { ltLog } from '../util';
-
-const SCHEMA_PATH = fileURLToPath(new URL('./schema.sql', import.meta.url));
-
-// pg trả BIGINT (int8, OID 20) dạng string — parse thành number (epoch ms / counter đều < 2^53, an toàn).
-pg.types.setTypeParser(20, (v) => Number(v));
+import { ltLog, sleep } from '../util';
+import { runMigrations } from './migrate';
+import { parseBigInt, isTransient, isBusinessError } from './int';
+import { toolMetrics } from '../tool-metrics';
+import type { QueryResult } from './result';
 
 export interface AdminRow {
   id: number;
@@ -123,27 +130,51 @@ const RUN_COLUMNS = `run_id AS "runId", status, machine_id AS "machineId", start
   summary_json AS "summaryJson", stop_reason AS "stopReason", pool_source_run_id AS "poolSourceRunId",
   created_at AS "createdAt", updated_at AS "updatedAt"`;
 
+/** Cột int8 (BIGINT, OID 20) — pg trả string, parse ở biên qua parseBigInt. */
+const BIGINT_FIELDS = new Set(['createdAt', 'updatedAt', 'lastLoginAt', 'startAt', 'endAt', 'registeredAt', 'ts']);
+
+function normalizeBigIntRows<T>(rows: T[]): T[] {
+  for (const row of rows as Array<Record<string, unknown>>) {
+    for (const key of BIGINT_FIELDS) {
+      const v = row[key];
+      if ((typeof v === 'string' || typeof v === 'bigint') && key in row) {
+        row[key] = parseBigInt(v);
+      }
+    }
+  }
+  return rows;
+}
+
 export class LoadtestStore {
   private pool: pg.Pool | null = null;
   enabled = false;
 
-  constructor(private connectionString: string) {}
+  constructor(
+    private connectionString: string,
+    /** Bắt buộc DB (Q-2) — connect() throw khi fail (server exit ≠ 0). */
+    readonly dbRequired = false,
+  ) {}
 
   async connect(): Promise<void> {
+    this.pool = new pg.Pool({
+      connectionString: this.connectionString,
+      max: 5,
+      connectionTimeoutMillis: 3000,
+    });
     try {
-      this.pool = new pg.Pool({
-        connectionString: this.connectionString,
-        max: 5,
-        connectionTimeoutMillis: 3000,
-      });
       await this.pool.query('SELECT 1');
       this.enabled = true;
       ltLog.info('[lt][db] connected (Postgres)');
     } catch (err) {
       this.enabled = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (this.dbRequired) {
+        // Fail-fast (Q-2): DB là bắt buộc — throw để server.ts exit code ≠ 0.
+        throw new Error(`Không kết nối được Postgres (LOADTEST_DB_REQUIRED=true): ${msg}`);
+      }
       ltLog.warn(
-        `[lt][db] KHÔNG kết nối được Postgres: ${err instanceof Error ? err.message : String(err)}. ` +
-          `DB bị TẮT — run vẫn chạy, không ghi history.`,
+        `[lt][db] KHÔNG kết nối được Postgres: ${msg}. DB bị TẮT — run vẫn chạy, không ghi history ` +
+          `(LOADTEST_DB_REQUIRED=false — override khẩn cấp).`,
       );
     }
   }
@@ -156,39 +187,57 @@ export class LoadtestStore {
     this.enabled = false;
   }
 
-  /** Chạy schema.sql (idempotent — CREATE TABLE IF NOT EXISTS) + ghi schema_version 1. */
+  /**
+   * Startup: đảm bảo baseline schema 001 (T-04, B-5) — KHÔNG tự chạy migration
+   * destructive phía sau. Baseline fail → throw (R-1, server fail-fast — T-05).
+   * IDEMPOTENT — DB đã có schema → no-op.
+   */
   async ensureSchema(): Promise<void> {
     if (!this.enabled || !this.pool) return;
+    const client = await this.pool.connect();
     try {
-      const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
-      await this.pool.query(schema);
-      await this.pool.query(`INSERT INTO schema_version (version) VALUES (1) ON CONFLICT (version) DO NOTHING`);
-    } catch (err) {
-      ltLog.warn(`[lt][db] ensureSchema fail: ${err instanceof Error ? err.message : String(err)}`);
+      await runMigrations(client, { scope: 'baseline' });
+    } finally {
+      client.release();
     }
   }
 
-  /** Query helper — retry tối đa 1 lần (PRD §2.4), lỗi → trả [] + cảnh báo.
-   *  Không retry lỗi nghiệp vụ (unique/FK violation — 23505/23503) vì retry chắc chắn fail. */
-  private async query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
-    if (!this.enabled || !this.pool) return [];
+  /**
+   * Query helper — trả QueryResult<T> (T-05). Retry ≥ 1 chỉ cho transient error
+   * (isTransient); KHÔNG retry business error (23505/23503/22P02). B-1: error
+   * KHÔNG chứa sql/params/raw pg error. Write fail → đếm dbWriteFail (US-DB-2).
+   */
+  private async query<T>(sql: string, params: unknown[] = [], opts: { write?: boolean } = {}): Promise<QueryResult<T>> {
+    if (!this.enabled || !this.pool) {
+      if (opts.write) toolMetrics.inc('dbWriteFail');
+      return {
+        ok: false,
+        error: { code: 'DB_DISABLED', message: 'DB chưa kết nối', context: opts.write ? 'write' : 'read' },
+      };
+    }
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const res = await this.pool.query(sql, params);
-        return res.rows as T[];
+        return { ok: true, rows: normalizeBigIntRows(res.rows) as T[] };
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
         const code = (err as { code?: string }).code ?? '';
-        const isBusinessError = code === '23505' || code === '23503'; // unique / FK violation
-        if (attempt === 1 && !isBusinessError) {
-          ltLog.warn(`[lt][db] query fail (${msg}) — retry 1 lần`);
+        const message = err instanceof Error ? err.message : String(err);
+        if (!isTransient(code)) {
+          // B-1: error chỉ { code, message, context } — không sql/params.
+          if (opts.write && !isBusinessError(code)) toolMetrics.inc('dbWriteFail');
+          ltLog.warn(`[lt][db] query fail (${code || 'UNKNOWN'}): ${message}`);
+          return { ok: false, error: { code: code || undefined, message, context: opts.write ? 'write' : 'read' } };
+        }
+        toolMetrics.inc('dbRetry');
+        if (attempt === 1) {
+          ltLog.warn(`[lt][db] query transient fail (${code}) — retry 1 lần`);
+          await sleep(100);
           continue;
         }
-        if (attempt === 2) ltLog.warn(`[lt][db] query fail lần 2 — bỏ qua: ${msg}`);
-        return [];
       }
     }
-    return [];
+    if (opts.write) toolMetrics.inc('dbWriteFail');
+    return { ok: false, error: { code: 'RETRY_EXHAUSTED', message: 'query fail 2 lần', context: opts.write ? 'write' : 'read' } };
   }
 
   // ─── admin_users ─────────────────────────────────────────────────────────
@@ -200,43 +249,43 @@ export class LoadtestStore {
     displayName?: string;
     role?: string;
     now?: number;
-  }): Promise<AdminRow | null> {
+  }): Promise<QueryResult<AdminRow>> {
     const now = input.now ?? Date.now();
-    const rows = await this.query<AdminRow>(
+    return this.query<AdminRow>(
       `INSERT INTO admin_users (username, email, password_hash, display_name, role, is_active, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, TRUE, $6, $6)
        RETURNING id, username, email, password_hash AS "passwordHash", display_name AS "displayName",
                  role, is_active AS "isActive", created_at AS "createdAt", updated_at AS "updatedAt",
                  last_login_at AS "lastLoginAt"`,
       [input.username, input.email, input.passwordHash, input.displayName ?? '', input.role ?? 'admin', now],
+      { write: true },
     );
-    return rows[0] ?? null;
   }
 
-  async findAdminByLogin(identifier: string): Promise<AdminRow | null> {
-    const rows = await this.query<AdminRow>(
+  async findAdminByLogin(identifier: string): Promise<QueryResult<AdminRow>> {
+    return this.query<AdminRow>(
       `SELECT id, username, email, password_hash AS "passwordHash", display_name AS "displayName",
               role, is_active AS "isActive", created_at AS "createdAt", updated_at AS "updatedAt",
               last_login_at AS "lastLoginAt"
        FROM admin_users WHERE username = $1 OR email = $1 LIMIT 1`,
       [identifier],
     );
-    return rows[0] ?? null;
   }
 
-  async getAdminById(id: number): Promise<AdminRow | null> {
-    const rows = await this.query<AdminRow>(
+  async getAdminById(id: number): Promise<QueryResult<AdminRow>> {
+    return this.query<AdminRow>(
       `SELECT id, username, email, password_hash AS "passwordHash", display_name AS "displayName",
               role, is_active AS "isActive", created_at AS "createdAt", updated_at AS "updatedAt",
               last_login_at AS "lastLoginAt"
        FROM admin_users WHERE id = $1 LIMIT 1`,
       [id],
     );
-    return rows[0] ?? null;
   }
 
-  async touchLastLogin(id: number, now = Date.now()): Promise<void> {
-    await this.query(`UPDATE admin_users SET last_login_at = $1, updated_at = $1 WHERE id = $2`, [now, id]);
+  async touchLastLogin(id: number, now = Date.now()): Promise<QueryResult<void>> {
+    return this.query(`UPDATE admin_users SET last_login_at = $1, updated_at = $1 WHERE id = $2`, [now, id], {
+      write: true,
+    });
   }
 
   // ─── runs ────────────────────────────────────────────────────────────────
@@ -252,41 +301,43 @@ export class LoadtestStore {
     configJson: string;
     poolSourceRunId?: string | null;
     now?: number;
-  }): Promise<void> {
+  }): Promise<QueryResult<void>> {
     const now = input.now ?? Date.now();
-    await this.query(
+    return this.query(
       `INSERT INTO runs (run_id, status, machine_id, start_at, gateway_url, target_users, worker_count, config_json, pool_source_run_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)`,
       [
         input.runId, input.status, input.machineId, input.startAt, input.gatewayUrl,
         input.targetUsers, input.workerCount, input.configJson, input.poolSourceRunId ?? null, now,
       ],
+      { write: true },
     );
   }
 
   async finalizeRun(
     runId: string,
     input: { status: string; stopReason?: string | null; summaryJson?: string | null; endAt: number; durationSec?: number | null },
-  ): Promise<void> {
-    await this.query(
+  ): Promise<QueryResult<void>> {
+    return this.query(
       `UPDATE runs SET status = $1, stop_reason = $2, summary_json = $3, end_at = $4, duration_sec = $5, updated_at = $4
        WHERE run_id = $6`,
       [input.status, input.stopReason ?? null, input.summaryJson ?? null, input.endAt, input.durationSec ?? null, runId],
+      { write: true },
     );
   }
 
   /** Crash-detect (PRD B3): mọi run `running` còn sót của máy này → `error`. */
-  async markRunsRunningAsError(machineId: string, reason: string): Promise<number> {
-    const rows = await this.query<{ run_id: string }>(
+  async markRunsRunningAsError(machineId: string, reason: string): Promise<QueryResult<{ run_id: string }>> {
+    return this.query<{ run_id: string }>(
       `UPDATE runs SET status = 'error', stop_reason = $1, updated_at = $2
        WHERE status = 'running' AND machine_id = $3
        RETURNING run_id`,
       [reason, Date.now(), machineId],
+      { write: true },
     );
-    return rows.length;
   }
 
-  async listRuns(filter?: { status?: string; limit?: number }): Promise<RunRow[]> {
+  async listRuns(filter?: { status?: string; limit?: number }): Promise<QueryResult<RunRow>> {
     const where: string[] = [];
     const params: unknown[] = [];
     if (filter?.status) {
@@ -298,21 +349,21 @@ export class LoadtestStore {
     return this.query<RunRow>(sql, params);
   }
 
-  async getRun(runId: string): Promise<RunRow | null> {
-    const rows = await this.query<RunRow>(`SELECT ${RUN_COLUMNS} FROM runs WHERE run_id = $1 LIMIT 1`, [runId]);
-    return rows[0] ?? null;
+  async getRun(runId: string): Promise<QueryResult<RunRow>> {
+    return this.query<RunRow>(`SELECT ${RUN_COLUMNS} FROM runs WHERE run_id = $1 LIMIT 1`, [runId]);
   }
 
   /** Xóa run — FK ON DELETE CASCADE xóa luôn metric_samples + log_events. */
-  async deleteRun(runId: string): Promise<boolean> {
-    const rows = await this.query<{ run_id: string }>(`DELETE FROM runs WHERE run_id = $1 RETURNING run_id`, [runId]);
-    return rows.length > 0;
+  async deleteRun(runId: string): Promise<QueryResult<{ run_id: string }>> {
+    return this.query<{ run_id: string }>(`DELETE FROM runs WHERE run_id = $1 RETURNING run_id`, [runId], {
+      write: true,
+    });
   }
 
   // ─── metric_samples ──────────────────────────────────────────────────────
 
-  async insertMetricSamples(samples: Omit<MetricSampleRow, 'id'>[]): Promise<void> {
-    if (!samples.length) return;
+  async insertMetricSamples(samples: Omit<MetricSampleRow, 'id'>[]): Promise<QueryResult<void>> {
+    if (!samples.length) return { ok: true, rows: [] };
     const cols = [
       'run_id', 'ts', 'phase', 'elapsed_sec', 'users_created', 'users_connected', 'users_active',
       'users_queued', 'users_in_room', 'actions_total', 'success_total', 'fail_total', 'echo_ok',
@@ -332,10 +383,12 @@ export class LoadtestStore {
         s.successRate, s.echoRate, s.actionsPerSecJson, s.latencyJson, s.errorsJson, s.serverJson, s.workersJson,
       );
     });
-    await this.query(`INSERT INTO metric_samples (${cols.join(', ')}) VALUES ${placeholders.join(', ')}`, values);
+    return this.query(`INSERT INTO metric_samples (${cols.join(', ')}) VALUES ${placeholders.join(', ')}`, values, {
+      write: true,
+    });
   }
 
-  async listMetricSamples(runId: string, opts?: { limit?: number; offset?: number }): Promise<MetricSampleRow[]> {
+  async listMetricSamples(runId: string, opts?: { limit?: number; offset?: number }): Promise<QueryResult<MetricSampleRow>> {
     const limit = Math.min(Math.max(1, opts?.limit ?? 3600), 20000);
     const offset = Math.max(0, opts?.offset ?? 0);
     return this.query<MetricSampleRow>(
@@ -352,18 +405,20 @@ export class LoadtestStore {
     );
   }
 
-  async countMetricSamples(runId: string): Promise<number> {
-    const rows = await this.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM metric_samples WHERE run_id = $1`, [runId]);
-    return rows[0]?.n ?? 0;
+  /** Đếm samples — KHÔNG trả 0 giả khi DB lỗi; caller phải check `ok` (D-6). */
+  async countMetricSamples(runId: string): Promise<QueryResult<{ n: number }>> {
+    return this.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM metric_samples WHERE run_id = $1`, [runId]);
   }
 
   // ─── log_events ──────────────────────────────────────────────────────────
 
-  async insertLogEvent(runId: string, level: string, msg: string, ts = Date.now()): Promise<void> {
-    await this.query(`INSERT INTO log_events (run_id, ts, level, msg) VALUES ($1, $2, $3, $4)`, [runId, ts, level, msg]);
+  async insertLogEvent(runId: string, level: string, msg: string, ts = Date.now()): Promise<QueryResult<void>> {
+    return this.query(`INSERT INTO log_events (run_id, ts, level, msg) VALUES ($1, $2, $3, $4)`, [runId, ts, level, msg], {
+      write: true,
+    });
   }
 
-  async listLogEvents(runId: string, opts?: { limit?: number; offset?: number; level?: string }): Promise<LogEventRow[]> {
+  async listLogEvents(runId: string, opts?: { limit?: number; offset?: number; level?: string }): Promise<QueryResult<LogEventRow>> {
     const where: string[] = [`run_id = $1`];
     const params: unknown[] = [runId];
     if (opts?.level) {
@@ -393,8 +448,8 @@ export class LoadtestStore {
     reusedByRunIdsJson: string;
     importedFromFile?: string | null;
     createdAt?: number;
-  }): Promise<void> {
-    await this.query(
+  }): Promise<QueryResult<void>> {
+    return this.query(
       `INSERT INTO pools (pool_id, gateway_url, target_users, account_count, registered, logged_in, failed, errors_json, reused_by_run_ids_json, imported_from_file, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (pool_id) DO UPDATE SET
@@ -410,11 +465,12 @@ export class LoadtestStore {
         input.loggedIn, input.failed, input.errorsJson, input.reusedByRunIdsJson,
         input.importedFromFile ?? null, input.createdAt ?? Date.now(),
       ],
+      { write: true },
     );
   }
 
-  async getPool(poolId: string): Promise<PoolRow | null> {
-    const rows = await this.query<PoolRow>(
+  async getPool(poolId: string): Promise<QueryResult<PoolRow>> {
+    return this.query<PoolRow>(
       `SELECT pool_id AS "poolId", gateway_url AS "gatewayUrl", target_users AS "targetUsers",
               account_count AS "accountCount", registered, logged_in AS "loggedIn", failed,
               errors_json AS "errorsJson", reused_by_run_ids_json AS "reusedByRunIdsJson",
@@ -422,10 +478,9 @@ export class LoadtestStore {
        FROM pools WHERE pool_id = $1 LIMIT 1`,
       [poolId],
     );
-    return rows[0] ?? null;
   }
 
-  async listPools(): Promise<PoolRow[]> {
+  async listPools(): Promise<QueryResult<PoolRow>> {
     return this.query<PoolRow>(
       `SELECT pool_id AS "poolId", gateway_url AS "gatewayUrl", target_users AS "targetUsers",
               account_count AS "accountCount", registered, logged_in AS "loggedIn", failed,
@@ -453,8 +508,8 @@ export class LoadtestStore {
       lastUsedRunId?: string | null;
       lastLoginAt?: number | null;
     }[],
-  ): Promise<void> {
-    if (!accounts.length) return;
+  ): Promise<QueryResult<void>> {
+    if (!accounts.length) return { ok: true, rows: [] };
     const cols = [
       'pool_id', 'email', 'password', 'user_id', 'display_name', 'device_info_json', 'date_of_birth',
       'country', 'registered_at', 'status', 'last_error_code', 'last_used_run_id', 'last_login_at',
@@ -470,9 +525,10 @@ export class LoadtestStore {
         a.lastUsedRunId ?? null, a.lastLoginAt ?? null,
       );
     });
-    await this.query(
+    return this.query(
       `INSERT INTO pool_accounts (${cols.join(', ')}) VALUES ${placeholders.join(', ')} ON CONFLICT (pool_id, email) DO NOTHING`,
       values,
+      { write: true },
     );
   }
 
@@ -480,15 +536,16 @@ export class LoadtestStore {
     poolId: string,
     email: string,
     input: { status?: string; lastErrorCode?: string | null; lastUsedRunId?: string | null; lastLoginAt?: number | null },
-  ): Promise<void> {
-    await this.query(
+  ): Promise<QueryResult<void>> {
+    return this.query(
       `UPDATE pool_accounts SET status = COALESCE($1, status), last_error_code = $2, last_used_run_id = $3, last_login_at = COALESCE($4, last_login_at)
        WHERE pool_id = $5 AND email = $6`,
       [input.status ?? null, input.lastErrorCode ?? null, input.lastUsedRunId ?? null, input.lastLoginAt ?? null, poolId, email],
+      { write: true },
     );
   }
 
-  async listPoolAccounts(poolId: string, opts?: { limit?: number; offset?: number; status?: string }): Promise<PoolAccountRow[]> {
+  async listPoolAccounts(poolId: string, opts?: { limit?: number; offset?: number; status?: string }): Promise<QueryResult<PoolAccountRow>> {
     const where: string[] = [`pool_id = $1`];
     const params: unknown[] = [poolId];
     if (opts?.status) {

@@ -13,6 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoadTestTick, RunConfig } from '../types';
 import { ltLog, normalizeUrl, subscribeLog } from '../util';
+import { toEpochMs } from './int';
 import type { ProvisionSummary } from '../auth-factory';
 import { LoadtestStore, type MetricSampleRow, type PoolRow } from './store';
 
@@ -43,7 +44,9 @@ export class DbWriter {
     await this.store.ensureSchema();
     const machineId = os.hostname();
     const crashed = await this.store.markRunsRunningAsError(machineId, 'crash-detect: server khởi động lại khi run đang chạy');
-    if (crashed > 0) ltLog.warn(`[lt][db] crash-detect: ${crashed} run còn sót status=running → đánh dấu error`);
+    if (crashed.ok && crashed.rows.length > 0) {
+      ltLog.warn(`[lt][db] crash-detect: ${crashed.rows.length} run còn sót status=running → đánh dấu error`);
+    }
     await this.importLegacyPools();
     this.unsubscribeLog = subscribeLog((level, msg) => void this.writeLog(level, msg));
   }
@@ -63,7 +66,7 @@ export class DbWriter {
   async writeRunStart(config: RunConfig): Promise<void> {
     this.currentRunId = config.runId;
     this.startAt = Date.now();
-    await this.store.insertRun({
+    const r = await this.store.insertRun({
       runId: config.runId,
       status: 'running',
       machineId: os.hostname(),
@@ -73,6 +76,7 @@ export class DbWriter {
       workerCount: config.workerCount,
       configJson: JSON.stringify(config),
     });
+    if (!r.ok) ltLog.warn(`[lt][db] writeRunStart fail (runId=${config.runId}): ${r.error.message}`);
     this.startFlushTimer();
   }
 
@@ -87,13 +91,14 @@ export class DbWriter {
     this.stopFlushTimer();
     if (this.currentRunId === runId) this.currentRunId = null;
     const durationSec = this.startAt > 0 ? Math.max(0, Math.round((endAt - this.startAt) / 1000)) : null;
-    await this.store.finalizeRun(runId, {
+    const r = await this.store.finalizeRun(runId, {
       status,
       stopReason,
       summaryJson: report ? JSON.stringify(report) : null,
       endAt,
       durationSec,
     });
+    if (!r.ok) ltLog.warn(`[lt][db] finalizeRun fail (runId=${runId}): ${r.error.message}`);
   }
 
   // ─── MetricSample ────────────────────────────────────────────────────────
@@ -110,7 +115,22 @@ export class DbWriter {
     const batch = this.pendingTicks;
     this.pendingTicks = [];
     try {
-      await this.store.insertMetricSamples(batch);
+      const r = await this.store.insertMetricSamples(batch);
+      if (!r.ok) {
+        // DB hồi phục → flush timer (30s) retry; đưa batch về đầu hàng đợi (B-5).
+        this.pendingTicks = [...batch, ...this.pendingTicks];
+        const cap = MAX_PENDING_TICKS * 2;
+        if (this.pendingTicks.length > cap) {
+          // DB chết lâu — vượt trần: drop batch cũ nhất + log cảnh báo.
+          // KHÔNG đếm dbWriteFail ở đây — store.query() đã đếm đúng 1 lần cho chính
+          // failure này (FIX-8, T-05): đếm thêm = double-count cùng 1 lỗi.
+          const dropped = this.pendingTicks.length - cap;
+          this.pendingTicks = this.pendingTicks.slice(this.pendingTicks.length - cap);
+          ltLog.warn(`[lt][db] flushTicks fail — drop ${dropped} tick cũ nhất (pending > ${cap}): ${r.error.message}`);
+        } else {
+          ltLog.warn(`[lt][db] flushTicks fail (${r.error.message}) — ${batch.length} tick chờ retry (${this.pendingTicks.length})`);
+        }
+      }
     } finally {
       this.flushing = false;
     }
@@ -132,7 +152,8 @@ export class DbWriter {
 
   async writeLog(level: string, msg: string): Promise<void> {
     if (!this.currentRunId) return;
-    await this.store.insertLogEvent(this.currentRunId, level, msg);
+    const r = await this.store.insertLogEvent(this.currentRunId, level, msg);
+    if (!r.ok) ltLog.warn(`[lt][db] insertLogEvent fail (runId=${this.currentRunId}): ${r.error.message}`);
   }
 
   // ─── Pool + PoolAccount ──────────────────────────────────────────────────
@@ -149,7 +170,7 @@ export class DbWriter {
     const now = Date.now();
     const sourceRunId = summary.poolSourceRunId ?? null;
 
-    await this.store.upsertPool({
+    const up = await this.store.upsertPool({
       poolId,
       gatewayUrl,
       targetUsers: config.targetUsers,
@@ -161,10 +182,11 @@ export class DbWriter {
       reusedByRunIdsJson: '[]',
       createdAt: now,
     });
+    if (!up.ok) ltLog.warn(`[lt][db] upsertPool fail (runId=${poolId}): ${up.error.message}`);
 
     const results = summary.results ?? [];
     if (results.length) {
-      await this.store.insertPoolAccounts(
+      const ins = await this.store.insertPoolAccounts(
         results.map((a) => ({
           poolId,
           email: a.email,
@@ -181,29 +203,34 @@ export class DbWriter {
           lastLoginAt: a.lastLoginAt,
         })),
       );
+      if (!ins.ok) ltLog.warn(`[lt][db] insertPoolAccounts fail (runId=${poolId}): ${ins.error.message}`);
     }
 
     // Reuse: cập nhật pool nguồn (reusedByRunIds + per-account login outcome)
     if (sourceRunId && sourceRunId !== poolId) {
       const src = await this.store.getPool(sourceRunId);
-      if (src) {
-        const reused = safeParseArray(src.reusedByRunIdsJson);
+      if (!src.ok) {
+        ltLog.warn(`[lt][db] getPool fail (${sourceRunId}): ${src.error.message}`);
+      } else if (src.rows[0]) {
+        const reused = safeParseArray(src.rows[0].reusedByRunIdsJson);
         if (!reused.includes(poolId)) reused.push(poolId);
-        await this.store.upsertPool({
-          ...fromPoolRow(src),
+        const up2 = await this.store.upsertPool({
+          ...fromPoolRow(src.rows[0]),
           loggedIn: summary.loggedIn,
           failed: summary.failed,
           errorsJson: JSON.stringify(summary.errors),
           reusedByRunIdsJson: JSON.stringify(reused),
         });
+        if (!up2.ok) ltLog.warn(`[lt][db] upsertPool fail (source=${sourceRunId}): ${up2.error.message}`);
       }
       for (const a of results) {
-        await this.store.updatePoolAccount(sourceRunId, a.email, {
+        const upd = await this.store.updatePoolAccount(sourceRunId, a.email, {
           status: a.status,
           lastErrorCode: a.lastErrorCode,
           lastUsedRunId: a.status === 'logged_in' ? config.runId : null,
           lastLoginAt: a.lastLoginAt,
         });
+        if (!upd.ok) ltLog.warn(`[lt][db] updatePoolAccount fail (${sourceRunId}/${a.email}): ${upd.error.message}`);
       }
     }
   }
@@ -237,12 +264,16 @@ export class DbWriter {
         const poolId = parsed.runId ?? f.replace(/^accounts-/, '').replace(/\.json$/, '');
         if (!poolId) continue;
         const existing = await this.store.getPool(poolId);
-        if (existing) {
+        if (!existing.ok) {
+          ltLog.warn(`[lt][db] getPool fail (${poolId}): ${existing.error.message}`);
+          continue;
+        }
+        if (existing.rows.length > 0) {
           ltLog.info(`[lt][db] pool ${poolId} đã import — bỏ qua (idempotent)`);
           continue;
         }
         const accounts = parsed.accounts ?? [];
-        await this.store.upsertPool({
+        const up = await this.store.upsertPool({
           poolId,
           gatewayUrl: normalizeUrl(parsed.gatewayUrl ?? ''),
           targetUsers: parsed.targetUsers ?? 0,
@@ -253,10 +284,12 @@ export class DbWriter {
           errorsJson: '{}',
           reusedByRunIdsJson: '[]',
           importedFromFile: filePath,
-          createdAt: fs.statSync(filePath).mtimeMs,
+          // D-5: mtimeMs là float — MUST trunc thành integer trước khi insert vào created_at BIGINT.
+          createdAt: toEpochMs(fs.statSync(filePath).mtimeMs) ?? 0,
         });
+        if (!up.ok) ltLog.warn(`[lt][db] upsertPool fail (${poolId}): ${up.error.message}`);
         if (accounts.length) {
-          await this.store.insertPoolAccounts(
+          const ins = await this.store.insertPoolAccounts(
             accounts.map((a) => ({
               poolId,
               email: a.email,
@@ -270,6 +303,7 @@ export class DbWriter {
               status: 'registered',
             })),
           );
+          if (!ins.ok) ltLog.warn(`[lt][db] insertPoolAccounts fail (${poolId}): ${ins.error.message}`);
         }
         ltLog.info(`[lt][db] imported pool ${poolId}: ${accounts.length} accounts (${filePath})`);
       } catch (err) {

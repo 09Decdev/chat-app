@@ -9,7 +9,7 @@
  * Driver: pg (Postgres). Cần instance postgres-loadtest (port 5439, db `loadtest`).
  *
  * Env:
- *   LOADTEST_DATABASE_URL     — connection string (mặc định postgresql://appuser:secret@localhost:5439/loadtest)
+ *   LOADTEST_DATABASE_URL     — connection string (bắt buộc — placeholder mặc định không kết nối được)
  *   LOADTEST_ADMIN_USERNAME   — username admin seed (mặc định admin)
  *   LOADTEST_ADMIN_EMAIL      — email admin seed (mặc định admin@loadtest.local)
  *   LOADTEST_ADMIN_PASSWORD   — password admin seed (mặc định: phát sinh ngẫu nhiên, in ra console)
@@ -17,15 +17,15 @@
  */
 
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { hashPassword } from './password';
+import { loadDotEnv } from '../config';
+import { redactUrl } from '../util';
+import { runMigrations } from './migrate';
 
 const LOADTEST_DIR = fileURLToPath(new URL('..', import.meta.url)); // …/loadtest/
-const DEFAULT_DB_URL = 'postgresql://appuser:secret@localhost:5439/loadtest';
-const SCHEMA_PATH = path.join(LOADTEST_DIR, 'db', 'schema.sql');
+const DEFAULT_DB_URL = 'postgresql://USER:PASS@HOST:PORT/DB'; // placeholder (C-2) — không có giá trị thật
 
 /** Cửa sổ giao diện DB tối thiểu — vừa đủ cho schema + seed + verify. */
 interface Db {
@@ -85,19 +85,33 @@ async function printVerify(db: Db): Promise<void> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const connectionString = process.env.LOADTEST_DATABASE_URL || DEFAULT_DB_URL;
+  // Đọc loadtest/.env (giống config.ts) — init.ts chạy standalone không qua getEnv().
+  const fromFile = loadDotEnv(LOADTEST_DIR);
+  const connectionString = process.env.LOADTEST_DATABASE_URL || fromFile.LOADTEST_DATABASE_URL || DEFAULT_DB_URL;
+  if (connectionString === DEFAULT_DB_URL) {
+    console.error(
+      '[lt][db] LOADTEST_DATABASE_URL chưa được cấu hình — đang dùng placeholder (không kết nối được). ' +
+        'Set giá trị thật, VD: postgresql://USER:PASS@HOST:PORT/DB',
+    );
+    process.exit(1);
+  }
   const seedAdmin = args.includes('--seed-admin') || process.env.LOADTEST_SEED_ADMIN === '1';
   const verifyOnly = args.includes('--verify');
 
   const db = await openDb(connectionString);
   try {
     if (!verifyOnly) {
-      const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
-      await db.exec(schema);
-      await db.exec(`INSERT INTO schema_version (version) VALUES (1) ON CONFLICT (version) DO NOTHING`);
-      console.log(`[lt][db] Schema applied: ${connectionString}`);
+      // T-04: dùng migration runner thay vì đọc schema.sql trực tiếp.
+      const migrationClient = {
+        query: async (sql: string, params?: unknown[]) => {
+          const rows = await db.query(sql, params);
+          return { rows };
+        },
+      };
+      await runMigrations(migrationClient, { scope: 'all' });
+      console.log(`[lt][db] Schema applied: ${redactUrl(connectionString)}`);
     } else {
-      console.log(`[lt][db] Verify mode — không tạo schema: ${connectionString}`);
+      console.log(`[lt][db] Verify mode — không tạo schema: ${redactUrl(connectionString)}`);
     }
 
     if (seedAdmin) {
@@ -116,7 +130,9 @@ async function main(): Promise<void> {
           [username, email, hashPassword(password), 'LoadTest Admin', now],
         );
         console.log(`[lt][db] Seeded admin: username=${username} email=${email}`);
-        console.log(`[lt][db] PASSWORD (dev local only — lưu ở nơi an toàn): ${password}`);
+        console.log(
+          '[lt][db] Admin password KHÔNG in ra — set LOADTEST_ADMIN_PASSWORD trong loadtest/.env trước khi chạy --seed-admin để dùng lại (không bao giờ log plaintext).',
+        );
       } else {
         console.log(`[lt][db] Admin ${username} hoặc email ${email} đã tồn tại — bỏ qua seed.`);
       }

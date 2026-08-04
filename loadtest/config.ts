@@ -12,10 +12,24 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ActionProfile, RunConfig, StartRunRequest } from './types';
-import { normalizeUrl, parseBool, ltLog } from './util';
+import { normalizeUrl, parseBool, ltLog, redactUrl } from './util';
 
 /** loadtest/ dir (ESM-safe). */
 export const LOADTEST_DIR = fileURLToPath(new URL('.', import.meta.url));
+
+/** Placeholder DB URL (C-2) — thay credential mặc định đã bị xoá; validateEnv fail-fast khi gặp. */
+export const PLACEHOLDER_DB_URL = 'postgresql://USER:PASS@HOST:PORT/DB';
+/** Default credential cũ (đã bị xoá khỏi code) — validateEnv vẫn chặn đúng chuỗi này. */
+export const DEFAULT_DEV_DB_URL = 'postgresql://appuser:secret@localhost:5439/loadtest';
+
+/**
+ * Chặn đúng 2 chuỗi known-bad (T-03): placeholder + default credential cũ.
+ * KHÔNG dùng substring match `appuser`/`:secret@` — sẽ false-positive lên URL
+ * dev hợp lệ có username `appuser` + password thật (loadtest/.env).
+ */
+export function isKnownBadDbUrl(url: string): boolean {
+  return url === PLACEHOLDER_DB_URL || url === DEFAULT_DEV_DB_URL;
+}
 
 export interface LoadTestEnv {
   port: number;
@@ -24,6 +38,8 @@ export interface LoadTestEnv {
   allowlist: string[]; // gateway URLs được phép chạy (normalized http)
   gatewayUrl: string;
   otpSecret: string;
+  /** Secret ký session token (auth.ts loadAuthSecret) — raw env, rỗng = fallback tự sinh (dev-only). */
+  authSecret: string;
   redisUrl: string;
   maxTarget: number;
   maxDurationMin: number;
@@ -40,9 +56,11 @@ export interface LoadTestEnv {
   fixturePostIds: string[];
   /** Tên phòng chat test (matching không cần — server tự tạo). */
   debug: boolean;
+  /** Bắt buộc DB kết nối để server start (Q-2) — mặc định true. */
+  dbRequired: boolean;
 }
 
-function loadDotEnv(dir: string): Record<string, string> {
+export function loadDotEnv(dir: string): Record<string, string> {
   const out: Record<string, string> = {};
   const file = path.join(dir, '.env');
   if (!fs.existsSync(file)) return out;
@@ -67,10 +85,43 @@ function loadDotEnv(dir: string): Record<string, string> {
 
 let cachedEnv: LoadTestEnv | null = null;
 
+/** C-4: in nguồn từng key (process.env / .env file / override) khi LOADTEST_DEBUG. */
+function logEnvSources(
+  processEnv: Record<string, string | undefined>,
+  fromFile: Record<string, string>,
+  overrides: Record<string, string>,
+): void {
+  const keys = new Set<string>();
+  for (const k of Object.keys(processEnv)) if (k.startsWith('LOADTEST_')) keys.add(k);
+  for (const k of Object.keys(fromFile)) keys.add(k);
+  for (const k of Object.keys(overrides)) keys.add(k);
+  const sorted = [...keys].sort();
+  for (const key of sorted) {
+    let source: string;
+    if (key in overrides) source = 'override';
+    else if (key in processEnv) source = 'process.env';
+    else if (key in fromFile) source = '.env file';
+    else source = 'default';
+    ltLog.info(`[env] ${key} ← ${source}`);
+  }
+}
+
+/**
+ * Merge 3 nguồn env (T-03): process.env (cao nhất) > .env file > defaults.
+ * `process.env` phải thắng .env file — shell env có thể override file.
+ */
+export function mergeEnvSources(
+  processEnv: Record<string, string | undefined>,
+  fromFile: Record<string, string>,
+  overrides: Record<string, string>,
+): Record<string, string | undefined> {
+  return { ...fromFile, ...processEnv, ...overrides };
+}
+
 export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
   if (cachedEnv && Object.keys(overrides).length === 0) return cachedEnv;
   const fromFile = loadDotEnv(LOADTEST_DIR);
-  const env = { ...process.env, ...fromFile, ...overrides };
+  const env = mergeEnvSources(process.env, fromFile, overrides);
 
   const num = (key: string, def: number): number => {
     const v = env[key];
@@ -82,9 +133,13 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
   const allowlistRaw = (env.LOADTEST_ALLOWLIST ?? '').trim();
   const allowlist = allowlistRaw
     ? allowlistRaw.split(',').map((s) => normalizeUrl(s)).filter(Boolean)
-    : [normalizeUrl('http://localhost:3000')]; // dev-only mặc định
+    : [normalizeUrl('http://localhost:3000')]; // dev-only mặc định (SEC-7): production phải set LOADTEST_ALLOWLIST tường minh
 
   const configuredWorkers = num('LOADTEST_WORKERS', 0);
+  const debug = parseBool(env.LOADTEST_DEBUG);
+  const dbRequired = parseBool(env.LOADTEST_DB_REQUIRED, true); // Q-2: DB luôn bắt buộc
+
+  if (debug) logEnvSources(process.env, fromFile, overrides);
 
   const cfg: LoadTestEnv = {
     port: num('LOADTEST_PORT', 3401),
@@ -92,6 +147,7 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
     allowlist,
     gatewayUrl: normalizeUrl(env.LOADTEST_GATEWAY_URL || 'http://localhost:3000'),
     otpSecret: env.LOADTEST_OTP_SECRET || '',
+    authSecret: env.LOADTEST_AUTH_SECRET || '',
     redisUrl: env.LOADTEST_REDIS_URL || 'redis://localhost:6379',
     maxTarget: num('LOADTEST_MAX_TARGET', 200_000),
     maxDurationMin: num('LOADTEST_MAX_DURATION_MIN', 60),
@@ -101,17 +157,75 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
     maxPendingOutbox: num('LOADTEST_MAX_PENDING_OUTBOX', 1000),
     dataDir: env.LOADTEST_DATA_DIR || './loadtest/data',
     reportsDir: env.LOADTEST_REPORTS_DIR || './docs/loadtest-reports',
-    databaseUrl: env.LOADTEST_DATABASE_URL || 'postgresql://appuser:secret@localhost:5439/loadtest',
+    databaseUrl: env.LOADTEST_DATABASE_URL || PLACEHOLDER_DB_URL,
     scrapeIntervalMs: num('LOADTEST_SCRAPE_METRICS_INTERVAL_MS', 5000),
     registerRamp: num('LOADTEST_REGISTER_RAMP', 100),
     fixturePostIds: (env.LOADTEST_FIXTURE_POST_IDS || '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
-    debug: parseBool(env.LOADTEST_DEBUG),
+    debug,
+    dbRequired,
   };
   cachedEnv = cfg;
   return cfg;
+}
+
+// ─── Env fail-fast validation (T-03) ────────────────────────────────────────
+
+export interface EnvProblem {
+  key: string;
+  message: string;
+  severity: 'error' | 'warning';
+}
+
+/**
+ * Validate env REQUIRED keys (T-03, Q-2). KHÔNG gọi trong getEnv() — worker.ts:11
+ * gọi getEnv() trong child process không có DB/OTP; validate chỉ ở server.ts startup.
+ * Strict khi: opts.production (NODE_ENV=production) HOẶC env.dbRequired (mặc định true).
+ * Trả về danh sách vấn đề — caller (server.ts) log + exit khi có severity='error'.
+ */
+export function validateEnv(env: LoadTestEnv, opts: { production?: boolean } = {}): EnvProblem[] {
+  const production = opts.production ?? process.env.NODE_ENV === 'production';
+  const problems: EnvProblem[] = [];
+  const err = (key: string, message: string) => problems.push({ key, message, severity: 'error' });
+  const warn = (key: string, message: string) => problems.push({ key, message, severity: 'warning' });
+
+  // LOADTEST_DATABASE_URL — bắt buộc khi dbRequired hoặc production (Q-2)
+  if (env.dbRequired || production) {
+    if (!env.databaseUrl || isKnownBadDbUrl(env.databaseUrl)) {
+      err(
+        'LOADTEST_DATABASE_URL',
+        'bắt buộc cấu hình thật khi LOADTEST_DB_REQUIRED=true (hoặc production) — đang thiếu/placeholder/default credential',
+      );
+    }
+  }
+  if (env.databaseUrl && !/^postgres(ql)?:\/\//.test(env.databaseUrl)) {
+    err('LOADTEST_DATABASE_URL', `phải bắt đầu bằng postgres:// hoặc postgresql:// (hiện: ${redactUrl(env.databaseUrl)}...)`);
+  }
+
+  // LOADTEST_OTP_SECRET — ≥ 32 ký tự (seed OTP register — E1)
+  if (env.otpSecret && env.otpSecret.length < 32) {
+    err('LOADTEST_OTP_SECRET', `phải ≥ 32 ký tự (hiện ${env.otpSecret.length})`);
+  } else if (!env.otpSecret) {
+    if (production) err('LOADTEST_OTP_SECRET', 'bắt buộc trong production (register sẽ fail — E1)');
+    else warn('LOADTEST_OTP_SECRET', 'thiếu — register sẽ fail (cần set trong loadtest/.env)');
+  }
+
+  // LOADTEST_AUTH_SECRET — ≥ 32 ký tự; production bắt buộc (auth.ts fallback tự sinh chỉ dev)
+  if (env.authSecret && env.authSecret.length < 32) {
+    err('LOADTEST_AUTH_SECRET', `phải ≥ 32 ký tự (hiện ${env.authSecret.length})`);
+  } else if (!env.authSecret) {
+    if (production) err('LOADTEST_AUTH_SECRET', 'bắt buộc trong production (auth.ts fallback tự sinh chỉ dành cho dev)');
+    else warn('LOADTEST_AUTH_SECRET', 'thiếu — sẽ dùng fallback tự sinh (dev-only)');
+  }
+
+  // LOADTEST_REDIS_URL — nếu set phải đúng prefix
+  if (env.redisUrl && !/^redis(s)?:\/\//.test(env.redisUrl)) {
+    err('LOADTEST_REDIS_URL', `phải bắt đầu bằng redis:// hoặc rediss:// (hiện: ${redactUrl(env.redisUrl)}...)`);
+  }
+
+  return problems;
 }
 
 // ─── Validation ─────────────────────────────────────────────────────────────
@@ -216,12 +330,14 @@ export function resolveWorkerCount(targetUsers: number, env: LoadTestEnv): numbe
   return Math.min(Math.max(1, Math.min(cpus - 1 || 1, byTarget)), 32);
 }
 
+// S-9/B-4: seed pid + counter để 2 run sau restart không trùng id (runSeq reset 0 mỗi restart).
+const pidPart = (process.pid % 46656).toString(36).padStart(3, '0');
 let runSeq = 0;
 
 export function newRunId(): string {
-  runSeq += 1;
-  const ts = Date.now().toString(36).slice(-6);
-  return `lt${ts}${runSeq.toString(36).padStart(2, '0')}`;
+  runSeq = (runSeq + 1) % 1296;
+  const ts = Date.now().toString(36); // toàn bộ timestamp — không slice (B-4: slice(-6) wrap 25.2 ngày)
+  return `lt${ts}${pidPart}${runSeq.toString(36).padStart(2, '0')}`;
 }
 
 /** Resolve RunConfig từ StartRunRequest (đã validate). */

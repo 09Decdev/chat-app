@@ -312,9 +312,10 @@ export class ApiServer {
       if (method === 'GET' && p === '/api/loadtest/pools') {
         if (this.store) {
           const pools = await this.store.listPools();
-          if (pools.length) {
+          if (!pools.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+          if (pools.rows.length) {
             return this.ok(res, {
-              pools: pools.map((pl) => ({
+              pools: pools.rows.map((pl) => ({
                 runId: pl.poolId,
                 targetUsers: pl.targetUsers,
                 gatewayUrl: pl.gatewayUrl,
@@ -339,7 +340,8 @@ export class ApiServer {
         const status = url.searchParams.get('status') ?? undefined;
         const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? 500)), 2000);
         const rows = await this.store.listRuns({ status, limit });
-        return this.ok(res, { runs: rows.map(toRunSummary), total: rows.length });
+        if (!rows.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+        return this.ok(res, { runs: rows.rows.map(toRunSummary), total: rows.rows.length });
       }
 
       if (method === 'GET' && isRunPath(p, '/metrics')) {
@@ -347,8 +349,11 @@ export class ApiServer {
         const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? 3600)), 20000);
         const offset = Math.max(0, Number(url.searchParams.get('offset') ?? 0));
         const rows = await this.store.listMetricSamples(runId, { limit, offset });
+        if (!rows.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+        // D-6: countMetricSamples KHÔNG trả 0 giả khi DB lỗi — check ok trước khi cộng total.
         const total = await this.store.countMetricSamples(runId);
-        return this.ok(res, { runId, ticks: rows.map(toMetricTick), total });
+        if (!total.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+        return this.ok(res, { runId, ticks: rows.rows.map(toMetricTick), total: total.rows[0]?.n ?? 0 });
       }
 
       if (method === 'GET' && isRunPath(p, '/logs')) {
@@ -357,20 +362,23 @@ export class ApiServer {
         const offset = Math.max(0, Number(url.searchParams.get('offset') ?? 0));
         const level = url.searchParams.get('level') ?? undefined;
         const rows = await this.store.listLogEvents(runId, { limit, offset, level });
-        return this.ok(res, { runId, logs: rows, total: rows.length });
+        if (!rows.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+        return this.ok(res, { runId, logs: rows.rows, total: rows.rows.length });
       }
 
       if (method === 'GET' && isRunPath(p, '')) {
         const runId = runIdFromPath(p, '');
-        const row = await this.store.getRun(runId);
-        if (!row) return this.fail(res, 404, `Run ${runId} không tồn tại`);
-        return this.ok(res, toRunDetail(row));
+        const r = await this.store.getRun(runId);
+        if (!r.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+        if (r.rows.length === 0) return this.fail(res, 404, `Run ${runId} không tồn tại`);
+        return this.ok(res, toRunDetail(r.rows[0]));
       }
 
       if (method === 'DELETE' && isRunPath(p, '')) {
         const runId = runIdFromPath(p, '');
         const deleted = await this.store.deleteRun(runId);
-        if (!deleted) return this.fail(res, 404, `Run ${runId} không tồn tại`);
+        if (!deleted.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+        if (deleted.rows.length === 0) return this.fail(res, 404, `Run ${runId} không tồn tại`);
         return this.ok(res, { deleted: true, runId });
       }
 
@@ -394,7 +402,13 @@ export class ApiServer {
       const pwErr = validatePasswordStrength(password);
       if (pwErr) return this.fail(res, 400, pwErr);
       if (!this.store) return this.fail(res, 503, 'Database chưa được kết nối');
-      const admin = await this.store.createAdmin({ username, email, passwordHash: hashPassword(password) });
+      const r = await this.store.createAdmin({ username, email, passwordHash: hashPassword(password) });
+      if (!r.ok) {
+        // 23505 = unique violation (trùng username/email) → 409; còn lại là DB fail → 503.
+        if (r.error.code === '23505') return this.fail(res, 409, 'username hoặc email đã tồn tại');
+        return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+      }
+      const admin = r.rows[0];
       if (!admin) return this.fail(res, 409, 'username hoặc email đã tồn tại');
       ltLog.info(`[lt][auth] admin registered: ${username} (${email})`);
       return this.ok(res, { id: admin.id, username: admin.username, email: admin.email, displayName: admin.displayName, role: admin.role });
@@ -406,7 +420,9 @@ export class ApiServer {
       const password = String(body.password ?? '');
       if (!identifier || !password) return this.fail(res, 400, 'username/email và password bắt buộc');
       if (!this.store) return this.fail(res, 503, 'Database chưa được kết nối');
-      const admin = await this.store.findAdminByLogin(identifier);
+      const r = await this.store.findAdminByLogin(identifier);
+      if (!r.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+      const admin = r.rows[0];
       if (!admin || !admin.isActive || !verifyPassword(password, admin.passwordHash)) {
         // Không lộ thông tin account tồn tại hay không (PRD US-2)
         return this.fail(res, 401, 'Sai username/email hoặc mật khẩu');
@@ -430,7 +446,9 @@ export class ApiServer {
       const auth = this.requireAuth(req);
       if (!auth.ok) return this.fail(res, 401, auth.message);
       if (!this.store) return this.fail(res, 503, 'Database chưa được kết nối');
-      const admin = await this.store.getAdminById(auth.user.id);
+      const r = await this.store.getAdminById(auth.user.id);
+      if (!r.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+      const admin = r.rows[0];
       if (!admin) return this.fail(res, 401, 'Tài khoản không tồn tại');
       return this.ok(res, { id: admin.id, username: admin.username, email: admin.email, displayName: admin.displayName, role: admin.role });
     }

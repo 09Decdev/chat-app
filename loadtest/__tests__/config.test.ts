@@ -1,7 +1,18 @@
-import { describe, it, expect } from 'vitest';
-import { getEnv, validateRunRequest, buildRunConfig, resolveWorkerCount, DEFAULT_PROFILE } from '../config';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  getEnv,
+  validateEnv,
+  newRunId,
+  validateRunRequest,
+  buildRunConfig,
+  resolveWorkerCount,
+  DEFAULT_PROFILE,
+  PLACEHOLDER_DB_URL,
+  DEFAULT_DEV_DB_URL,
+  mergeEnvSources,
+} from '../config';
 import type { StartRunRequest } from '../types';
-import { normalizeUrl } from '../util';
+import { normalizeUrl, redactUrl } from '../util';
 
 function baseReq(over: Partial<StartRunRequest> = {}): StartRunRequest {
   return {
@@ -90,9 +101,135 @@ describe('config — buildRunConfig', () => {
   });
 });
 
+describe('config — validateEnv (T-03 fail-fast)', () => {
+  it('production + thiếu key → errors (DB required, OTP, AUTH)', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'false',
+      LOADTEST_DATABASE_URL: PLACEHOLDER_DB_URL,
+      LOADTEST_OTP_SECRET: '',
+      LOADTEST_AUTH_SECRET: '',
+    });
+    const errs = validateEnv(env, { production: true }).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_DATABASE_URL')).toBe(true);
+    expect(errs.some((p) => p.key === 'LOADTEST_OTP_SECRET')).toBe(true);
+    expect(errs.some((p) => p.key === 'LOADTEST_AUTH_SECRET')).toBe(true);
+  });
+
+  it('dev + dbRequired=false + thiếu key → không error (chỉ warning)', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'false',
+      LOADTEST_DATABASE_URL: PLACEHOLDER_DB_URL,
+      LOADTEST_OTP_SECRET: '',
+      LOADTEST_AUTH_SECRET: '',
+    });
+    const problems = validateEnv(env, { production: false });
+    expect(problems.filter((p) => p.severity === 'error')).toHaveLength(0);
+  });
+
+  it('dbRequired=true (mặc định) + placeholder DB URL → error', () => {
+    const env = getEnv({ LOADTEST_DATABASE_URL: PLACEHOLDER_DB_URL });
+    const errs = validateEnv(env).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_DATABASE_URL')).toBe(true);
+  });
+
+  it('sai prefix DB URL → error', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'true',
+      LOADTEST_DATABASE_URL: 'mysql://foo:bar@localhost/db',
+    });
+    const errs = validateEnv(env).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_DATABASE_URL')).toBe(true);
+  });
+
+  it('dev DB URL với username appuser + password thật → PASS (không false-positive — T-03)', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'true',
+      LOADTEST_DATABASE_URL: 'postgresql://appuser:s3cret-pw-123@localhost:5439/loadtest',
+    });
+    const errs = validateEnv(env).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_DATABASE_URL')).toBe(false);
+  });
+
+  it('default credential cũ (appuser:secret) → error (T-03)', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'true',
+      LOADTEST_DATABASE_URL: DEFAULT_DEV_DB_URL,
+    });
+    const errs = validateEnv(env).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_DATABASE_URL')).toBe(true);
+  });
+
+  it('REDIS_URL sai prefix → error', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'false',
+      LOADTEST_DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      LOADTEST_REDIS_URL: 'http://localhost:6379',
+    });
+    const errs = validateEnv(env, { production: false }).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_REDIS_URL')).toBe(true);
+  });
+
+  it('OTP/AUTH quá ngắn (< 32) → error', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'false',
+      LOADTEST_DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      LOADTEST_OTP_SECRET: 'short',
+      LOADTEST_AUTH_SECRET: 'short',
+    });
+    const errs = validateEnv(env, { production: false }).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_OTP_SECRET')).toBe(true);
+    expect(errs.some((p) => p.key === 'LOADTEST_AUTH_SECRET')).toBe(true);
+  });
+});
+
+describe('config — newRunId (S-9/B-4 collision fix)', () => {
+  it('2 lần gọi liên tiếp → id khác nhau', () => {
+    expect(newRunId()).not.toBe(newRunId());
+  });
+
+  it('sau "restart" (module reload, runSeq reset) → id khác id cũ', async () => {
+    const first = newRunId();
+    vi.resetModules();
+    const mod = await import('../config');
+    const second = mod.newRunId();
+    expect(second).not.toBe(first);
+    expect(second).toMatch(/^lt[a-z0-9]{2,24}$/i);
+  });
+});
+
 describe('util — normalizeUrl', () => {
   it('ws→http + bỏ trailing slash', () => {
     expect(normalizeUrl('ws://localhost:3000/')).toBe('http://localhost:3000');
     expect(normalizeUrl('https://x.com')).toBe('https://x.com');
+  });
+});
+
+describe('util — redactUrl (T-03: không lộ password trong log/error)', () => {
+  it('mask password trong DB URL có user:pass', () => {
+    expect(redactUrl('postgresql://appuser:s3cret-pw@localhost:5439/loadtest')).toBe(
+      'postgresql://appuser:***@localhost:5439/loadtest',
+    );
+  });
+  it('URL không password → giữ nguyên', () => {
+    expect(redactUrl('redis://localhost:6379')).toBe('redis://localhost:6379');
+  });
+  it('placeholder URL (port không phải số — URL không parse) → fallback regex vẫn mask', () => {
+    expect(redactUrl(PLACEHOLDER_DB_URL)).toBe('postgresql://USER:***@HOST:PORT/DB');
+  });
+});
+
+describe('config — env precedence (T-03: process.env > .env file > defaults)', () => {
+  it('process.env thắng .env file', () => {
+    const merged = mergeEnvSources(
+      { LOADTEST_PORT: '7000' },
+      { LOADTEST_PORT: '3401', LOADTEST_MAX_TARGET: '50000' },
+      {},
+    );
+    expect(merged.LOADTEST_PORT).toBe('7000'); // shell env override được .env
+    expect(merged.LOADTEST_MAX_TARGET).toBe('50000'); // .env file cung cấp giá trị
+  });
+  it('overrides (getEnv arg) thắng process.env', () => {
+    const merged = mergeEnvSources({ LOADTEST_PORT: '7000' }, { LOADTEST_PORT: '3401' }, { LOADTEST_PORT: '8000' });
+    expect(merged.LOADTEST_PORT).toBe('8000');
   });
 });

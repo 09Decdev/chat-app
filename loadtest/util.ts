@@ -170,6 +170,20 @@ export function normalizeUrl(url: string): string {
   return u;
 }
 
+/**
+ * Redact password trong URL để log/error an toàn (T-03): `user:pass@host` → `user:***@host`.
+ * URL không có password → giữ nguyên. Không parse được → fallback regex vẫn mask.
+ */
+export function redactUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return url.replace(/^([^:]+:\/\/[^:]+):[^@]*@/, '$1:***@');
+  }
+}
+
 export function parseBool(v: string | undefined, def = false): boolean {
   if (v === undefined) return def;
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());

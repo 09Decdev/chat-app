@@ -12,6 +12,10 @@
     "loadtest:server": "tsx loadtest/server.ts",
     "loadtest:typecheck": "tsc --noEmit -p loadtest/tsconfig.json",
     "loadtest:test": "vitest run --config loadtest/vitest.config.ts",
+    "loadtest:db:up": "tsx loadtest/db/migrate.ts up",
+    "loadtest:db:down": "tsx loadtest/db/migrate.ts down",
+    "loadtest:db:status": "tsx loadtest/db/migrate.ts status",
+    "loadtest:db:cleanup": "tsx loadtest/db/cleanup.ts",
     "secret:scan": "gitleaks detect --source . --no-banner --log-opts=--all && gitleaks detect --source . --no-banner --no-git",
     "secret:scan:tree": "gitleaks detect --source . --no-banner --no-git"
   },

@@ -11,10 +11,17 @@ import { getEnv } from '../config';
 import { LoadTestCoordinator } from '../coordinator';
 import { ApiServer } from '../api-server';
 import { LoadtestStore } from '../db/store';
+import type { QueryResult } from '../db/result';
 
 const TEST_DB_URL = process.env.LOADTEST_TEST_API_DATABASE_URL || 'postgresql://appuser:secret@localhost:5439/loadtest_test_api';
 const AUTH_SECRET = 'test-secret-for-api-tests';
 const MACHINE_ID = os.hostname();
+
+/** Unwrap QueryResult — throw nếu DB fail (test kỳ vọng thành công). */
+function expectOk<T>(r: QueryResult<T>): T[] {
+  if (!r.ok) throw new Error(`DB error: ${r.error.message}`);
+  return r.rows;
+}
 
 let dbAvailable = false;
 try {
@@ -97,7 +104,7 @@ describeDb('api-server — admin auth + gate + history', () => {
     expect(r.body.data.passwordHash).toBeUndefined();
     adminId = r.body.data.id;
     // DB lưu scrypt hash, không plaintext
-    const row = await store.findAdminByLogin('admin1');
+    const row = expectOk(await store.findAdminByLogin('admin1'))[0];
     expect(row?.passwordHash).toMatch(/^scrypt\$/);
   });
 
@@ -108,7 +115,7 @@ describeDb('api-server — admin auth + gate + history', () => {
     expect(r.status).toBe(409);
     expect(r.body.success).toBe(false);
     expect(r.body.statusCode).toBe(409);
-    const rows = await store.listRuns();
+    const rows = expectOk(await store.listRuns());
     expect(rows).toHaveLength(0); // không tạo gì
   });
 
@@ -185,18 +192,18 @@ describeDb('api-server — admin auth + gate + history', () => {
   });
 
   it('GET /runs liệt kê run từ DB (sau restart) + filter status', async () => {
-    await store.insertRun({
+    expectOk(await store.insertRun({
       runId: 'lt-hist1', status: 'running', machineId: MACHINE_ID, startAt: 1000,
       gatewayUrl: 'http://localhost:3000', targetUsers: 1000, workerCount: 2,
       configJson: JSON.stringify({ runId: 'lt-hist1', targetUsers: 1000 }),
-    });
-    await store.finalizeRun('lt-hist1', {
+    }));
+    expectOk(await store.finalizeRun('lt-hist1', {
       status: 'finished',
       stopReason: 'duration hết',
       summaryJson: JSON.stringify({ runId: 'lt-hist1', status: 'finished', summary: { successRate: 99, echoRate: 95 } }),
       endAt: 5000,
       durationSec: 4,
-    });
+    }));
     const r = await request('GET', '/api/loadtest/runs', { token });
     expect(r.status).toBe(200);
     expect(r.body.data.runs).toHaveLength(1);
@@ -219,11 +226,11 @@ describeDb('api-server — admin auth + gate + history', () => {
   });
 
   it('GET /runs/{id}/metrics + /logs đọc từ DB', async () => {
-    await store.insertMetricSamples([
+    expectOk(await store.insertMetricSamples([
       { runId: 'lt-hist1', ts: 1000, phase: 'steady', elapsedSec: 1, usersCreated: 10, usersConnected: 10, usersActive: 9, usersQueued: 0, usersInRoom: 6, actionsTotal: 100, successTotal: 95, failTotal: 5, echoOk: 90, echoSent: 100, queueCount: 2, roomCount: 1, droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 3, successRate: 95, echoRate: 90, actionsPerSecJson: '{"chat":10}', latencyJson: '{"p50":10,"p95":20,"p99":30}', errorsJson: '[{"code":"HTTP_429","count":5}]', serverJson: '{}', workersJson: '{}' },
-    ]);
-    await store.insertLogEvent('lt-hist1', 'info', 'start run', 100);
-    await store.insertLogEvent('lt-hist1', 'error', 'boom', 200);
+    ]));
+    expectOk(await store.insertLogEvent('lt-hist1', 'info', 'start run', 100));
+    expectOk(await store.insertLogEvent('lt-hist1', 'error', 'boom', 200));
 
     const m = await request('GET', '/api/loadtest/runs/lt-hist1/metrics', { token });
     expect(m.status).toBe(200);
@@ -251,5 +258,56 @@ describeDb('api-server — admin auth + gate + history', () => {
     const r = await request('GET', '/api/loadtest/status', { token: expired });
     expect(r.status).toBe(401);
     expect(r.body.message).toContain('hết hạn');
+  });
+});
+
+// ─── Regression T-05 — DB down → history 503 (không 0 giả / [] im lặng) ─────
+// KHÔNG cần Postgres lên: store disabled → mọi history route phải trả 503 rõ ràng.
+
+describe('api-server — DB down → history 503 (không 0 giả)', () => {
+  async function startDbDownApi(): Promise<{ api: ApiServer; token: string }> {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-api-dbdown-'));
+    const env = getEnv({
+      LOADTEST_PORT: '0',
+      LOADTEST_HOST: '127.0.0.1',
+      LOADTEST_DATA_DIR: tmpDir,
+      LOADTEST_DATABASE_URL: TEST_DB_URL,
+    });
+    const badStore = new LoadtestStore(TEST_DB_URL); // không connect → enabled=false
+    const coordinator = new LoadTestCoordinator(env);
+    const api = new ApiServer(env, coordinator, badStore, AUTH_SECRET);
+    await api.listen();
+    const { createSessionToken } = await import('../auth');
+    const token = createSessionToken({ id: 1, username: 'admin1' }, AUTH_SECRET).token;
+    return { api, token };
+  }
+
+  it('GET /runs/{id}/metrics → 503, KHÔNG trả total 0 giả', async () => {
+    const { api, token } = await startDbDownApi();
+    try {
+      const res = await fetch(`http://127.0.0.1:${api.port}/api/loadtest/runs/lt-any/metrics`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = (await res.json()) as { success?: boolean; data?: unknown };
+      expect(res.status).toBe(503);
+      expect(body.success).toBe(false);
+      expect(body.data).toBeUndefined(); // countMetricSamples lỗi → KHÔNG total 0
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('GET /runs → 503, không [] im lặng', async () => {
+    const { api, token } = await startDbDownApi();
+    try {
+      const res = await fetch(`http://127.0.0.1:${api.port}/api/loadtest/runs`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = (await res.json()) as { success?: boolean };
+      expect(res.status).toBe(503);
+      expect(body.success).toBe(false);
+    } finally {
+      await api.close();
+    }
   });
 });

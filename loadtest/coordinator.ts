@@ -18,7 +18,7 @@ import { ActionHistograms } from './metrics';
 import { RestDriver } from './rest-actions';
 import { buildReport } from './report';
 import { saveReportFiles } from './report';
-import { ltLog, normalizeUrl, setVerbose } from './util';
+import { ltLog, normalizeUrl, setVerbose, redactUrl } from './util';
 import type { DbWriter } from './db/writer';
 
 const TICK_HISTORY_LIMIT = 3600; // 1h @1s (UI-SPEC §4.1)
@@ -154,7 +154,7 @@ export class LoadTestCoordinator {
     try {
       this.redis = createRedis(this.env);
       await this.redis.connect().catch(() => {
-        throw new Error(`Không kết nối được Redis test: ${this.env.redisUrl}`);
+        throw new Error(`Không kết nối được Redis test: ${redactUrl(this.env.redisUrl)}`);
       });
       if (!this.env.otpSecret) {
         throw new Error('Thiếu LOADTEST_OTP_SECRET — không thể OTP-Seed register (AF-1). Kiểm tra loadtest/.env');
