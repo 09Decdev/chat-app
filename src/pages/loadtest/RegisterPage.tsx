@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Loader2, Lock, Mail, ShieldCheck, UserRound } from 'lucide-react';
 import { Card } from '@/components/ui/card';
@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { useLoadtestAuthStore } from '@/store/loadtest-auth.store';
+import { loadtestApi } from '@/lib/loadtest-api';
 import { routes } from '@/lib/env';
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -34,8 +35,49 @@ export default function LoadtestRegisterPage() {
   const [confirm, setConfirm] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // D-17: allowRegister=false → ẩn route (render notice, hết dead-end 403). Default true.
+  const [allowRegister, setAllowRegister] = useState(true);
+  const [configLoaded, setConfigLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadtestApi
+      .getConfig()
+      .then((c) => {
+        if (!cancelled) {
+          setAllowRegister(c.allowRegister !== false);
+          setConfigLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setConfigLoaded(true); // config lỗi → không chặn (403 fallback vẫn chạy)
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (isAuthenticated) return <Navigate to={routes.loadtest} replace />;
+
+  // Register gate đóng — thay vì form (sẽ 403 mãi), hiện notice + đường về login.
+  if (configLoaded && !allowRegister) {
+    return (
+      <div className="flex min-h-full items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <Card className="p-6">
+            <AlertBanner
+              variant="warning"
+              title="Đăng ký đã bị tắt"
+              description="Server đặt LOADTEST_ALLOW_REGISTER=false. Hãy đăng nhập bằng tài khoản admin có sẵn."
+            />
+            <Button variant="outline" className="mt-4 w-full min-h-12" onClick={() => navigate(routes.loadtestLogin)}>
+              <ArrowLeft className="h-4 w-4" aria-hidden /> Về trang đăng nhập
+            </Button>
+          </Card>
+        </div>
+      </div>
+    );
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();

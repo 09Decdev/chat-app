@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { NavLink, Outlet, Link, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import {
   Activity,
   FileBarChart,
@@ -23,6 +24,8 @@ import { TERMINAL_PHASES, ACTIVE_PHASES } from '@/types/loadtest';
 import { RunStateBadge } from '@/components/loadtest/run-state-badge';
 import { StopRunConfirmDialog } from '@/components/loadtest/confirm-dialogs';
 import { LogsDialog } from '@/components/loadtest/logs-dialog';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
+import SessionExpiryBanner from '@/components/loadtest/session-expiry-banner';
 
 // ─── Sticky header run (UX-FLOW nav #2): truy cập được từ mọi màn khi run chạy ──
 
@@ -36,6 +39,14 @@ function RunStickyHeader() {
   const [stopOpen, setStopOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [paused, setPaused] = useState(false);
+  // 429 rate-limit cooldown (UI-SPEC §5.3) — sticky stop lỗi → toast + disable + countdown.
+  const [stopCooldown, setStopCooldown] = useState(0);
+
+  useEffect(() => {
+    if (stopCooldown <= 0) return;
+    const t = window.setInterval(() => setStopCooldown((s) => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => window.clearInterval(t);
+  }, [stopCooldown > 0]);
 
   if (phase === 'idle') return null;
   const frozen = TERMINAL_PHASES.includes(phase);
@@ -43,7 +54,13 @@ function RunStickyHeader() {
   const onConfirmStop = async () => {
     setStopOpen(false);
     const res = await stopRun(false);
-    if (!res.ok) console.warn('stop fail', res.error);
+    // F-3: stop lỗi KHÔNG nuốt im lặng — toast (có retryAfterSec nếu 429).
+    if (!res.ok) {
+      toast.error('Không dừng được run', { description: res.error?.message });
+      if (res.error?.retryAfterSec && res.error.retryAfterSec > 0) {
+        setStopCooldown(res.error.retryAfterSec);
+      }
+    }
   };
 
   return (
@@ -85,9 +102,10 @@ function RunStickyHeader() {
               size="sm"
               className="min-h-11"
               aria-label="Dừng run"
+              disabled={stopCooldown > 0}
               onClick={() => setStopOpen(true)}
             >
-              Dừng
+              {stopCooldown > 0 ? `Thử lại sau ${stopCooldown}s` : 'Dừng'}
             </Button>
             <Button
               type="button"
@@ -232,6 +250,7 @@ function AppShell() {
   const username = useLoadtestAuthStore((s) => s.user?.username);
   const logout = useLoadtestAuthStore((s) => s.logout);
   const navigate = useNavigate();
+  const location = useLocation();
   const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -277,8 +296,16 @@ function AppShell() {
           </div>
         </div>
       )}
+      <div className="px-4 pt-3">
+        <SessionExpiryBanner />
+      </div>
       <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-4 lg:px-6 lg:pb-10">
-        <Outlet />
+        {/* Lớp 2 — route-level: crash 1 trang loadtest → fallback, shell + nav + poll 1s sống.
+            resetKey=pathname → chuyển trang tự reset. Bọc TRONG guard (guard trả <Outlet/>,
+            redirect null không bao giờ crash → không chặn luồng login). */}
+        <ErrorBoundary resetKey={location.pathname} homePath={routes.loadtest}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
       <MobileBottomNav />
     </div>

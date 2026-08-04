@@ -77,6 +77,8 @@ export interface LoadTestConfig {
   hasOtpSecret: boolean;
   hasRedisConfigured: boolean;
   reportsDir: string;
+  /** Register gate (T-06, SEC-6) — false → frontend ẩn CTA đăng ký (D-17). */
+  allowRegister: boolean;
 }
 
 /** Tick 1s tổng hợp — UI-SPEC §4.1. */

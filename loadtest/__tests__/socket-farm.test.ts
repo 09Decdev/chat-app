@@ -2,12 +2,55 @@
  * Unit tests — Socket Farm pure helpers (profile picker + test content).
  * VirtualUser cần socket.io-client thật — chỉ test phần thuần.
  */
-import { describe, it, expect } from 'vitest';
-import { pickProfile } from '../socket-farm';
+import { describe, it, expect, vi } from 'vitest';
+import { pickProfile, VirtualUser } from '../socket-farm';
 import { genChatContent, genCommentContent, genTopicTitle, genPassword, genDateOfBirth, genDeviceInfo, uuidV4, randomHex } from '../util';
-import type { ActionProfile } from '../types';
+import type { ActionProfile, TestAccount } from '../types';
+
+const ioMock = vi.hoisted(() => vi.fn());
+vi.mock('socket.io-client', () => ({ io: ioMock }));
 
 const PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0 };
+
+const TEST_ACCOUNT: TestAccount = {
+  email: 'user1@test.local',
+  password: 'Abc123!@',
+  userId: 'u1',
+  accessToken: 'tok-1',
+  refreshToken: 'ref-1',
+  displayName: 'User 1',
+  deviceInfo: {
+    installationId: '00000000-0000-4000-8000-000000000001',
+    deviceFingerprint: 'a'.repeat(64),
+    platform: 'web',
+    deviceName: 'test',
+  },
+  dateOfBirth: '2000-01-01',
+  country: 'VN',
+  registeredAt: 0,
+};
+
+describe('socket handshake — KHÔNG token trong query (SEC-3 / F-8)', () => {
+  it('VirtualUser.connect() gửi Authorization header + auth.token, KHÔNG query.token', () => {
+    ioMock.mockReset();
+    const fakeSocket = {
+      on: vi.fn(),
+      emit: vi.fn(),
+      removeAllListeners: vi.fn(),
+      disconnect: vi.fn(),
+      connected: false,
+    };
+    ioMock.mockReturnValue(fakeSocket);
+    const u = new VirtualUser(0, TEST_ACCOUNT, 'chat', 'http://localhost:3000');
+    u.connect();
+    expect(ioMock).toHaveBeenCalledTimes(1);
+    const [url, opts] = ioMock.mock.calls[0];
+    expect(url).toBe('ws://localhost:3000');
+    expect(opts.query).toBeUndefined(); // SEC-3: token KHÔNG trong query string
+    expect(opts.extraHeaders.Authorization).toBe('Bearer tok-1');
+    expect(opts.auth).toEqual({ token: 'tok-1' }); // W3 T-08: auth phủ ws package path
+  });
+});
 
 describe('pickProfile (AC4.1)', () => {
   it('phân phối đúng theo % (sai số ~1%)', () => {

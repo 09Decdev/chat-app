@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRight, Loader2, Lock, LogIn, UserRound } from 'lucide-react';
 import { Card } from '@/components/ui/card';
@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { useLoadtestAuthStore } from '@/store/loadtest-auth.store';
+import { loadtestApi } from '@/lib/loadtest-api';
 import { routes } from '@/lib/env';
 
 interface LoginLocationState {
@@ -24,6 +25,23 @@ export default function LoadtestLoginPage() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // D-17: config allowRegister=false → ẩn CTA đăng ký (hết dead-end 403). Default true.
+  const [allowRegister, setAllowRegister] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadtestApi
+      .getConfig()
+      .then((c) => {
+        if (!cancelled) setAllowRegister(c.allowRegister !== false);
+      })
+      .catch(() => {
+        // config lỗi (server chưa lên) → giữ CTA hiện (mặc định true) — 403 fallback vẫn chạy.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const state = location.state as LoginLocationState | null;
 
@@ -106,12 +124,20 @@ export default function LoadtestLoginPage() {
               )}
             </Button>
           </form>
-          <p className="mt-4 text-center text-sm text-muted-foreground">
-            Chưa có tài khoản?{' '}
-            <Link to={routes.loadtestRegister} className="font-medium text-primary underline-offset-4 hover:underline">
-              Đăng ký
-            </Link>
-          </p>
+          {allowRegister && (
+            <p className="mt-4 text-center text-sm text-muted-foreground">
+              Chưa có tài khoản?{' '}
+              <Link to={routes.loadtestRegister} className="font-medium text-primary underline-offset-4 hover:underline">
+                Đăng ký
+              </Link>
+            </p>
+          )}
+          {!allowRegister && (
+            <p className="mt-4 text-center text-xs text-muted-foreground">
+              Đăng ký đã bị tắt trên server này — set <code className="font-mono">LOADTEST_ALLOW_REGISTER=true</code> trong{' '}
+              <code className="font-mono">loadtest/.env</code> để kích hoạt.
+            </p>
+          )}
         </Card>
       </div>
     </div>

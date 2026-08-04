@@ -10,7 +10,7 @@ const gatewayUrl = (
 export const env = {
   gatewayUrl,
   socketPath: import.meta.env.VITE_SOCKET_PATH ?? "/socket.io/",
-  refreshEndpoint: import.meta.env.VITE_REFRESH_ENDPOINT ?? "/auth/refresh",
+  refreshEndpoint: import.meta.env.VITE_REFRESH_ENDPOINT ?? "/auth/refresh-token",
 
   // Business rules (CHAT_API.md - muc 7 & 9)
   maxMembers: 6,

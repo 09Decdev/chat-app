@@ -36,3 +36,6 @@ loadtest/data/*
 
 # build artifacts
 *.tsbuildinfo
+
+# test coverage reports
+coverage

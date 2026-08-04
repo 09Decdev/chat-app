@@ -50,6 +50,9 @@ instance.interceptors.request.use((config) => {
 let refreshing: Promise<boolean> | null = null;
 let authFailureCb: (() => void) | null = null;
 
+/** W3 T-08: timeout refresh — endpoint treo không stall concurrent 401s vĩnh viễn. */
+const REFRESH_TIMEOUT_MS = 10_000;
+
 export function onAuthFailure(cb: () => void) {
   authFailureCb = cb;
 }
@@ -57,8 +60,14 @@ export function onAuthFailure(cb: () => void) {
 async function doRefresh(): Promise<boolean> {
   const refresh = tokenStorage.refresh;
   if (!refresh) return false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
   try {
-    const res = await axios.post(`${env.gatewayUrl}${env.refreshEndpoint}`, { refreshToken: refresh });
+    const res = await axios.post(
+      `${env.gatewayUrl}${env.refreshEndpoint}`,
+      { refreshToken: refresh },
+      { signal: controller.signal },
+    );
     const data = unwrap<{ accessToken?: string; refreshToken?: string }>(res.data);
     const access = data?.accessToken;
     if (access) {
@@ -67,7 +76,10 @@ async function doRefresh(): Promise<boolean> {
     }
     return false;
   } catch {
+    // Abort (timeout) hay lỗi mạng đều = refresh failure → đường 401 hiện có clear session.
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ChevronRight } from 'lucide-react';
@@ -88,6 +88,21 @@ export default function ControlPanelPage() {
   const [startError, setStartError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [infraBannerDismissed, setInfraBannerDismissed] = useState(false);
+  // 429 rate-limit cooldown (UI-SPEC §5.2) — disable nút + countdown "Thử lại sau Ns".
+  const [startCooldown, setStartCooldown] = useState(0);
+  const [stopCooldown, setStopCooldown] = useState(0);
+
+  useEffect(() => {
+    if (startCooldown <= 0) return;
+    const t = window.setInterval(() => setStartCooldown((s) => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => window.clearInterval(t);
+  }, [startCooldown > 0]);
+
+  useEffect(() => {
+    if (stopCooldown <= 0) return;
+    const t = window.setInterval(() => setStopCooldown((s) => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => window.clearInterval(t);
+  }, [stopCooldown > 0]);
 
   const running = ['provisioning', 'ramping', 'steady'].includes(phase);
   const formLocked = phase !== 'idle';
@@ -137,13 +152,22 @@ export default function ControlPanelPage() {
         'Không bắt đầu được run — kiểm tra cấu hình.';
       setStartError(msg);
       toast.error('Không bắt đầu được run', { description: msg });
+      // 429 → disable + countdown "Thử lại sau Ns" (không spam lại 429).
+      if (res.error?.retryAfterSec && res.error.retryAfterSec > 0) {
+        setStartCooldown(res.error.retryAfterSec);
+      }
     }
   };
 
   const onConfirmStop = async () => {
     setStopOpen(false);
     const res = await stopRun(false);
-    if (!res.ok) toast.error('Không dừng được run', { description: res.error?.message });
+    if (!res.ok) {
+      toast.error('Không dừng được run', { description: res.error?.message });
+      if (res.error?.retryAfterSec && res.error.retryAfterSec > 0) {
+        setStopCooldown(res.error.retryAfterSec);
+      }
+    }
   };
 
   const counters = lastTick?.counters;
@@ -386,10 +410,10 @@ export default function ControlPanelPage() {
           <Button
             size="lg"
             className="w-full min-h-12"
-            disabled={allowlistFail || targetInvalid || !config}
+            disabled={allowlistFail || targetInvalid || !config || startCooldown > 0}
             onClick={() => setConfirmOpen(true)}
           >
-            BẮT ĐẦU
+            {startCooldown > 0 ? `Thử lại sau ${startCooldown}s` : 'BẮT ĐẦU'}
           </Button>
         )}
         {running && (
@@ -411,8 +435,13 @@ export default function ControlPanelPage() {
               >
                 {paused ? 'Tiếp tục' : 'Tạm dừng'}
               </Button>
-              <Button variant="destructive" className="min-h-12 flex-1" onClick={() => setStopOpen(true)}>
-                Dừng
+              <Button
+                variant="destructive"
+                className="min-h-12 flex-1"
+                disabled={stopCooldown > 0}
+                onClick={() => setStopOpen(true)}
+              >
+                {stopCooldown > 0 ? `Thử lại sau ${stopCooldown}s` : 'Dừng'}
               </Button>
             </div>
           </div>

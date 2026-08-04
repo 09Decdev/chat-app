@@ -42,17 +42,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   login: async (email, password) => {
-    // [DEBUG-LOGIN] capture deviceInfo payload truoc khi POST (GO SAU KHI DEBUG XONG)
     const deviceInfo = deviceStorage.getDeviceInfo();
-    console.log('[DEBUG-LOGIN] request deviceInfo', {
-      installationId: deviceInfo.installationId,
-      installationIdLen: deviceInfo.installationId?.length,
-      deviceFingerprint: deviceInfo.deviceFingerprint,
-      deviceFingerprintLen: deviceInfo.deviceFingerprint?.length,
-      platform: deviceInfo.platform,
-      deviceNameLen: deviceInfo.deviceName?.length,
-      deviceNamePreview: deviceInfo.deviceName?.slice(0, 60),
-    });
     try {
       const res = await chatApi.login({ email, password, deviceInfo });
       if (res.require2fa) {
@@ -73,14 +63,6 @@ export const useAuthStore = create<AuthState>((set) => ({
       return { ok: true };
     } catch (e) {
       const err = e as ApiError;
-      // [DEBUG-LOGIN] log TOAN BO error response (GO SAU KHI DEBUG XONG)
-      console.log('[DEBUG-LOGIN] login error response', {
-        status: err.statusCode,
-        code: err.code,
-        message: err.message,
-        traceId: err.traceId,
-        raw: err.raw,
-      });
       return { ok: false, error: err.message ?? 'Dang nhap that bai.' };
     }
   },

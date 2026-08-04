@@ -7,6 +7,7 @@
  */
 import { create } from 'zustand';
 import { loadtestApi, toApiError, type LoadtestApiError } from '@/lib/loadtest-api';
+import { loadPrefs, savePrefs } from '@/store/loadtest-prefs';
 import type {
   ActionProfile,
   LoadTestConfig,
@@ -19,30 +20,6 @@ import { TERMINAL_PHASES } from '@/types/loadtest';
 
 export const RING_CAPACITY = 3600; // 1 giờ @1s — UI-SPEC 4.1
 export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0 };
-
-interface LoadtestPrefs {
-  requireEnvConfirm: boolean;
-}
-
-const PREFS_KEY = 'loadtest.prefs';
-
-function loadPrefs(): LoadtestPrefs {
-  try {
-    const raw = localStorage.getItem(PREFS_KEY);
-    if (raw) return { requireEnvConfirm: true, ...(JSON.parse(raw) as Partial<LoadtestPrefs>) };
-  } catch {
-    // ignore
-  }
-  return { requireEnvConfirm: true };
-}
-
-function savePrefs(p: LoadtestPrefs) {
-  try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify(p));
-  } catch {
-    // ignore
-  }
-}
 
 interface LoadtestState {
   // config (server)

@@ -52,6 +52,14 @@ Không commit secret vào repo. Secret thật nằm trong `loadtest/.env` (đã 
 - **Pre-commit hook** — chặn commit chứa secret mới (scan staged changes). Cài lại sau khi clone: `sh scripts/install-hooks.sh` (source: `scripts/pre-commit`).
 - Allowlist (test fixtures `test-secret`, DB URL test-only) nằm trong `.gitleaks.toml` — **không** thêm secret thật vào đây.
 
+### LoadTest admin session — TTL 12 giờ (không refresh)
+
+Session admin của loadtest tool dùng token HMAC-SHA256, hết hạn sau **12 giờ** (`SESSION_TTL_MS` trong `loadtest/auth.ts:15`). **Không có refresh server-side** (MVP) — sau khi hết hạn, mọi request nhận 401 → interceptor tự clear session → UI redirect về `/loadtest/login`.
+
+- **Banner "Phiên đăng nhập sắp hết hạn"**: hiện trên dashboard (dismissible) khi còn ≤ 30 phút trước khi hết hạn — text đồng hồ đến từ `expiresAt` server (không hardcode "12 giờ"). Xem `src/lib/loadtest-session.ts` + `src/components/loadtest/session-expiry-banner.tsx`.
+- Token lưu localStorage (`loadtest.auth`, xem `src/lib/loadtest-auth-storage.ts`); secret nằm trong `LOADTEST_AUTH_SECRET` (env ưu tiên file `loadtest/data/auth-secret.json`).
+- Hết hạn không phải lỗi — chỉ cần đăng nhập lại (retry không có sẵn).
+
 > ⚠️ **Party-crossing (2 bên phải đồng bộ)** — sau khi rotate secret (2026-08-04):
 > 1. **DB password**: áp dụng mật khẩu mới trong `LOADTEST_DATABASE_URL` lên instance Postgres `postgres-loadtest` (localhost:5439, user `appuser`, db `loadtest`) **trước** khi chạy loadtest server.
 > 2. **OTP_SECRET**: áp dụng `LOADTEST_OTP_SECRET` mới vào `OTP_SECRET` của `gateway-auth-service/.env` — 2 bên phải khớp, nếu không loadtest tool không register được account.

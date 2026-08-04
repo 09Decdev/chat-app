@@ -31,16 +31,42 @@ export interface LoadtestApiError {
   message: string;
   errors?: string[];
   warnings?: string[];
+  /** 429 contract bắt buộc (backend DESIGN §2) — envelope `retryAfterSec` + `Retry-After` header. */
+  retryAfterSec?: number;
+  /** 'http' = có response; 'network' = lỗi network/CORS (browser không đọc được response). */
+  kind?: 'http' | 'network';
 }
 
 export function toApiError(e: unknown): LoadtestApiError {
-  const ax = e as AxiosError<{ statusCode?: number; message?: string; errors?: string[]; warnings?: string[] }>;
-  const body = ax.response?.data;
+  const ax = e as AxiosError<{
+    statusCode?: number;
+    message?: string;
+    errors?: string[];
+    warnings?: string[];
+    retryAfterSec?: number;
+  }>;
+  const response = ax.response;
+  if (!response) {
+    // Network/CORS — khi CORS chặn, browser cũng rơi vào nhánh này (không đọc được response).
+    return {
+      statusCode: 0,
+      message:
+        'Không kết nối được đến loadtest server (port 3401). Nếu truy cập cross-origin, kiểm tra LOADTEST_CORS_ORIGIN.',
+      kind: 'network',
+    };
+  }
+  const body = response.data;
+  const retryAfterSec =
+    (typeof body?.retryAfterSec === 'number' ? body.retryAfterSec : undefined) ??
+    (response.headers['retry-after'] ? Number(response.headers['retry-after']) : undefined) ??
+    0;
   return {
-    statusCode: body?.statusCode ?? ax.response?.status ?? 0,
+    statusCode: body?.statusCode ?? response.status ?? 0,
     message: body?.message ?? 'Không kết nối được đến loadtest server (port 3401). Chạy: npm run loadtest:server',
     errors: body?.errors,
     warnings: body?.warnings,
+    retryAfterSec: retryAfterSec > 0 ? retryAfterSec : undefined,
+    kind: 'http',
   };
 }
 

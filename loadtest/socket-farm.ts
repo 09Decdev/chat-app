@@ -94,7 +94,10 @@ export class VirtualUser {
     this.socket = io(this.wsUrl, {
       path: '/socket.io/',
       transports: ['websocket'], // SF-1: bỏ polling giảm overhead
-      query: { token },
+      // SEC-3 (F-8): token qua Authorization header + socket.io `auth` (CONNECT packet) —
+      // KHÔNG đưa vào query string (gateway đọc auth.token → query → header —
+      // websocket.gateway.ts:147-150). `auth` phủ cả `ws` package path.
+      auth: { token },
       extraHeaders: { Authorization: `Bearer ${token}` },
       reconnection: true,
       reconnectionAttempts: Infinity,

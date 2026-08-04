@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from '@/components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import LoginPage from '@/pages/LoginPage';
 import ChatPage from '@/pages/ChatPage';
 import { useAuthStore } from '@/store/auth.store';
@@ -46,32 +47,35 @@ function AuthGate() {
 export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-      <TooltipProvider delayDuration={300}>
-        <AuthGate />
-        <Routes>
-          <Route path={routes.login} element={<LoginPage />} />
-          <Route element={<ProtectedRoute />}>
-            <Route path={routes.chat} element={<ChatPage />} />
-          </Route>
-          {/* LoadTest tool — gate admin auth (PRD C2): login/register public, /loadtest/* qua guard */}
-          <Route path={routes.loadtestLogin} element={<LoadtestLoginPage />} />
-          <Route path={routes.loadtestRegister} element={<LoadtestRegisterPage />} />
-          <Route element={<RequireLoadtestAuth />}>
-            <Route path={routes.loadtest} element={<AppShell />}>
-              <Route index element={<ControlPanelPage />} />
-              <Route path="live" element={<LiveDashboardPage />} />
-              <Route path="scenario" element={<ScenarioBuilderPage />} />
-              <Route path="report" element={<ReportPage />} />
-              <Route path="settings" element={<SettingsPage />} />
-              <Route path="cleanup" element={<CleanupPage />} />
-              <Route path="history" element={<HistoryPage />} />
-              <Route path="history/:runId" element={<RunDetailPage />} />
+      {/* Lớp 1 — app-level: bắt AuthGate, guard, router crash. KHÔNG resetKey (tránh crash-loop). */}
+      <ErrorBoundary homePath={routes.chat}>
+        <TooltipProvider delayDuration={300}>
+          <AuthGate />
+          <Routes>
+            <Route path={routes.login} element={<LoginPage />} />
+            <Route element={<ProtectedRoute />}>
+              <Route path={routes.chat} element={<ChatPage />} />
             </Route>
-          </Route>
-          <Route path="*" element={<Navigate to={routes.chat} replace />} />
-        </Routes>
-        <Toaster />
-      </TooltipProvider>
+            {/* LoadTest tool — gate admin auth (PRD C2): login/register public, /loadtest/* qua guard */}
+            <Route path={routes.loadtestLogin} element={<LoadtestLoginPage />} />
+            <Route path={routes.loadtestRegister} element={<LoadtestRegisterPage />} />
+            <Route element={<RequireLoadtestAuth />}>
+              <Route path={routes.loadtest} element={<AppShell />}>
+                <Route index element={<ControlPanelPage />} />
+                <Route path="live" element={<LiveDashboardPage />} />
+                <Route path="scenario" element={<ScenarioBuilderPage />} />
+                <Route path="report" element={<ReportPage />} />
+                <Route path="settings" element={<SettingsPage />} />
+                <Route path="cleanup" element={<CleanupPage />} />
+                <Route path="history" element={<HistoryPage />} />
+                <Route path="history/:runId" element={<RunDetailPage />} />
+              </Route>
+            </Route>
+            <Route path="*" element={<Navigate to={routes.chat} replace />} />
+          </Routes>
+          <Toaster />
+        </TooltipProvider>
+      </ErrorBoundary>
     </BrowserRouter>
   );
 }

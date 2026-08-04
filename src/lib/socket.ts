@@ -84,7 +84,11 @@ class SocketManager {
     const socket = io(env.gatewayUrl, {
       path: env.socketPath,
       transports: ['websocket', 'polling'],
-      query: { token },
+      // SEC-3 (F-8): token qua Authorization header + socket.io `auth` (CONNECT packet).
+      // KHÔNG đưa vào query string (gateway đọc auth.token → query → header —
+      // websocket.gateway.ts:147-150). Browser native WebSocket KHÔNG gửi extraHeaders trên
+      // websocket transport — `auth` đảm bảo token tới gateway ở MỌI transport.
+      auth: { token },
       extraHeaders: { Authorization: `Bearer ${token}` },
       autoConnect: true,
       reconnection: true,
