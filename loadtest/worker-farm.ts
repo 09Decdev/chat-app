@@ -12,8 +12,17 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { RunConfig, TestAccount, WorkerCommand, WorkerMessage } from './types';
 import { ltLog } from './util';
+import { toolMetrics } from './tool-metrics';
 
 const WORKER_ENTRY = fileURLToPath(new URL('./worker.ts', import.meta.url));
+
+/**
+ * T-07 FIX-3: env cho child process — ghi đè LOGTEST_LOG_FILE='' để worker KHÔNG ghi JSONL sink.
+ * Forked worker mỗi process giữ rotation counter riêng → append/rotate race trên cùng file nếu kế thừa.
+ */
+export function workerEnv(workerId: number): NodeJS.ProcessEnv {
+  return { ...process.env, LOADTEST_WORKER_ID: String(workerId), LOGTEST_LOG_FILE: '' };
+}
 
 export interface WorkerHandle {
   id: number;
@@ -58,7 +67,7 @@ export class WorkerFarm {
     const hasTsxLoader = process.execArgv.some((a) => a.includes('tsx'));
     const child = fork(WORKER_ENTRY, [], {
       execArgv: hasTsxLoader ? undefined : ['--import', 'tsx'],
-      env: { ...process.env, LOADTEST_WORKER_ID: String(workerId) },
+      env: workerEnv(workerId), // T-07 FIX-3: workers không kế thừa LOGTEST_LOG_FILE (JSONL sink single-process)
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       cwd: fileURLToPath(new URL('..', import.meta.url)), // chat-app/
     });
@@ -162,6 +171,7 @@ export class WorkerFarm {
       fresh.runSent = true;
     }
     this.events.onWorkerRestarted(id);
+    toolMetrics.inc('workerRestarts'); // T-07: đếm workerRestarts (G-10)
     return fresh;
   }
 

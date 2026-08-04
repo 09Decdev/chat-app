@@ -29,6 +29,7 @@ async function main() {
 
   ltLog.info('=== MAYogu LoadTest Tool server ===');
   ltLog.info(`gateway=${env.gatewayUrl}`);
+  ltLog.info(`jsonlLog=${process.env.LOGTEST_LOG_FILE || '(off — set LOGTEST_LOG_FILE để ghi JSONL)'}`);
   ltLog.info(`allowlist=${env.allowlist.join(', ')}`);
   ltLog.info(`redis=${redactUrl(env.redisUrl)} | otpSecret=${env.otpSecret ? '***' : '(THIẾU — register sẽ fail, cần loadtest/.env)'}`);
   ltLog.info(`maxTarget=${env.maxTarget} | maxDuration=${env.maxDurationMin}m | maxRegisterRamp=${env.maxRegisterRamp}/s`);
@@ -48,18 +49,35 @@ async function main() {
     },
     dbWriter,
   );
+  await coordinator.initRedis(); // T-07 FIX-2: kết nối Redis từ đầu — health trung thực (best-effort)
   const api = new ApiServer(env, coordinator, store);
   await api.listen();
 
-  const shutdown = (signal: string) => {
+  // B-2 (T-06): graceful shutdown — thứ tự đóng HTTP → dừng run (finishRun AWAIT writeRunFinish)
+  // → dbWriter.shutdown() (finalize barrier + flush + pool.end) → exit. Tổng timeout ≥ 10s (PRD §5.2).
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     ltLog.info(`Nhận ${signal} — dừng run nếu đang chạy...`);
-    void coordinator.stop(true).finally(async () => {
+    const deadline = setTimeout(() => {
+      ltLog.error('Shutdown timeout — force exit 1');
+      process.exit(1);
+    }, env.shutdownTimeoutMs);
+    deadline.unref();
+    try {
+      await api.closeConnections();
+      await coordinator.stop(true);
       await dbWriter.shutdown();
-      await api.close().finally(() => process.exit(0));
-    });
+      ltLog.info('Shutdown hoàn tất');
+      process.exit(0);
+    } catch (err) {
+      ltLog.error(`Shutdown lỗi: ${String(err)}`);
+      process.exit(1);
+    }
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
 main().catch((err) => {

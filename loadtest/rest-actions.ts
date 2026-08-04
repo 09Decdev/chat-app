@@ -62,12 +62,22 @@ function extractPostIds(body: unknown): string[] {
 export class RestDriver {
   private postIdCache = new PostIdCache();
   private lastLikeAt = new Map<string, number>(); // key `${action}:${id}` — like toggle ≥30s/cặp (AC4.4)
+  private noFixtureLogged = false;
 
   constructor(
     private gateway: string,
     _env: LoadTestEnv,
   ) {
     this.gateway = normalizeUrl(gateway);
+  }
+
+  /** T-07/S-12: NO_POST_FIXTURE — log 1 lần để không lặp spam; khách hàng đọc rõ. */
+  private noFixture(): ActionResult {
+    if (!this.noFixtureLogged) {
+      this.noFixtureLogged = true;
+      ltLog.warn('Không có post fixture — bỏ qua bước đọc feed (NO_POST_FIXTURE). Seed nội dung trước khi chạy run.');
+    }
+    return { ok: false, latencyMs: 0, code: 'NO_POST_FIXTURE', failClass: 'CLIENT' };
   }
 
   private async exec(token: string, path: string, opts: { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown } = {}): Promise<HttpResult> {
@@ -105,7 +115,7 @@ export class RestDriver {
   /** GET post chi tiết + POST view (đo riêng 2 action). */
   async readPostDetail(token: string): Promise<{ detail: ActionResult; view: ActionResult | null }> {
     const postId = await this.postIdCache.get(this.gateway, token);
-    if (!postId) return { detail: { ok: false, latencyMs: 0, code: 'NO_POST_FIXTURE', failClass: 'CLIENT' }, view: null };
+    if (!postId) return { detail: this.noFixture(), view: null };
     const d = await this.exec(token, `/content-service/post/${postId}`);
     const detail = this.action(d, 'read');
     const view = await this.viewPost(token, postId);
@@ -115,7 +125,7 @@ export class RestDriver {
   /** POST view — dedupe server 7 ngày (retry vô hại). */
   async viewPost(token: string, postId?: string): Promise<ActionResult> {
     const id = postId ?? (await this.postIdCache.get(this.gateway, token));
-    if (!id) return { ok: false, latencyMs: 0, code: 'NO_POST_FIXTURE', failClass: 'CLIENT' };
+    if (!id) return this.noFixture();
     const res = await this.exec(token, `/content-service/post/${id}/view`, { method: 'POST', body: {} });
     return this.action(res, 'view');
   }
@@ -123,7 +133,7 @@ export class RestDriver {
   /** POST comment root — content ≤ 2000, prefix [lt] (AC4.3). */
   async createComment(token: string, userIndex: number): Promise<ActionResult> {
     const postId = await this.postIdCache.get(this.gateway, token);
-    if (!postId) return { ok: false, latencyMs: 0, code: 'NO_POST_FIXTURE', failClass: 'CLIENT' };
+    if (!postId) return this.noFixture();
     const res = await this.exec(token, `/content-service/comments/posts/${postId}`, {
       method: 'POST',
       body: { content: genCommentContent(userIndex) },
@@ -134,7 +144,7 @@ export class RestDriver {
   /** GET comments list của post. */
   async readComments(token: string): Promise<ActionResult> {
     const postId = await this.postIdCache.get(this.gateway, token);
-    if (!postId) return { ok: false, latencyMs: 0, code: 'NO_POST_FIXTURE', failClass: 'CLIENT' };
+    if (!postId) return this.noFixture();
     const res = await this.exec(token, `/content-service/comments/posts/${postId}?page=1&limit=20`);
     return this.action(res, 'comment');
   }
@@ -142,7 +152,7 @@ export class RestDriver {
   /** POST like toggle — ≥30s/cặp user+post (AC4.4); retry an toàn qua unique pair. */
   async likePost(token: string): Promise<ActionResult> {
     const postId = await this.postIdCache.get(this.gateway, token);
-    if (!postId) return { ok: false, latencyMs: 0, code: 'NO_POST_FIXTURE', failClass: 'CLIENT' };
+    if (!postId) return this.noFixture();
     const key = `post:${postId}`;
     const last = this.lastLikeAt.get(key) ?? 0;
     if (Date.now() - last < 30_000) {

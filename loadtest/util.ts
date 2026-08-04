@@ -1,52 +1,25 @@
 /**
  * MAYogu LoadTest Tool — helpers dùng chung (logger, random, time).
  * Logger: prefix `[lt]` theo convention chat-app (`[lt]` = loadtest namespace, SD-2).
+ *
+ * T-07: logger chuyển sang `loadtest/logger.ts` (structured JSON + ring buffer + JSONL sink).
+ * File này re-export logger (shim) — ~15 import site cũ không đổi (DESIGN prod-refactor §1.3).
  */
 
-let verbose = false;
+// ─── Logger (re-export shim — T-07, DESIGN §1.3) ───────────────────────────────
 
-export function setVerbose(v: boolean) {
-  verbose = v;
-}
-
-/** Ring buffer log gần đây (GET /api/loadtest/logs — dashboard). */
-export const logHistory: { ts: number; level: 'info' | 'warn' | 'error'; msg: string }[] = [];
-const LOG_HISTORY_LIMIT = 500;
-
-/** Subscriber nhận log raw (dùng cho DB persistence — ghi log_events theo runId). */
-export type LogSubscriber = (level: 'info' | 'warn' | 'error', msg: string) => void;
-const logSubscribers: LogSubscriber[] = [];
-
-export function subscribeLog(fn: LogSubscriber): () => void {
-  logSubscribers.push(fn);
-  return () => {
-    const i = logSubscribers.indexOf(fn);
-    if (i >= 0) logSubscribers.splice(i, 1);
-  };
-}
-
-export function log(level: 'info' | 'warn' | 'error', msg: string, ...args: unknown[]) {
-  const ts = new Date().toISOString().slice(11, 23);
-  const line = `[lt][${level.toUpperCase()}][${ts}] ${msg}`;
-  logHistory.push({ ts: Date.now(), level, msg: line });
-  if (logHistory.length > LOG_HISTORY_LIMIT) logHistory.shift();
-  for (const fn of logSubscribers) {
-    try {
-      fn(level, msg);
-    } catch {
-      // subscriber không được làm hỏng log
-    }
-  }
-  if (level === 'error') console.error(line, ...args);
-  else if (level === 'warn') console.warn(line, ...args);
-  else if (verbose) console.log(line, ...args);
-}
-
-export const ltLog = {
-  info: (msg: string, ...a: unknown[]) => log('info', msg, ...a),
-  warn: (msg: string, ...a: unknown[]) => log('warn', msg, ...a),
-  error: (msg: string, ...a: unknown[]) => log('error', msg, ...a),
-};
+export {
+  ltLog,
+  log,
+  logHistory,
+  subscribeLog,
+  setVerbose,
+  configureLogger,
+  createJsonlSink,
+  redactSensitiveFields,
+  redactUrl,
+} from './logger';
+export type { LogFields, LogLevel, LogSubscriber, LogHistoryEntry, JsonlEntry, JsonlSink } from './logger';
 
 // ─── Random generators (deviceInfo đúng contract gateway-auth-service deviceInfo.dto.ts) ───
 
@@ -168,20 +141,6 @@ export function normalizeUrl(url: string): string {
   if (u.startsWith('ws://')) u = 'http://' + u.slice(5);
   else if (u.startsWith('wss://')) u = 'https://' + u.slice(6);
   return u;
-}
-
-/**
- * Redact password trong URL để log/error an toàn (T-03): `user:pass@host` → `user:***@host`.
- * URL không có password → giữ nguyên. Không parse được → fallback regex vẫn mask.
- */
-export function redactUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    if (u.password) u.password = '***';
-    return u.toString();
-  } catch {
-    return url.replace(/^([^:]+:\/\/[^:]+):[^@]*@/, '$1:***@');
-  }
 }
 
 export function parseBool(v: string | undefined, def = false): boolean {

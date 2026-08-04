@@ -19,6 +19,7 @@ import { RestDriver } from './rest-actions';
 import { buildReport } from './report';
 import { saveReportFiles } from './report';
 import { ltLog, normalizeUrl, setVerbose, redactUrl } from './util';
+import { toolMetrics } from './tool-metrics';
 import type { DbWriter } from './db/writer';
 
 const TICK_HISTORY_LIMIT = 3600; // 1h @1s (UI-SPEC §4.1)
@@ -50,6 +51,9 @@ export class LoadTestCoordinator {
   private aggregateTimer: NodeJS.Timeout | null = null;
   private scrapeTimer: NodeJS.Timeout | null = null;
   private queueTimer: NodeJS.Timeout | null = null;
+  private metricsTimer: NodeJS.Timeout | null = null;
+  /** Số lần NO_POST_FIXTURE (T-07/S-12) — feed trống, action read/view/comment/like bị bỏ qua. */
+  private noPostFixtureCount = 0;
   private provisionSummary: { registered: number; loggedIn: number; failed: number; errors: Record<string, number> } = { registered: 0, loggedIn: 0, failed: 0, errors: {} };
   /** Progress provisioning realtime (dashboard tick PROVISIONING). */
   private provisionProgress = { done: 0, total: 0 };
@@ -61,6 +65,8 @@ export class LoadTestCoordinator {
   private accounts: TestAccount[] = [];
   private stopRequested: 'manual' | 'kill' | null = null;
   private finishing = false;
+  /** B-2 (T-06 FIX-9): promise của finishRun đang in-flight — stop()/shutdown() await để không drop finalize. */
+  private finishPromise: Promise<void> | null = null;
   private maxConnected = 0;
   private maxActive = 0;
   private maxQueue = 0;
@@ -94,6 +100,43 @@ export class LoadTestCoordinator {
     return ['provisioning', 'ramping', 'steady'].includes(this.phase);
   }
 
+  /** Số worker còn sống — health endpoint (T-07). */
+  get workerAlive(): number {
+    return this.farm.alive;
+  }
+
+  /** Redis có được cấu hình (LOADTEST_REDIS_URL) — health (T-07 FIX-2). Default localhost → luôn configured. */
+  get redisConfigured(): boolean {
+    return this.env.redisUrl !== '';
+  }
+
+  /**
+   * Redis probe cho health — 'up' CHỈ khi đang kết nối và ping OK (FIX-2, không 'up' giả):
+   * `this.redis === null` (idle/chưa kết nối) → không phải 'up'; configured → false, optional → true.
+   */
+  async redisHealth(): Promise<boolean> {
+    if (!this.redis) return !this.redisConfigured;
+    try {
+      await this.redis.ping();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** T-07 FIX-2: kết nối Redis khi khởi động (best-effort) — health trung thực từ đầu (không 'down' giả khi idle). */
+  async initRedis(): Promise<void> {
+    if (!this.env.redisUrl) return;
+    try {
+      this.redis = createRedis(this.env);
+      await this.redis.connect();
+      ltLog.info('[lt] redis connected');
+    } catch (err) {
+      this.redis = null;
+      ltLog.warn(`[lt] redis không kết nối được (${redactUrl(this.env.redisUrl)}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   /** Mẫu lỗi gần nhất (bảng top errors — dashboard). */
   get errorSamples() {
     return this.errorSamplesPrivate;
@@ -121,7 +164,7 @@ export class LoadTestCoordinator {
     this.startTimers(); // tick provisioning progress ngay từ đầu (dashboard)
     void this.dbWriter?.writeRunStart(this.config); // DB: INSERT runs (status=running) — PRD A1/B3
 
-    ltLog.info(`=== run ${config.runId} start: target=${config.targetUsers} workers=${config.workerCount} duration=${config.durationMin}m gateway=${config.gatewayUrl} ===`);
+    ltLog.info(`=== run ${config.runId} start: target=${config.targetUsers} workers=${config.workerCount} duration=${config.durationMin}m gateway=${config.gatewayUrl} ===`, { runId: config.runId });
     void this.provisionAndLaunch();
     return { ok: true, config };
   }
@@ -147,15 +190,19 @@ export class LoadTestCoordinator {
     this.queueCount = 0;
     this.serverMetrics = { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0, lastScrapeAt: 0 };
     this.workerDeathTimes = []; // không reset → run sau E3 giả (worker chết run trước cộng dồn)
+    this.noPostFixtureCount = 0;
   }
 
   private async provisionAndLaunch() {
     if (!this.config) return;
     try {
-      this.redis = createRedis(this.env);
-      await this.redis.connect().catch(() => {
-        throw new Error(`Không kết nối được Redis test: ${redactUrl(this.env.redisUrl)}`);
-      });
+      // T-07 FIX-2: reuse connection đã mở ở initRedis (startup) — nếu chưa có, tạo mới.
+      if (!this.redis) {
+        this.redis = createRedis(this.env);
+        await this.redis.connect().catch(() => {
+          throw new Error(`Không kết nối được Redis test: ${redactUrl(this.env.redisUrl)}`);
+        });
+      }
       if (!this.env.otpSecret) {
         throw new Error('Thiếu LOADTEST_OTP_SECRET — không thể OTP-Seed register (AF-1). Kiểm tra loadtest/.env');
       }
@@ -216,19 +263,47 @@ export class LoadTestCoordinator {
     this.aggregateTimer = setInterval(() => void this.aggregateTick(), 1000);
     this.queueTimer = setInterval(() => void this.pollQueueCount(), 1000);
     this.scrapeTimer = setInterval(() => void this.scrapeGatewayMetrics(), this.env.scrapeIntervalMs);
+    // T-07: snapshot tool metrics định kỳ 5s (coordinator memory, worker alive, apiErrors).
+    this.metricsTimer = setInterval(() => this.snapshotToolMetrics(), 5000);
   }
 
   private stopTimers() {
     if (this.aggregateTimer) clearInterval(this.aggregateTimer);
     if (this.queueTimer) clearInterval(this.queueTimer);
     if (this.scrapeTimer) clearInterval(this.scrapeTimer);
+    if (this.metricsTimer) clearInterval(this.metricsTimer);
     this.aggregateTimer = null;
     this.queueTimer = null;
     this.scrapeTimer = null;
+    this.metricsTimer = null;
+  }
+
+  /** T-07: log snapshot 5s — coordinator RSS, worker alive, apiErrors (logger context).
+   *  FIX-6: rssMb gauge đọc memoryUsage() TẠI ĐÂY (5s), KHÔNG ở tick 1s (design: 5s snapshot). */
+  private snapshotToolMetrics(): void {
+    toolMetrics.setGauge('coordinator.rssMb', Math.round(process.memoryUsage().rss / 1024 / 1024));
+    const snap = toolMetrics.snapshot();
+    ltLog.info('tool metrics snapshot', {
+      runId: this.runId || undefined,
+      context: {
+        rssMb: snap.gauges['coordinator.rssMb'],
+        workerAlive: snap.gauges['worker.alive'],
+        apiErrors: snap.counters.apiErrors,
+        dbWriteFail: snap.counters.dbWriteFail,
+        workerRestarts: snap.counters.workerRestarts,
+        runFinished: snap.counters.runFinished,
+      },
+    });
   }
 
   /** Dừng run (manual) hoặc kill-switch — AC1.4 / SD-3. */
   async stop(force: boolean): Promise<void> {
+    // B-2 (T-06 FIX-9): finishRun đang in-flight → chờ xong TRƯỚC khi tiếp tục (shutdown không drop finalize).
+    // Check này phải ĐỨNG TRƯỚC phase guard — phase có thể đã 'stopped'/'error' trong lúc finishRun còn await writeRunFinish.
+    if (this.finishing) {
+      await this.finishPromise;
+      return;
+    }
     if (this.phase === 'idle' || this.phase === 'finished' || this.phase === 'stopped' || this.phase === 'error') {
       if (this.phase === 'stopped' || this.phase === 'error') return; // đã dừng
       return;
@@ -280,7 +355,7 @@ export class LoadTestCoordinator {
         }
         break;
       case 'log':
-        ltLog.info(`worker#${workerId}: ${msg.msg}`);
+        ltLog.info(`worker#${workerId}: ${msg.msg}`, { workerId, runId: this.runId || undefined });
         break;
       case 'fatal':
         ltLog.error(`worker#${workerId} fatal: ${msg.error}`);
@@ -301,6 +376,8 @@ export class LoadTestCoordinator {
 
   private async aggregateTick() {
     if (!this.config) return;
+    // T-07: gauge worker alive mỗi tick (cheap); rssMb CHỈ ở snapshot 5s (FIX-6 — không gọi memoryUsage() mỗi giây).
+    toolMetrics.setGauge('worker.alive', this.farm.alive);
     const now = Date.now();
     const elapsedSec = Math.round((now - this.startAt) / 1000);
 
@@ -328,6 +405,10 @@ export class LoadTestCoordinator {
     }
 
     const ticks = [...this.workerTicks.values()];
+    // T-07/S-12: đếm NO_POST_FIXTURE từ raw worker errors (trước top-10 cap) — report rõ ràng.
+    let noPostFixture = 0;
+    for (const t of ticks) noPostFixture += t.errors['NO_POST_FIXTURE'] ?? 0;
+    this.noPostFixtureCount = noPostFixture;
     const agg: AggregatedTick = aggregateTicks(this.runId, now, elapsedSec, this.phase, ticks, undefined);
     // bổ sung server-side: queue-count + gateway metrics
     agg.tick.counters.queueCount = this.queueCount;
@@ -451,57 +532,76 @@ export class LoadTestCoordinator {
 
   // ─── Finish / report ───────────────────────────────────────────────────
 
-  private async finishRun(kind: 'natural' | 'auto' | 'manual', reason: string, force = false) {
-    if (this.finishing) return;
+  /**
+   * B-2 (T-06 FIX-9): finishRun track promise in-flight — nếu gọi lần 2 (stop/shutdown) khi đang finish,
+   * trả về chính finishPromise để caller await (không drop finalize khi pool.end).
+   */
+  private finishRun(kind: 'natural' | 'auto' | 'manual', reason: string, force = false): Promise<void> {
+    if (this.finishing) return this.finishPromise ?? Promise.resolve();
     this.finishing = true;
-    this.stopTimers();
-    this.stopReason = reason;
-    if (force) this.farm.killAll();
-    this.farm.dispose();
-    if (this.redis) {
-      this.redis.disconnect();
-      this.redis = null;
-    }
-    const { phase, stopReason } = endPhaseFromStop(kind, reason);
-    this.phase = 'report';
-    this.events.onPhaseChange?.(this.phase);
+    this.finishPromise = this.doFinishRun(kind, reason, force);
+    return this.finishPromise;
+  }
+
+  private async doFinishRun(kind: 'natural' | 'auto' | 'manual', reason: string, force = false): Promise<void> {
     try {
-      this.latestReport = buildReport({
-        runId: this.runId,
-        status: phase === 'finished' ? 'finished' : phase === 'stopped' ? 'stopped' : 'error',
-        startAt: this.startAt,
-        endAt: Date.now(),
-        config: this.config ?? ({} as RunConfig),
-        tickHistory: this.tickHistory,
-        perActionHistograms: this.cumulativeHistograms,
-        actionOk: this.cumulativeActionOk,
-        actionFail: this.cumulativeActionFail,
-        maxConnected: this.maxConnected,
-        maxActive: this.maxActive,
-        maxQueue: this.maxQueue,
-        peakActionsPerSec: this.peakActionsPerSec,
-        provisioned: this.provisionSummary.registered + this.provisionSummary.loggedIn,
-        stopReason,
-      });
-      this.phase = phase;
+      toolMetrics.inc('runFinished');
+      this.stopTimers();
+      this.stopReason = reason;
+      if (force) this.farm.killAll();
+      this.farm.dispose();
+      // T-07 FIX-2: KHÔNG disconnect Redis ở finishRun — giữ connection cho health trung thực
+      // (redis 'up' chỉ khi connected) + run sau reuse. ioredis tự reconnect nếu server drop.
+      const { phase, stopReason } = endPhaseFromStop(kind, reason);
+      this.phase = 'report';
       this.events.onPhaseChange?.(this.phase);
-      saveReportFiles(this.latestReport, this.tickHistory, this.env.reportsDir);
-      ltLog.info(`=== run ${this.runId} ${this.phase} — ${reason} ===`);
-    } catch (err) {
-      ltLog.error(`buildReport fail: ${String(err)}`);
-      this.phase = 'error';
-      this.events.onPhaseChange?.(this.phase);
+      try {
+        this.latestReport = buildReport({
+          runId: this.runId,
+          status: phase === 'finished' ? 'finished' : phase === 'stopped' ? 'stopped' : 'error',
+          startAt: this.startAt,
+          endAt: Date.now(),
+          config: this.config ?? ({} as RunConfig),
+          tickHistory: this.tickHistory,
+          perActionHistograms: this.cumulativeHistograms,
+          actionOk: this.cumulativeActionOk,
+          actionFail: this.cumulativeActionFail,
+          maxConnected: this.maxConnected,
+          maxActive: this.maxActive,
+          maxQueue: this.maxQueue,
+          peakActionsPerSec: this.peakActionsPerSec,
+          provisioned: this.provisionSummary.registered + this.provisionSummary.loggedIn,
+          stopReason,
+          noPostFixtureSkipped: this.noPostFixtureCount,
+        });
+        this.phase = phase;
+        this.events.onPhaseChange?.(this.phase);
+        saveReportFiles(this.latestReport, this.tickHistory, this.env.reportsDir);
+        ltLog.info(`=== run ${this.runId} ${this.phase} — ${reason} ===`, { runId: this.runId });
+      } catch (err) {
+        ltLog.error(`buildReport fail: ${String(err)}`);
+        this.phase = 'error';
+        this.events.onPhaseChange?.(this.phase);
+      }
+      // DB finalize (best-effort): status + stop_reason + summary_json + flush ticks còn lại — PRD A1
+      // B-2 (T-06): AWAIT writeRunFinish — finalize UPDATE phải xong TRƯỚC khi dbWriter.shutdown()
+      // đóng pool. Trước đây fire-and-forget → pool.end() có thể drop finalize đang bay → run kẹt 'running'.
+      const finalStatus = this.phase === 'finished' ? 'finished' : this.phase === 'stopped' ? 'stopped' : 'error';
+      try {
+        await this.dbWriter?.writeRunFinish(
+          this.runId,
+          finalStatus,
+          this.stopReason,
+          this.latestReport,
+          this.latestReport?.endAt ?? Date.now(),
+        );
+      } catch (err) {
+        ltLog.warn(`[lt][db] writeRunFinish ném lỗi (runId=${this.runId}): ${String(err)}`);
+      }
+    } finally {
+      this.finishing = false;
+      this.finishPromise = null;
     }
-    // DB finalize (best-effort): status + stop_reason + summary_json + flush ticks còn lại — PRD A1
-    const finalStatus = this.phase === 'finished' ? 'finished' : this.phase === 'stopped' ? 'stopped' : 'error';
-    void this.dbWriter?.writeRunFinish(
-      this.runId,
-      finalStatus,
-      this.stopReason,
-      this.latestReport,
-      this.latestReport?.endAt ?? Date.now(),
-    );
-    this.finishing = false;
   }
 
   /** Truy vấn user từ các worker (virtualized). */

@@ -58,6 +58,24 @@ export interface LoadTestEnv {
   debug: boolean;
   /** Bắt buộc DB kết nối để server start (Q-2) — mặc định true. */
   dbRequired: boolean;
+  /** CORS allowlist (T-06) — echo origin nếu khớp, KHÔNG `*` (SEC-2). Default http://localhost:5173 (R-7). */
+  corsOrigins: string[];
+  /** Register gate (SEC-6) — mặc định false (dev set true). */
+  allowRegister: boolean;
+  /** Rate-limit escape hatch (test/CI — PLAN R-6). */
+  rateLimitDisabled: boolean;
+  /** Số fail login/register trong window → 429 (mặc định 5). */
+  rateLimitLoginFails: number;
+  /** Cửa sổ fail window (ms) — mặc định 60s. */
+  rateLimitWindowMs: number;
+  /** Refill interval /start bucket (ms) — mặc định 10s (1 req/10s). */
+  rateLimitStartMs: number;
+  /** Write bucket (req/min) cho /allowlist POST, /cleanup, DELETE /runs — 0 = OFF (mặc định). */
+  rateLimitWriteBucket: number;
+  /** Tin X-Forwarded-For (chống spoof header — mặc định false). */
+  trustProxy: boolean;
+  /** Tổng timeout graceful shutdown (ms) — mặc định 10s (PRD §5.2). */
+  shutdownTimeoutMs: number;
 }
 
 export function loadDotEnv(dir: string): Record<string, string> {
@@ -135,6 +153,11 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
     ? allowlistRaw.split(',').map((s) => normalizeUrl(s)).filter(Boolean)
     : [normalizeUrl('http://localhost:3000')]; // dev-only mặc định (SEC-7): production phải set LOADTEST_ALLOWLIST tường minh
 
+  const corsOriginsRaw = (env.LOADTEST_CORS_ORIGIN ?? '').trim();
+  const corsOrigins = corsOriginsRaw
+    ? corsOriginsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+    : ['http://localhost:5173']; // R-7: Vite proxy gửi origin Vite
+
   const configuredWorkers = num('LOADTEST_WORKERS', 0);
   const debug = parseBool(env.LOADTEST_DEBUG);
   const dbRequired = parseBool(env.LOADTEST_DB_REQUIRED, true); // Q-2: DB luôn bắt buộc
@@ -166,6 +189,15 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
       .filter(Boolean),
     debug,
     dbRequired,
+    corsOrigins,
+    allowRegister: parseBool(env.LOADTEST_ALLOW_REGISTER),
+    rateLimitDisabled: parseBool(env.LOADTEST_RATE_LIMIT_DISABLED),
+    rateLimitLoginFails: num('LOADTEST_RATE_LIMIT_LOGIN_FAILS', 5),
+    rateLimitWindowMs: num('LOADTEST_RATE_LIMIT_WINDOW_MS', 60_000),
+    rateLimitStartMs: num('LOADTEST_RATE_LIMIT_START_MS', 10_000),
+    rateLimitWriteBucket: num('LOADTEST_RATE_LIMIT_WRITE_BUCKET', 0),
+    trustProxy: parseBool(env.LOADTEST_TRUST_PROXY),
+    shutdownTimeoutMs: num('LOADTEST_SHUTDOWN_TIMEOUT_MS', 10_000),
   };
   cachedEnv = cfg;
   return cfg;

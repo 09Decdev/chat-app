@@ -29,6 +29,8 @@ export class DbWriter {
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
   private unsubscribeLog: (() => void) | null = null;
+  /** B-2 (T-06): finalize barrier — shutdown() await finalizePromise TRƯỚC pool.end(). */
+  private finalizePromise: Promise<void> | null = null;
 
   constructor(store: LoadtestStore, dataDir: string) {
     this.store = store;
@@ -56,6 +58,8 @@ export class DbWriter {
       this.unsubscribeLog();
       this.unsubscribeLog = null;
     }
+    // B-2: chờ finalize runner TRƯỚC pool.end() — không drop UPDATE đang bay.
+    if (this.finalizePromise) await this.finalizePromise;
     this.stopFlushTimer();
     await this.flushTicks();
     await this.store.disconnect();
@@ -81,6 +85,20 @@ export class DbWriter {
   }
 
   async writeRunFinish(
+    runId: string,
+    status: 'finished' | 'stopped' | 'error',
+    stopReason: string | null,
+    report: unknown,
+    endAt: number,
+  ): Promise<void> {
+    // B-2: finalize barrier — track promise để shutdown() await trước pool.end().
+    const p = this.doWriteRunFinish(runId, status, stopReason, report, endAt);
+    this.finalizePromise = p;
+    await p;
+    if (this.finalizePromise === p) this.finalizePromise = null;
+  }
+
+  private async doWriteRunFinish(
     runId: string,
     status: 'finished' | 'stopped' | 'error',
     stopReason: string | null,

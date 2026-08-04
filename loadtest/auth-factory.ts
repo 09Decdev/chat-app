@@ -380,6 +380,8 @@ export function createRedis(env: LoadTestEnv): Redis {
     maxRetriesPerRequest: 2,
     enableReadyCheck: true,
     lazyConnect: true,
+    // T-07 FIX-1: commandTimeout — Redis treo không thể stall /health (redisHealth ping) mãi mãi.
+    commandTimeout: 2000,
   });
 }
 

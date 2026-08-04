@@ -215,6 +215,8 @@ export interface RunReport {
   errors: { code: string; count: number }[];
   bottlenecks: BottleneckCandidate[];
   stopReason?: string;
+  /** Số lần NO_POST_FIXTURE (T-07/S-12) — feed trống, action read/view/comment/like bị bỏ qua. */
+  noPostFixtureSkipped?: number;
 }
 
 /** Message IPC coordinator → worker. */

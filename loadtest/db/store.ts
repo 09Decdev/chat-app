@@ -187,6 +187,20 @@ export class LoadtestStore {
     this.enabled = false;
   }
 
+  /** Health probe (T-07 — health endpoint): SELECT 1, không đếm lỗi, trả boolean.
+   *  FIX-1: query_timeout 2s — DB treo không thể làm /health stall mãi mãi. */
+  async probe(): Promise<boolean> {
+    if (!this.enabled || !this.pool) return false;
+    try {
+      // @types/pg thiếu query_timeout trong QueryConfig — runtime pg hỗ trợ (cast qua).
+      const probeQ = { text: 'SELECT 1', query_timeout: 2000 } as unknown as pg.QueryConfig;
+      await this.pool.query(probeQ);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Startup: đảm bảo baseline schema 001 (T-04, B-5) — KHÔNG tự chạy migration
    * destructive phía sau. Baseline fail → throw (R-1, server fail-fast — T-05).

@@ -50,7 +50,7 @@ process.on('message', (msg: WorkerCommand) => {
 });
 
 process.on('uncaughtException', (err) => {
-  ltLog.error(`worker#${workerId} uncaught: ${err.message}\n${err.stack}`);
+  ltLog.error(`worker#${workerId} uncaught: ${err.message}\n${err.stack}`, { workerId });
   if (process.send) process.send({ type: 'fatal', error: err.message });
 });
 
@@ -61,4 +61,4 @@ process.on('SIGINT', () => {
   void runtime.stop('SIGINT', true).then(() => process.exit(0));
 });
 
-ltLog.info(`worker#${workerId} ready (pid ${process.pid})`);
+ltLog.info(`worker#${workerId} ready (pid ${process.pid})`, { workerId });

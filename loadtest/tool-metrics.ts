@@ -48,9 +48,20 @@ export function createToolMetrics(): ToolMetrics {
       for (const k of Object.keys(gauges) as ToolGauge[]) gauges[k] = 0;
     },
     toPrometheusText() {
+      // T-07 FIX-5: đủ # TYPE/# HELP + counter suffix `_total` (Prometheus convention).
       const lines: string[] = [];
-      for (const [k, v] of Object.entries(counters)) lines.push(`lt_${k} ${v}`);
-      for (const [k, v] of Object.entries(gauges)) lines.push(`lt_${k.replace('.', '_')} ${v}`);
+      for (const [k, v] of Object.entries(counters)) {
+        const name = `lt_${k}_total`;
+        lines.push(`# TYPE ${name} counter`);
+        lines.push(`# HELP ${name} MAYogu loadtest tool counter ${k}`);
+        lines.push(`${name} ${v}`);
+      }
+      for (const [k, v] of Object.entries(gauges)) {
+        const name = `lt_${k.replace('.', '_')}`;
+        lines.push(`# TYPE ${name} gauge`);
+        lines.push(`# HELP ${name} MAYogu loadtest tool gauge ${k}`);
+        lines.push(`${name} ${v}`);
+      }
       return lines.join('\n');
     },
   };

@@ -27,6 +27,8 @@ export interface ReportInput {
   peakActionsPerSec: number;
   provisioned: number;
   stopReason?: string;
+  /** Số lần NO_POST_FIXTURE — coordinator đếm từ raw worker errors (T-07/S-12). */
+  noPostFixtureSkipped?: number;
 }
 
 export function buildReport(input: ReportInput): RunReport {
@@ -70,6 +72,14 @@ export function buildReport(input: ReportInput): RunReport {
     .sort((a, b) => b.count - a.count)
     .slice(0, 20);
 
+  // T-07/S-12: NO_POST_FIXTURE — feed trống, không phải lỗi hệ thống; báo rõ trong report.
+  const noPostFixtureSkipped =
+    input.noPostFixtureSkipped ??
+    history.reduce(
+      (acc, t) => acc + t.errors.filter((e) => e.code === 'NO_POST_FIXTURE').reduce((a, e) => a + e.count, 0),
+      0,
+    );
+
   const bottleneckInput = {
     history,
     echoOk: c.echoOk,
@@ -105,6 +115,7 @@ export function buildReport(input: ReportInput): RunReport {
     errors,
     bottlenecks,
     stopReason: input.stopReason,
+    noPostFixtureSkipped,
   };
 }
 
@@ -232,6 +243,14 @@ export function reportToMarkdown(r: RunReport): string {
     `| Chat echo rate | ${s.echoRate}% (${s.echoOk}/${s.echoSent}) |`,
     `| Queue peak | ${s.queueCountPeak} |`,
     '',
+    ...(r.noPostFixtureSkipped && r.noPostFixtureSkipped > 0
+      ? [
+          '## Không có post fixture — bỏ qua bước đọc feed',
+          '',
+          `- \`NO_POST_FIXTURE\`: ${r.noPostFixtureSkipped.toLocaleString()} lần — feed trống/chưa có post, các action \`read\`/\`view\`/\`comment\`/\`like\` bị bỏ qua. Seed nội dung trước khi chạy run.`,
+          '',
+        ]
+      : []),
     '## Latency theo action',
     '',
     '| action | p50 | p95 | p99 | count |',

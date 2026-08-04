@@ -2,7 +2,7 @@
  * Unit tests — Report (RE-1..RE-3): buildReport + bottleneck detector (AC6.2).
  */
 import { describe, it, expect } from 'vitest';
-import { buildReport, detectBottlenecks } from '../report';
+import { buildReport, detectBottlenecks, reportToMarkdown } from '../report';
 import { ActionHistograms, BucketedHistogram } from '../metrics';
 import type { LoadTestTick, RunConfig } from '../types';
 
@@ -103,6 +103,56 @@ describe('buildReport', () => {
     expect(report.summary.throughputPeak).toBe(900);
     expect(report.summary.echoRate).toBe(95);
     expect(report.summary.successRate).toBe(99);
+  });
+});
+
+describe('reportToMarkdown — NO_POST_FIXTURE (T-07/S-12)', () => {
+  it('báo rõ section "Không có post fixture" khi feed trống', () => {
+    const tick: LoadTestTick = {
+      ...fakeTick(1_700_000_000_000),
+      errors: [{ code: 'NO_POST_FIXTURE', count: 123 }],
+    };
+    const report = buildReport({
+      runId: 'lt-test1',
+      status: 'finished',
+      startAt: 1_700_000_000_000,
+      endAt: 1_700_000_001_000,
+      config: fakeConfig(),
+      tickHistory: [tick],
+      perActionHistograms: new ActionHistograms(),
+      actionOk: {},
+      actionFail: {},
+      maxConnected: 10_000,
+      maxActive: 9_500,
+      maxQueue: 300,
+      peakActionsPerSec: 900,
+      provisioned: 10_000,
+    });
+    expect(report.noPostFixtureSkipped).toBe(123);
+    const md = reportToMarkdown(report);
+    expect(md).toContain('Không có post fixture — bỏ qua bước đọc feed');
+    expect(md).toContain('NO_POST_FIXTURE');
+  });
+
+  it('không có NO_POST_FIXTURE → không thêm section', () => {
+    const report = buildReport({
+      runId: 'lt-test1',
+      status: 'finished',
+      startAt: 1_700_000_000_000,
+      endAt: 1_700_000_001_000,
+      config: fakeConfig(),
+      tickHistory: [fakeTick(1_700_000_000_000)],
+      perActionHistograms: new ActionHistograms(),
+      actionOk: {},
+      actionFail: {},
+      maxConnected: 10_000,
+      maxActive: 9_500,
+      maxQueue: 300,
+      peakActionsPerSec: 900,
+      provisioned: 10_000,
+    });
+    expect(report.noPostFixtureSkipped).toBe(0);
+    expect(reportToMarkdown(report)).not.toContain('Không có post fixture');
   });
 });
 

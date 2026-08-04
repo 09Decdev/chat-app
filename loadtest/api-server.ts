@@ -1,48 +1,128 @@
 /**
  * MAYogu LoadTest Tool — HTTP API server (native node:http, không framework mới).
- * Cung cấp toàn bộ contract dashboard (UI-SPEC Màn 1/2/5/6/7):
- * - POST /start, /stop, /pause, /resume
- * - GET /status, /metrics (polling 1s), /users, /errors, /report + export
- * - GET/POST /allowlist, POST /cleanup
- * - Admin auth: POST /auth/register|login|logout, GET /auth/me (PRD-loadtest-admin-auth Module A)
- * - Gate: mọi route (trừ /health, /auth/*) yêu cầu Authorization: Bearer <token> (PRD C1)
- * - History: GET /runs, /runs/{id}, /runs/{id}/metrics, /runs/{id}/logs, DELETE /runs/{id} (PRD D1)
- * Response theo convention hệ thống: { success, data } / { success, statusCode, message }.
+ * T-06 (S-6): router + composition root — handlers tách ra `loadtest/routes/*`.
+ * Guards (auth / rate / gate) áp dụng TẠI route table (B-3) — handler KHÔNG tự gọi guard.
+ *
+ * Route | Guards
+ * - POST /auth/register → gate (LOADTEST_ALLOW_REGISTER) + rate 'register' (fail window/IP)
+ * - POST /auth/login      → rate 'login' (fail window/IP)
+ * - POST /start           → rate 'start' (token bucket 1/10s/IP)
+ * - POST /allowlist, /cleanup, DELETE /runs/{id} → rate 'write' (OFF mặc định)
+ * - mọi route khác (trừ /health, /auth/*) → auth Bearer (PRD C1)
+ *
+ * CORS allowlist từ LOADTEST_CORS_ORIGIN (mặc định http://localhost:5173) — echo origin, KHÔNG `*`.
+ * Envelope: { success, statusCode, message, timestamp, error?, requestId? } — additive.
  */
 
 import * as http from 'node:http';
-import * as fs from 'node:fs';
 import type { LoadTestEnv } from './config';
-import { PRESETS, validateRunRequest, estimateInfra, loadSettings, saveSettings, mergedAllowlist } from './config';
 import type { LoadTestCoordinator } from './coordinator';
-import type { StartRunRequest } from './types';
-import { ltLog, logHistory, normalizeUrl } from './util';
-import { createRedis } from './auth-factory';
-import { runCleanup, type CleanupResult } from './cleanup';
-import { ticksToCsv, reportToMarkdown } from './report';
-import { listPools, poolPath } from './auth-factory';
-import type { LoadtestStore, MetricSampleRow, RunRow } from './db/store';
-import { createSessionToken, loadAuthSecret, verifySessionToken } from './auth';
-import { hashPassword, validatePasswordStrength, verifyPassword } from './db/password';
+import type { LoadtestStore } from './db/store';
+import { loadAuthSecret } from './auth';
+import { ltLog } from './util';
+import { toolMetrics } from './tool-metrics';
+import {
+  applyCors,
+  BodyError,
+  clientIp,
+  makeRequestId,
+  makeRouteCtx,
+  parseOrigins,
+  type RouteCtx,
+} from './http-server';
+import { requireAuth, registerGate } from './guards';
+import { createRateLimiters, type RateLimiters, type RateKind } from './rate-limit';
+import { authHandlers } from './routes/auth';
+import { runHandlers } from './routes/run';
+import { historyHandlers } from './routes/history';
+import { settingsHandlers } from './routes/settings';
 
-type JsonBody = Record<string, unknown>;
+type RouteHandler = (ctx: RouteCtx, req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>;
 
-interface SessionUser {
-  id: number;
-  username: string;
+interface Route {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  pattern: string;
+  regex: RegExp;
+  paramNames: string[];
+  auth: boolean;
+  gate?: boolean;
+  rate?: RateKind;
+  handler: RouteHandler;
 }
+
+/** Compile pattern `/runs/:id` → regex + param names. */
+function compilePattern(pattern: string): { regex: RegExp; paramNames: string[] } {
+  const paramNames: string[] = [];
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/:([a-zA-Z_]+)/g, (_, name: string) => {
+    paramNames.push(name);
+    return '([^/]+)';
+  });
+  return { regex: new RegExp(`^${escaped}$`), paramNames };
+}
+
+function route(method: Route['method'], pattern: string, handler: RouteHandler, extra: Partial<Omit<Route, 'method' | 'pattern' | 'handler'>> = {}): Route {
+  const { regex, paramNames } = compilePattern(pattern);
+  return { method, pattern, regex, paramNames, auth: false, handler, ...extra };
+}
+
+const ROUTES: Route[] = [
+  // Public (no auth) — health + auth + tool metrics (Prometheus)
+  route('GET', '/api/loadtest/health', runHandlers.health),
+  route('GET', '/metrics', async (_ctx, _req, res) => {
+    // T-07: tool metrics Prometheus — KHÔNG đụng /api/loadtest/metrics (tick-history dashboard).
+    res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+    res.end(toolMetrics.toPrometheusText());
+  }),
+  route('POST', '/api/loadtest/auth/login', authHandlers.login, { rate: 'login' }),
+  route('POST', '/api/loadtest/auth/register', authHandlers.register, { gate: true, rate: 'register' }),
+  // Auth (PRD C1)
+  route('POST', '/api/loadtest/auth/logout', authHandlers.logout, { auth: true }),
+  route('GET', '/api/loadtest/auth/me', authHandlers.me, { auth: true }),
+  route('POST', '/api/loadtest/start', runHandlers.start, { auth: true, rate: 'start' }),
+  route('POST', '/api/loadtest/stop', runHandlers.stop, { auth: true }),
+  route('POST', '/api/loadtest/kill', runHandlers.kill, { auth: true }),
+  route('POST', '/api/loadtest/pause', runHandlers.pause, { auth: true }),
+  route('POST', '/api/loadtest/resume', runHandlers.resume, { auth: true }),
+  route('GET', '/api/loadtest/status', runHandlers.status, { auth: true }),
+  route('GET', '/api/loadtest/metrics', runHandlers.metrics, { auth: true }),
+  route('GET', '/api/loadtest/users', runHandlers.users, { auth: true }),
+  route('GET', '/api/loadtest/errors', runHandlers.errors, { auth: true }),
+  route('GET', '/api/loadtest/logs', runHandlers.logs, { auth: true }),
+  route('GET', '/api/loadtest/report', runHandlers.report, { auth: true }),
+  route('GET', '/api/loadtest/report/export', runHandlers.reportExport, { auth: true }),
+  // Settings
+  route('GET', '/api/loadtest/config', settingsHandlers.config, { auth: true }),
+  route('GET', '/api/loadtest/allowlist', settingsHandlers.allowlistGet, { auth: true }),
+  route('POST', '/api/loadtest/allowlist', settingsHandlers.allowlistPost, { auth: true, rate: 'write' }),
+  route('GET', '/api/loadtest/pools', settingsHandlers.pools, { auth: true }),
+  route('POST', '/api/loadtest/cleanup', settingsHandlers.cleanup, { auth: true, rate: 'write' }),
+  // History / Replay (PRD D1) — specific trước generic
+  route('GET', '/api/loadtest/runs', historyHandlers.runsList, { auth: true }),
+  route('GET', '/api/loadtest/runs/:id/metrics', historyHandlers.runMetrics, { auth: true }),
+  route('GET', '/api/loadtest/runs/:id/logs', historyHandlers.runLogs, { auth: true }),
+  route('GET', '/api/loadtest/runs/:id', historyHandlers.runDetail, { auth: true }),
+  route('DELETE', '/api/loadtest/runs/:id', historyHandlers.runDelete, { auth: true, rate: 'write' }),
+];
 
 export class ApiServer {
   private server: http.Server;
   private authSecret: string;
+  private origins: string[];
+  private limiter: RateLimiters;
+  /** Thời điểm server start — health uptime (T-07). */
+  private startedAt: number;
 
   constructor(
     private env: LoadTestEnv,
     private coordinator: LoadTestCoordinator,
     private store?: LoadtestStore,
     authSecret?: string,
+    startedAt = Date.now(),
   ) {
     this.authSecret = authSecret ?? loadAuthSecret(env.dataDir);
+    this.origins = parseOrigins(process.env.LOADTEST_CORS_ORIGIN, env.corsOrigins);
+    this.limiter = createRateLimiters(env);
+    this.startedAt = startedAt;
     this.server = http.createServer((req, res) => {
       void this.handle(req, res);
     });
@@ -70,63 +150,47 @@ export class ApiServer {
     });
   }
 
-  // ─── Helpers ────────────────────────────────────────────────────────────
-
-  private cors(res: http.ServerResponse) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
-  }
-
-  private json(res: http.ServerResponse, status: number, body: unknown) {
-    this.cors(res);
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(body));
-  }
-
-  private ok(res: http.ServerResponse, data: unknown) {
-    this.json(res, 200, { success: true, statusCode: 200, data });
-  }
-
-  private fail(res: http.ServerResponse, status: number, message: string, extra: Record<string, unknown> = {}) {
-    this.json(res, status, { success: false, statusCode: status, message, ...extra });
-  }
-
-  private async readBody(req: http.IncomingMessage): Promise<JsonBody> {
-    const chunks: Buffer[] = [];
-    for await (const c of req) chunks.push(c as Buffer);
-    const text = Buffer.concat(chunks).toString('utf8');
-    if (!text) return {};
-    try {
-      return JSON.parse(text) as JsonBody;
-    } catch {
-      return {};
-    }
+  /** Đóng mọi connection đang mở (B-2: graceful shutdown — KHÔNG chờ keep-alive). */
+  closeConnections(): Promise<void> {
+    const server = this.server as http.Server & { closeAllConnections?: () => void };
+    server.closeAllConnections?.();
+    return this.close();
   }
 
   private url(req: http.IncomingMessage): URL {
     return new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   }
 
-  /** Verify Bearer token (HMAC, không decode) — ≤ 1ms, không DB lookup (PRD US-3). */
-  private requireAuth(req: http.IncomingMessage): { ok: true; user: SessionUser } | { ok: false; message: string } {
-    const header = req.headers.authorization ?? '';
-    const m = /^Bearer\s+(.+)$/i.exec(header);
-    if (!m) return { ok: false, message: 'Thiếu Authorization: Bearer <token>' };
-    const result = verifySessionToken(m[1], this.authSecret);
-    if (!result.ok) {
-      return {
-        ok: false,
-        message: result.reason === 'expired' ? 'Phiên hết hạn, đăng nhập lại' : 'Token không hợp lệ',
-      };
+  private matchRoute(method: string, p: string): (Route & { params: Record<string, string> }) | undefined {
+    for (const r of ROUTES) {
+      if (r.method !== method) continue;
+      const m = r.regex.exec(p);
+      if (!m) continue;
+      const params: Record<string, string> = {};
+      for (let i = 0; i < r.paramNames.length; i++) params[r.paramNames[i]] = m[i + 1];
+      return { ...r, params };
     }
-    return { ok: true, user: { id: Number(result.payload.sub), username: result.payload.username } };
+    return undefined;
   }
 
-  // ─── Routes ─────────────────────────────────────────────────────────────
+  private limiterLimit(rate: RateKind): number {
+    if (rate === 'login' || rate === 'register') return this.env.rateLimitLoginFails;
+    if (rate === 'start') return 1;
+    if (rate === 'write') return this.env.rateLimitWriteBucket;
+    return 0;
+  }
+
+  /** Ghi fail window post-response (B-6): mọi 4xx login/register = 1 fail; 2xx → clear. */
+  private recordFail(route: Route, res: http.ServerResponse, ip: string): void {
+    if (route.rate !== 'login' && route.rate !== 'register') return;
+    if (res.statusCode >= 400) this.limiter.recordFailure(route.rate, ip);
+    else this.limiter.clear(route.rate, ip);
+  }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse) {
-    this.cors(res);
+    const requestId = makeRequestId();
+    res.setHeader('X-Request-Id', requestId);
+    applyCors(req, res, this.origins);
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
@@ -135,416 +199,62 @@ export class ApiServer {
     const url = this.url(req);
     const p = url.pathname;
     const method = req.method ?? 'GET';
+    const ip = clientIp(req, this.env.trustProxy);
+    const route = this.matchRoute(method, p);
+    const ctx = makeRouteCtx({
+      env: this.env,
+      coordinator: this.coordinator,
+      store: this.store,
+      authSecret: this.authSecret,
+      requestId,
+      url,
+      params: route?.params ?? {},
+      startedAt: this.startedAt,
+    });
+    if (!route) return ctx.fail(res, 404, `Không có route: ${method} ${p}`);
 
     try {
-      // Public: health + auth
-      if (method === 'GET' && p === '/api/loadtest/health') return this.ok(res, { status: 'ok' });
-      if (p.startsWith('/api/loadtest/auth/')) return this.handleAuth(req, res, p, method);
-
-      // Gate (PRD C1): mọi route khác yêu cầu token hợp lệ
-      const auth = this.requireAuth(req);
-      if (!auth.ok) return this.fail(res, 401, auth.message);
-
-      if (method === 'GET' && p === '/api/loadtest/config') {
-        const settings = loadSettings(this.env);
-        return this.ok(res, {
-          port: this.env.port,
-          allowlist: mergedAllowlist(this.env),
-          allowlistFromFile: settings.allowlist,
-          gatewayUrl: this.env.gatewayUrl,
-          maxTarget: this.env.maxTarget,
-          maxDurationMin: this.env.maxDurationMin,
-          maxRegisterRamp: this.env.maxRegisterRamp,
-          presets: PRESETS,
-          hasOtpSecret: !!this.env.otpSecret,
-          hasRedisConfigured: !!this.env.redisUrl,
-          reportsDir: this.env.reportsDir,
-        });
+      // 1. Gate (SEC-6) — register 403 chạy TRƯỚC body validation + rate check (403 vẫn tính 1 fail).
+      if (route.gate && !registerGate(this.env)) {
+        ctx.fail(res, 403, 'Đăng ký đã bị tắt (LOADTEST_ALLOW_REGISTER=false)', { error: 'REGISTER_DISABLED' });
+        return this.recordFail(route, res, ip);
       }
-
-      if (method === 'POST' && p === '/api/loadtest/start') {
-        const body = await this.readBody(req);
-        const startReq: StartRunRequest = {
-          targetUsers: Number(body.targetUsers),
-          rampRate: Number(body.rampRate ?? 200),
-          rampMode: (body.rampMode as 'rate' | 'minutes') ?? 'rate',
-          durationMin: Number(body.durationMin),
-          profile: body.profile as StartRunRequest['profile'],
-          gatewayUrl: String(body.gatewayUrl ?? this.env.gatewayUrl),
-          freshAccounts: Boolean(body.freshAccounts),
-        };
-        const envForGuard = { ...this.env, allowlist: mergedAllowlist(this.env) };
-        const v = validateRunRequest(startReq, envForGuard);
-        if (!v.ok) {
-          return this.fail(res, 400, 'Cấu hình run không hợp lệ (SD-1 chặn cứng)', { errors: v.errors, warnings: v.warnings });
-        }
-        const result = await this.coordinator.start(startReq);
-        if (!result.ok) return this.fail(res, 409, result.error ?? 'Không start được');
-        return this.ok(res, {
-          runId: result.config?.runId,
-          config: result.config,
-          warnings: v.warnings,
-          estimate: estimateInfra(startReq.targetUsers, this.env),
-        });
+      // 2. Auth (PRD C1)
+      if (route.auth) {
+        const auth = requireAuth(req, this.authSecret);
+        if (!auth.ok) return ctx.fail(res, 401, auth.message);
+        ctx.user = auth.user;
       }
-
-      if (method === 'POST' && (p === '/api/loadtest/stop' || p === '/api/loadtest/kill')) {
-        const body = await this.readBody(req);
-        const force = p.endsWith('/kill') || body.force === true;
-        await this.coordinator.stop(force);
-        return this.ok(res, { stopped: true, force });
-      }
-
-      if (method === 'POST' && p === '/api/loadtest/pause') {
-        this.coordinator.pause();
-        return this.ok(res, { paused: true });
-      }
-
-      if (method === 'POST' && p === '/api/loadtest/resume') {
-        this.coordinator.resume();
-        return this.ok(res, { resumed: true });
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/status') {
-        const s = this.coordinator.getRunSnapshot();
-        return this.ok(res, {
-          ...s,
-          elapsedSec: s.startAt > 0 ? Math.round((Date.now() - s.startAt) / 1000) : 0,
-          isRunning: this.coordinator.isRunning,
-        });
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/metrics') {
-        const since = Number(url.searchParams.get('since') ?? 0);
-        const limit = Math.min(Number(url.searchParams.get('limit') ?? 3600), 7200);
-        let ticks = this.coordinator.tickHistory;
-        if (since > 0) ticks = ticks.filter((t) => t.ts > since);
-        ticks = ticks.slice(-limit);
-        return this.ok(res, { ticks, runId: this.coordinator.runId });
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/users') {
-        const offset = Math.max(0, Number(url.searchParams.get('offset') ?? 0));
-        const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? 100)), 500);
-        const filter = url.searchParams.get('filter') ?? undefined;
-        const result = await this.coordinator.queryUsers(offset, limit, filter);
-        return this.ok(res, { rows: result.rows, total: result.total, offset, limit });
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/errors') {
-        const samples = this.coordinator.errorSamples ?? [];
-        return this.ok(res, {
-          top: this.coordinator.lastTick?.errors ?? [],
-          samples,
-        });
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/logs') {
-        const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? 200)), 500);
-        return this.ok(res, { logs: logHistory.slice(-limit) });
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/report') {
-        if (!this.coordinator.latestReport) {
-          return this.fail(res, 404, 'Chưa có report — run chưa kết thúc');
-        }
-        return this.ok(res, this.coordinator.latestReport);
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/report/export') {
-        const format = String(url.searchParams.get('format') ?? 'json');
-        if (!this.coordinator.latestReport) return this.fail(res, 404, 'Chưa có report');
-        const r = this.coordinator.latestReport;
-        if (format === 'md') {
-          this.cors(res);
-          res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="report-${r.runId}.md"` });
-          return res.end(reportToMarkdown(r));
-        }
-        if (format === 'csv') {
-          this.cors(res);
-          res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="metrics-${r.runId}.csv"` });
-          return res.end(ticksToCsv(r.runId, this.coordinator.tickHistory));
-        }
-        this.cors(res);
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="report-${r.runId}.json"` });
-        return res.end(JSON.stringify(r, null, 2));
-      }
-
-      if (method === 'GET' && p === '/api/loadtest/allowlist') {
-        return this.ok(res, { allowlist: mergedAllowlist(this.env), fromFile: loadSettings(this.env).allowlist });
-      }
-
-      if (method === 'POST' && p === '/api/loadtest/allowlist') {
-        const body = await this.readBody(req);
-        const urls = Array.isArray(body.urls) ? (body.urls as unknown[]).filter((u): u is string => typeof u === 'string').map(normalizeUrl) : [];
-        const s = loadSettings(this.env);
-        s.allowlist = [...new Set(urls)];
-        s.updatedAt = Date.now();
-        saveSettings(this.env, s);
-        return this.ok(res, { allowlist: mergedAllowlist(this.env) });
-      }
-
-      if (method === 'POST' && p === '/api/loadtest/cleanup') {
-        const body = await this.readBody(req);
-        const runId = String(body.runId ?? this.coordinator.runId ?? '');
-        const dryRun = body.dryRun !== false;
-        if (!runId) return this.fail(res, 400, 'runId bắt buộc');
-        let accounts: { userId: string }[] = [];
-        const pool = listPools(this.env.dataDir).find((p2) => p2.runId === runId);
-        if (pool) {
-          try {
-            const parsed = JSON.parse(fs.readFileSync(poolPath(this.env.dataDir, runId), 'utf8')) as { accounts: { userId: string }[] };
-            accounts = parsed.accounts ?? [];
-          } catch {
-            accounts = [];
-          }
-        }
-        const redis = createRedis(this.env);
-        try {
-          await redis.connect();
-          const result: CleanupResult = await runCleanup(redis, runId, accounts, dryRun);
-          return this.ok(res, result);
-        } finally {
-          redis.disconnect();
+      // 3. Rate limit (B-3 / US-SEC-4)
+      if (route.rate && route.rate !== 'none') {
+        const rl = this.limiter.check(route.rate, ip);
+        if (!rl.allowed) {
+          const retryAfterSec = rl.retryAfterSec ?? 1;
+          res.setHeader('Retry-After', String(retryAfterSec));
+          res.setHeader('X-RateLimit-Limit', String(this.limiterLimit(route.rate)));
+          res.setHeader('X-RateLimit-Remaining', '0');
+          res.setHeader('X-RateLimit-Reset', String(Math.ceil(Date.now() / 1000) + retryAfterSec));
+          ctx.fail(res, 429, `Quá nhiều yêu cầu — thử lại sau ${retryAfterSec}s`, {
+            error: 'RATE_LIMITED',
+            retryAfterSec,
+          });
+          // FIX-10 (T-06): mọi 4xx login/register = 1 fail (kể cả 429) — đếm vào fail window.
+          return this.recordFail(route, res, ip);
         }
       }
-
-      if (method === 'GET' && p === '/api/loadtest/pools') {
-        if (this.store) {
-          const pools = await this.store.listPools();
-          if (!pools.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-          if (pools.rows.length) {
-            return this.ok(res, {
-              pools: pools.rows.map((pl) => ({
-                runId: pl.poolId,
-                targetUsers: pl.targetUsers,
-                gatewayUrl: pl.gatewayUrl,
-                accountCount: pl.accountCount,
-                registered: pl.registered,
-                loggedIn: pl.loggedIn,
-                failed: pl.failed,
-                importedFromFile: pl.importedFromFile,
-                mtimeMs: pl.createdAt,
-              })),
-            });
-          }
-        }
-        // fallback: file JSON khi DB trống/chưa import (PRD §2.5)
-        return this.ok(res, { pools: listPools(this.env.dataDir) });
-      }
-
-      // ─── History / Replay (PRD D1) ────────────────────────────────────────
-      if (!this.store) return this.fail(res, 503, 'Database chưa được kết nối');
-
-      if (method === 'GET' && p === '/api/loadtest/runs') {
-        const status = url.searchParams.get('status') ?? undefined;
-        const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? 500)), 2000);
-        const rows = await this.store.listRuns({ status, limit });
-        if (!rows.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-        return this.ok(res, { runs: rows.rows.map(toRunSummary), total: rows.rows.length });
-      }
-
-      if (method === 'GET' && isRunPath(p, '/metrics')) {
-        const runId = runIdFromPath(p, '/metrics');
-        const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? 3600)), 20000);
-        const offset = Math.max(0, Number(url.searchParams.get('offset') ?? 0));
-        const rows = await this.store.listMetricSamples(runId, { limit, offset });
-        if (!rows.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-        // D-6: countMetricSamples KHÔNG trả 0 giả khi DB lỗi — check ok trước khi cộng total.
-        const total = await this.store.countMetricSamples(runId);
-        if (!total.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-        return this.ok(res, { runId, ticks: rows.rows.map(toMetricTick), total: total.rows[0]?.n ?? 0 });
-      }
-
-      if (method === 'GET' && isRunPath(p, '/logs')) {
-        const runId = runIdFromPath(p, '/logs');
-        const limit = Math.min(Math.max(1, Number(url.searchParams.get('limit') ?? 200)), 500);
-        const offset = Math.max(0, Number(url.searchParams.get('offset') ?? 0));
-        const level = url.searchParams.get('level') ?? undefined;
-        const rows = await this.store.listLogEvents(runId, { limit, offset, level });
-        if (!rows.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-        return this.ok(res, { runId, logs: rows.rows, total: rows.rows.length });
-      }
-
-      if (method === 'GET' && isRunPath(p, '')) {
-        const runId = runIdFromPath(p, '');
-        const r = await this.store.getRun(runId);
-        if (!r.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-        if (r.rows.length === 0) return this.fail(res, 404, `Run ${runId} không tồn tại`);
-        return this.ok(res, toRunDetail(r.rows[0]));
-      }
-
-      if (method === 'DELETE' && isRunPath(p, '')) {
-        const runId = runIdFromPath(p, '');
-        const deleted = await this.store.deleteRun(runId);
-        if (!deleted.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-        if (deleted.rows.length === 0) return this.fail(res, 404, `Run ${runId} không tồn tại`);
-        return this.ok(res, { deleted: true, runId });
-      }
-
-      return this.fail(res, 404, `Không có route: ${method} ${p}`);
+      // 4. Handler
+      await route.handler(ctx, req, res);
+      return this.recordFail(route, res, ip);
     } catch (err) {
-      ltLog.error(`api error ${method} ${p}: ${String(err)}`);
-      return this.fail(res, 500, `Lỗi server: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  // ─── Admin auth routes (PRD Module A) ───────────────────────────────────
-
-  private async handleAuth(req: http.IncomingMessage, res: http.ServerResponse, p: string, method: string): Promise<void> {
-    if (method === 'POST' && p === '/api/loadtest/auth/register') {
-      const body = await this.readBody(req);
-      const username = String(body.username ?? '').trim();
-      const email = String(body.email ?? '').trim().toLowerCase();
-      const password = String(body.password ?? '');
-      if (!username || !email) return this.fail(res, 400, 'username và email bắt buộc');
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return this.fail(res, 400, 'email không hợp lệ');
-      const pwErr = validatePasswordStrength(password);
-      if (pwErr) return this.fail(res, 400, pwErr);
-      if (!this.store) return this.fail(res, 503, 'Database chưa được kết nối');
-      const r = await this.store.createAdmin({ username, email, passwordHash: hashPassword(password) });
-      if (!r.ok) {
-        // 23505 = unique violation (trùng username/email) → 409; còn lại là DB fail → 503.
-        if (r.error.code === '23505') return this.fail(res, 409, 'username hoặc email đã tồn tại');
-        return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+      if (err instanceof BodyError) {
+        // runId path lỗi (SB-2) — 404
+        ctx.fail(res, err.statusCode, err.message, { error: err.statusCode === 413 ? 'BODY_TOO_LARGE' : 'INVALID_PATH' });
+        // FIX-10 (T-06): 4xx body error của login/register cũng đếm fail.
+        return this.recordFail(route, res, ip);
       }
-      const admin = r.rows[0];
-      if (!admin) return this.fail(res, 409, 'username hoặc email đã tồn tại');
-      ltLog.info(`[lt][auth] admin registered: ${username} (${email})`);
-      return this.ok(res, { id: admin.id, username: admin.username, email: admin.email, displayName: admin.displayName, role: admin.role });
+      ltLog.error(`api error ${method} ${p}: ${err instanceof Error ? err.message : String(err)}`, { requestId });
+      toolMetrics.inc('apiErrors');
+      return ctx.fail(res, 500, 'Lỗi server, xem log với requestId', { error: 'SERVER_ERROR', requestId });
     }
-
-    if (method === 'POST' && p === '/api/loadtest/auth/login') {
-      const body = await this.readBody(req);
-      const identifier = String(body.username ?? body.email ?? body.identifier ?? '').trim();
-      const password = String(body.password ?? '');
-      if (!identifier || !password) return this.fail(res, 400, 'username/email và password bắt buộc');
-      if (!this.store) return this.fail(res, 503, 'Database chưa được kết nối');
-      const r = await this.store.findAdminByLogin(identifier);
-      if (!r.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-      const admin = r.rows[0];
-      if (!admin || !admin.isActive || !verifyPassword(password, admin.passwordHash)) {
-        // Không lộ thông tin account tồn tại hay không (PRD US-2)
-        return this.fail(res, 401, 'Sai username/email hoặc mật khẩu');
-      }
-      void this.store.touchLastLogin(admin.id);
-      const { token, expiresAt } = createSessionToken({ id: admin.id, username: admin.username }, this.authSecret);
-      return this.ok(res, {
-        token,
-        expiresAt,
-        user: { id: admin.id, username: admin.username, email: admin.email, displayName: admin.displayName, role: admin.role },
-      });
-    }
-
-    if (method === 'POST' && p === '/api/loadtest/auth/logout') {
-      const auth = this.requireAuth(req);
-      if (!auth.ok) return this.fail(res, 401, auth.message);
-      return this.ok(res, { loggedOut: true });
-    }
-
-    if (method === 'GET' && p === '/api/loadtest/auth/me') {
-      const auth = this.requireAuth(req);
-      if (!auth.ok) return this.fail(res, 401, auth.message);
-      if (!this.store) return this.fail(res, 503, 'Database chưa được kết nối');
-      const r = await this.store.getAdminById(auth.user.id);
-      if (!r.ok) return this.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-      const admin = r.rows[0];
-      if (!admin) return this.fail(res, 401, 'Tài khoản không tồn tại');
-      return this.ok(res, { id: admin.id, username: admin.username, email: admin.email, displayName: admin.displayName, role: admin.role });
-    }
-
-    return this.fail(res, 404, `Không có route: ${method} ${p}`);
   }
-}
-
-// ─── Mapping helpers ────────────────────────────────────────────────────────
-
-const RUN_PREFIX = '/api/loadtest/runs/';
-
-/** Lấy runId từ path /api/loadtest/runs/{id}{suffix}. */
-function runIdFromPath(p: string, suffix: string): string {
-  const rest = p.slice(RUN_PREFIX.length);
-  return decodeURIComponent(rest.slice(0, rest.length - suffix.length));
-}
-
-/** Kiểm tra path có dạng /api/loadtest/runs/{id}{suffix} với id là 1 segment. */
-function isRunPath(p: string, suffix: string): boolean {
-  const rest = p.slice(RUN_PREFIX.length);
-  if (!rest) return false;
-  const id = suffix ? rest.slice(0, rest.length - suffix.length) : rest;
-  return id.length > 0 && !id.includes('/') && rest.endsWith(suffix);
-}
-
-function toRunSummary(row: RunRow) {
-  return {
-    runId: row.runId,
-    status: row.status,
-    machineId: row.machineId,
-    startAt: row.startAt,
-    endAt: row.endAt,
-    durationSec: row.durationSec,
-    gatewayUrl: row.gatewayUrl,
-    targetUsers: row.targetUsers,
-    workerCount: row.workerCount,
-    stopReason: row.stopReason,
-    poolSourceRunId: row.poolSourceRunId,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-}
-
-function toRunDetail(row: RunRow) {
-  let config: unknown = null;
-  let report: unknown = null;
-  try {
-    config = JSON.parse(row.configJson);
-  } catch {
-    config = null;
-  }
-  try {
-    report = row.summaryJson ? JSON.parse(row.summaryJson) : null;
-  } catch {
-    report = null;
-  }
-  return { ...toRunSummary(row), config, report };
-}
-
-function toMetricTick(row: MetricSampleRow) {
-  const parse = (s: string, fallback: unknown): unknown => {
-    try {
-      return JSON.parse(s);
-    } catch {
-      return fallback;
-    }
-  };
-  return {
-    type: 'tick',
-    runId: row.runId,
-    ts: row.ts,
-    phase: row.phase,
-    elapsedSec: row.elapsedSec,
-    counters: {
-      usersCreated: row.usersCreated,
-      usersConnected: row.usersConnected,
-      usersActive: row.usersActive,
-      usersQueued: row.usersQueued,
-      usersInRoom: row.usersInRoom,
-      actionsTotal: row.actionsTotal,
-      successTotal: row.successTotal,
-      failTotal: row.failTotal,
-      echoOk: row.echoOk,
-      echoSent: row.echoSent,
-      queueCount: row.queueCount,
-      roomCount: row.roomCount,
-      droppedOutbox: row.droppedOutbox,
-      reconnectCount: row.reconnectCount,
-      rateLimitedNoEcho: row.rateLimitedNoEcho,
-    },
-    rates: { successRate: row.successRate, echoRate: row.echoRate },
-    actionsPerSec: parse(row.actionsPerSecJson, {}),
-    latency: parse(row.latencyJson, { p50: 0, p95: 0, p99: 0 }),
-    errors: parse(row.errorsJson, []),
-    server: parse(row.serverJson, {}),
-    workers: parse(row.workersJson, {}),
-  };
 }
