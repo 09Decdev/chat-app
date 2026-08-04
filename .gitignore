@@ -1,0 +1,38 @@
+# deps
+node_modules
+.pnp
+.pnp.js
+
+# build
+dist
+dist-ssr
+*.local
+
+# env
+.env
+.env.*
+!.env.example
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs
+*.log
+
+# os
+.DS_Store
+Thumbs.db
+
+# loadtest tool runtime data (may contain real credentials)
+loadtest/data/*
+!loadtest/data/.gitkeep
+
+# build artifacts
+*.tsbuildinfo

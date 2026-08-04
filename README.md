@@ -34,6 +34,28 @@ npm run preview
 | `VITE_SOCKET_PATH` | `/socket.io/` | Đường dẫn socket.io |
 | `VITE_REFRESH_ENDPOINT` | `/auth/refresh` | Endpoint refresh token (không có trong CHAT_API.md, đoán theo convention) |
 
+## Bảo mật & secrets
+
+Không commit secret vào repo. Secret thật nằm trong `loadtest/.env` (đã git-ignored) và được backup ngoài repo:
+
+- **Backup location**: `%USERPROFILE%\.mayogu-secrets\chat-app-backup-2026-08-04\` (ngoài repo, git-ignored tự nhiên). Không xoá thư mục này.
+- **Nơi lưu secret trong `loadtest/.env`**:
+  - `LOADTEST_AUTH_SECRET` — HMAC secret cho admin session (env ưu tiên hơn file `data/auth-secret.json`, đã xoá khỏi repo).
+  - `LOADTEST_OTP_SECRET` — seed OTP register; **PHẢI khớp** `OTP_SECRET` của gateway-auth-service.
+  - `LOADTEST_DATABASE_URL` — credential Postgres `postgresql://appuser:<pass>@localhost:5439/loadtest`.
+  - `LOADTEST_REDIS_URL` — Redis có quyền ghi (test env).
+- **Runtime data**: `loadtest/data/*` (accounts pool, auth-secret) theo `.gitignore`; chỉ giữ `loadtest/data/.gitkeep`.
+
+### Secret-scan (gitleaks)
+
+- **`npm run secret:scan`** — chạy gitleaks `detect` trên toàn repo (cần gitleaks trên PATH: `winget install gitleaks`). Kỳ vọng **0 finding**.
+- **Pre-commit hook** — chặn commit chứa secret mới (scan staged changes). Cài lại sau khi clone: `sh scripts/install-hooks.sh` (source: `scripts/pre-commit`).
+- Allowlist (test fixtures `test-secret`, DB URL test-only) nằm trong `.gitleaks.toml` — **không** thêm secret thật vào đây.
+
+> ⚠️ **Party-crossing (2 bên phải đồng bộ)** — sau khi rotate secret (2026-08-04):
+> 1. **DB password**: áp dụng mật khẩu mới trong `LOADTEST_DATABASE_URL` lên instance Postgres `postgres-loadtest` (localhost:5439, user `appuser`, db `loadtest`) **trước** khi chạy loadtest server.
+> 2. **OTP_SECRET**: áp dụng `LOADTEST_OTP_SECRET` mới vào `OTP_SECRET` của `gateway-auth-service/.env` — 2 bên phải khớp, nếu không loadtest tool không register được account.
+
 ## Luồng chính
 
 1. **Đăng nhập** (`POST /auth/login`) với `deviceInfo` tự sinh (installationId uuid v4 + fingerprint 64-hex lưu localStorage).

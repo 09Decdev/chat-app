@@ -1,0 +1,111 @@
+{
+  "runId": "ltd6wwaj01",
+  "status": "error",
+  "startAt": 1785759188347,
+  "endAt": 1785759268918,
+  "durationSec": 81,
+  "config": {
+    "runId": "ltd6wwaj01",
+    "targetUsers": 1000,
+    "rampRate": 200,
+    "rampMode": "rate",
+    "durationMin": 30,
+    "durationSec": 1800,
+    "profile": {
+      "chat": 40,
+      "read": 30,
+      "comment": 20,
+      "like": 10,
+      "view": 0
+    },
+    "gatewayUrl": "http://localhost:3000",
+    "workerCount": 1,
+    "socketsPerWorker": 1000,
+    "registerRamp": 100,
+    "useExistingAccounts": true,
+    "freshAccounts": false,
+    "seed": 188347,
+    "createdAt": 1785759188347
+  },
+  "summary": {
+    "usersCreated": 668,
+    "usersConnectedMax": 65,
+    "usersActiveMax": 297,
+    "actionsTotal": 412,
+    "successTotal": 21,
+    "failTotal": 391,
+    "successRate": 5.1,
+    "echoOk": 0,
+    "echoSent": 0,
+    "echoRate": 100,
+    "throughputAvg": 5,
+    "throughputPeak": 316,
+    "queueCountPeak": 0
+  },
+  "perAction": [
+    {
+      "action": "chat",
+      "count": 341,
+      "success": 21,
+      "fail": 320,
+      "successRate": 6.2,
+      "avgMs": 42194,
+      "p50Ms": 47710,
+      "p95Ms": 47710,
+      "p99Ms": 47710
+    },
+    {
+      "action": "read",
+      "count": 66,
+      "success": 0,
+      "fail": 66,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    },
+    {
+      "action": "comment",
+      "count": 3,
+      "success": 0,
+      "fail": 3,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    },
+    {
+      "action": "like",
+      "count": 2,
+      "success": 0,
+      "fail": 2,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    }
+  ],
+  "errors": [
+    {
+      "code": "MATCH_TIMEOUT",
+      "count": 268
+    },
+    {
+      "code": "NO_POST_FIXTURE",
+      "count": 142
+    },
+    {
+      "code": "CHAT_ALREADY_SEATED",
+      "count": 45
+    },
+    {
+      "code": "NETWORK",
+      "count": 7
+    }
+  ],
+  "bottlenecks": [],
+  "stopReason": "auto-stop: connect fail 56% > 30% (E2)"
+}

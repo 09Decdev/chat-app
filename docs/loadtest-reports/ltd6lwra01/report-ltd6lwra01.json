@@ -1,0 +1,107 @@
+{
+  "runId": "ltd6lwra01",
+  "status": "error",
+  "startAt": 1785758675734,
+  "endAt": 1785758753290,
+  "durationSec": 78,
+  "config": {
+    "runId": "ltd6lwra01",
+    "targetUsers": 1000,
+    "rampRate": 200,
+    "rampMode": "rate",
+    "durationMin": 2,
+    "durationSec": 120,
+    "profile": {
+      "chat": 40,
+      "read": 30,
+      "comment": 20,
+      "like": 10,
+      "view": 0
+    },
+    "gatewayUrl": "http://localhost:3000",
+    "workerCount": 1,
+    "socketsPerWorker": 1000,
+    "registerRamp": 100,
+    "useExistingAccounts": true,
+    "freshAccounts": false,
+    "seed": 675734,
+    "createdAt": 1785758675734
+  },
+  "summary": {
+    "usersCreated": 759,
+    "usersConnectedMax": 47,
+    "usersActiveMax": 268,
+    "actionsTotal": 358,
+    "successTotal": 0,
+    "failTotal": 358,
+    "successRate": 0,
+    "echoOk": 0,
+    "echoSent": 0,
+    "echoRate": 100,
+    "throughputAvg": 5,
+    "throughputPeak": 273,
+    "queueCountPeak": 49
+  },
+  "perAction": [
+    {
+      "action": "chat",
+      "count": 279,
+      "success": 0,
+      "fail": 279,
+      "successRate": 0,
+      "avgMs": 52353,
+      "p50Ms": 47710,
+      "p95Ms": 47710,
+      "p99Ms": 47710
+    },
+    {
+      "action": "read",
+      "count": 71,
+      "success": 0,
+      "fail": 71,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    },
+    {
+      "action": "comment",
+      "count": 7,
+      "success": 0,
+      "fail": 7,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    },
+    {
+      "action": "like",
+      "count": 1,
+      "success": 0,
+      "fail": 1,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    }
+  ],
+  "errors": [
+    {
+      "code": "MATCH_TIMEOUT",
+      "count": 273
+    },
+    {
+      "code": "NO_POST_FIXTURE",
+      "count": 158
+    },
+    {
+      "code": "NETWORK",
+      "count": 6
+    }
+  ],
+  "bottlenecks": [],
+  "stopReason": "auto-stop: connect fail 71% > 30% (E2)"
+}

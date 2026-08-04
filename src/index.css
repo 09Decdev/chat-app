@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 255 23% 5%;
+    --foreground: 210 40% 98%;
+
+    --card: 255 20% 7%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 255 22% 9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 263 78% 62%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 255 18% 13%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 255 16% 12%;
+    --muted-foreground: 250 12% 64%;
+
+    --accent: 291 64% 64%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 62% 55%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 58%;
+    --warning-foreground: 0 0% 8%;
+    --info: 199 89% 60%;
+    --info-foreground: 0 0% 100%;
+
+    /* Chart palette — 8 hue colorblind-safe trên nền tối (UI-SPEC 1.1) */
+    --chart-1: 38 92% 60%;
+    --chart-2: 199 89% 60%;
+    --chart-3: 160 84% 45%;
+    --chart-4: 48 96% 58%;
+    --chart-5: 217 91% 60%;
+    --chart-6: 14 85% 60%;
+    --chart-7: 291 64% 64%;
+    --chart-8: 258 80% 75%;
+
+    --border: 255 18% 17%;
+    --input: 255 18% 17%;
+    --ring: 263 78% 62%;
+
+    --radius: 0.85rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: 'kern' 1;
+    background-color: hsl(var(--background));
+    background-image:
+      radial-gradient(60rem 60rem at 12% -10%, hsl(263 78% 30% / 0.28), transparent 60%),
+      radial-gradient(48rem 48rem at 110% 0%, hsl(291 64% 32% / 0.22), transparent 55%),
+      radial-gradient(40rem 40rem at 50% 120%, hsl(199 80% 30% / 0.12), transparent 60%);
+    background-attachment: fixed;
+  }
+
+  /* Custom scrollbar */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  .brand-gradient {
+    background-image: linear-gradient(135deg, hsl(263 78% 62%) 0%, hsl(291 64% 64%) 100%);
+  }
+  .brand-text {
+    background-image: linear-gradient(135deg, hsl(263 90% 75%) 0%, hsl(291 80% 78%) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .glass {
+    background-color: hsl(var(--card) / 0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}

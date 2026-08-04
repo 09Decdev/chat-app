@@ -1,0 +1,21 @@
+#!/bin/sh
+# Pre-commit hook — block commits that contain secrets.
+#
+# Scans the STAGED changes with gitleaks and exits non-zero when a leak is
+# found (set -e propagates gitleaks' exit code). If gitleaks is not installed
+# the hook is skipped with a warning so it never blocks legitimate commits.
+#
+# Install:  sh scripts/install-hooks.sh   (copies this file to .git/hooks/pre-commit)
+# Source:   scripts/pre-commit (tracked — this lives in .git/hooks/ untracked)
+
+set -e
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks: pre-commit hook SKIPPED — gitleaks is not installed."
+  echo "  Install it, then re-run:  winget install gitleaks   (or: scoop install gitleaks)"
+  echo "  Manual scan:              npm run secret:scan"
+  exit 0
+fi
+
+# Canonical gitleaks pre-commit command: scan staged changes only.
+gitleaks protect --staged --no-banner

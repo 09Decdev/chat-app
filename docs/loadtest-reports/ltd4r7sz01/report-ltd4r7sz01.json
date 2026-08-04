@@ -1,0 +1,96 @@
+{
+  "runId": "ltd4r7sz01",
+  "status": "error",
+  "startAt": 1785755564100,
+  "endAt": 1785756013081,
+  "durationSec": 449,
+  "config": {
+    "runId": "ltd4r7sz01",
+    "targetUsers": 1000,
+    "rampRate": 200,
+    "rampMode": "rate",
+    "durationMin": 30,
+    "durationSec": 1800,
+    "profile": {
+      "chat": 40,
+      "read": 30,
+      "comment": 20,
+      "like": 10,
+      "view": 0
+    },
+    "gatewayUrl": "http://localhost:3000",
+    "workerCount": 1,
+    "socketsPerWorker": 1000,
+    "registerRamp": 100,
+    "useExistingAccounts": true,
+    "freshAccounts": false,
+    "seed": 564099,
+    "createdAt": 1785755564099
+  },
+  "summary": {
+    "usersCreated": 982,
+    "usersConnectedMax": 20,
+    "usersActiveMax": 318,
+    "actionsTotal": 533,
+    "successTotal": 0,
+    "failTotal": 533,
+    "successRate": 0,
+    "echoOk": 0,
+    "echoSent": 0,
+    "echoRate": 100,
+    "throughputAvg": 1,
+    "throughputPeak": 504,
+    "queueCountPeak": 0
+  },
+  "perAction": [
+    {
+      "action": "chat",
+      "count": 366,
+      "success": 0,
+      "fail": 366,
+      "successRate": 0,
+      "avgMs": 52188,
+      "p50Ms": 47710,
+      "p95Ms": 47710,
+      "p99Ms": 47710
+    },
+    {
+      "action": "read",
+      "count": 162,
+      "success": 0,
+      "fail": 162,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    },
+    {
+      "action": "comment",
+      "count": 5,
+      "success": 0,
+      "fail": 5,
+      "successRate": 0,
+      "avgMs": 1,
+      "p50Ms": 1,
+      "p95Ms": 1,
+      "p99Ms": 1
+    }
+  ],
+  "errors": [
+    {
+      "code": "MATCH_TIMEOUT",
+      "count": 357
+    },
+    {
+      "code": "NO_POST_FIXTURE",
+      "count": 334
+    },
+    {
+      "code": "NETWORK",
+      "count": 9
+    }
+  ],
+  "bottlenecks": [],
+  "stopReason": "auto-stop: connect fail 85% > 30% (E2)"
+}

@@ -1,0 +1,42 @@
+# .gitleaks.toml — gitleaks config for chat-app
+#
+# Base: default gitleaks rule set + an allowlist for GENUINE test fixtures only.
+# Do NOT add real secrets here.
+#
+# Reference: https://github.com/gitleaks/gitleaks
+#
+# npm scripts (package.json):
+#   secret:scan        = git history (`--log-opts=--all`) + working tree (`--no-git`)
+#   secret:scan:tree   = working tree only (`--no-git`)
+# The `--no-git` flag requires gitleaks v8.19.0+ (older versions used `gitleaks dir`).
+# The working-tree scan is what catches the currently-untracked source files
+# (config.ts, init.ts, .env.example) that a history-only scan would miss.
+
+[extend]
+useDefault = true
+
+# -----------------------------------------------------------------------------
+# Allowlist — test fixtures in loadtest/__tests__/*.test.ts
+#
+# These are FAKE secrets that test code legitimately contains:
+#   - test DB connection strings for the test-only databases
+#     (postgresql://appuser:secret@localhost:5439/loadtest_test / loadtest_test_api)
+#   - fake auth secrets ("test-secret-...")
+#
+# The runtime default `postgresql://appuser:secret@localhost:5439/loadtest`
+# (loadtest/config.ts, loadtest/db/init.ts, loadtest/.env.example) is NOT
+# allowlisted here — those are real config defaults handled by T-03.
+# -----------------------------------------------------------------------------
+[allowlist]
+description = "test fixtures in loadtest/__tests__ (fake secrets, test-only DB URLs)"
+regexes = [
+  # Test-only DB names (note the _test / _test_api suffix — deliberately NOT the
+  # bare `loadtest` DB used by runtime config). Anchored with $ so the pattern
+  # cannot match lookalike names such as `loadtest_testing`. Scoped to the test
+  # fixtures in loadtest/__tests__ ONLY — never add runtime config defaults here.
+  '''postgresql://appuser:secret@localhost:5439/loadtest_test(_api)?$''',
+]
+strings = [
+  # Fake auth secrets used by the unit tests.
+  "test-secret",
+]
