@@ -1,1 +1,0 @@
-{"success":false,"statusCode":400,"message":"Email or password is incorrect","error":"INTERNAL_SERVER_ERROR","timestamp":"2026-08-05T02:54:39.183Z","path":"/auth/login","traceId":"90f3969e-e1ae-446a-a72e-68aabdeb8742"}

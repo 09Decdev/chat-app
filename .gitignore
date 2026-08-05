@@ -42,3 +42,6 @@ coverage
 
 # test artifacts
 reports/
+
+# debug artifacts (manual runs)
+login*.json
