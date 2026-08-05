@@ -151,7 +151,8 @@ export class SimpleRateLimiter {
 
 /**
  * Provision toàn bộ account cho 1 run:
- * - useExisting: tìm pool cùng targetUsers + gatewayUrl trên disk → login lại (AF-4).
+ * - useExisting: tái sử dụng pool đã có — thứ tự: (1) pool seed trong DB
+ *   (loadPoolFromDb — seed-accounts.ts), (2) pool file trên disk (AF-4, backward compat) → login lại.
  * - fresh (hoặc không có pool): register OTP-Seed theo ramp.
  * Trả về mảng account + summary (dashboard đếm register/login fail realtime).
  * shouldStop: callback kill-switch — dừng sớm vòng loop khi run bị hủy (SD-3).
@@ -162,68 +163,42 @@ export async function provisionAccounts(
   env: LoadTestEnv,
   onProgress?: (done: number, total: number) => void,
   shouldStop?: () => boolean,
+  loadPoolFromDb?: (gatewayUrl: string, targetUsers: number) => Promise<TestAccount[] | null>,
 ): Promise<ProvisionSummary> {
   const gateway = normalizeUrl(config.gatewayUrl);
   const summary: ProvisionSummary = { accounts: [], registered: 0, loggedIn: 0, failed: 0, registerFailed: 0, errors: {} };
-  const existing = config.useExistingAccounts
-    ? listPools(env.dataDir).find((p) => p.targetUsers === config.targetUsers && p.gatewayUrl === gateway)
-    : undefined;
+  const loginLimiter = new SimpleRateLimiter(config.registerRamp); // dùng chung ramp cho login (AF-3)
 
-  if (existing) {
-    summary.poolSourceRunId = existing.runId;
-    ltLog.info(`Auth Factory: tái sử dụng pool ${existing.runId} (${existing.targetUsers} users) — login lại...`);
-    const pool = JSON.parse(
-      fs.readFileSync(path.join(env.dataDir, `accounts-${existing.runId}.json`), 'utf8'),
-    ) as { accounts: TestAccount[] };
-    const accounts = pool.accounts.slice(0, config.targetUsers);
-    const limiter = new SimpleRateLimiter(config.registerRamp); // dùng chung ramp cho login (AF-3)
-    const results: AccountOutcome[] = [];
-    let done = 0;
-    await runWithConcurrency(accounts, PROVISION_CONCURRENCY, async (acc) => {
-      if (shouldStop?.()) return;
-      await limiter.acquire();
-      const res = await requestJson<{ accessToken: string; refreshToken: string; require2fa?: boolean; tempToken?: string }>(
-        gateway,
-        '/auth/login',
-        { method: 'POST', body: { email: acc.email, password: acc.password, deviceInfo: acc.deviceInfo } },
-      );
-      if (res.ok && res.data?.accessToken) {
-        acc.accessToken = res.data.accessToken;
-        acc.refreshToken = res.data.refreshToken ?? acc.refreshToken;
-        summary.loggedIn++;
-        summary.accounts.push(acc);
-        results.push({
-          email: acc.email, password: acc.password, userId: acc.userId, displayName: acc.displayName,
-          deviceInfo: acc.deviceInfo, dateOfBirth: acc.dateOfBirth, country: acc.country,
-          registeredAt: acc.registeredAt, status: 'logged_in', lastErrorCode: null, lastLoginAt: Date.now(),
-        });
-      } else if (res.ok && res.data?.require2fa) {
-        summary.failed++;
-        summary.errors['TWO_FA_REQUIRED'] = (summary.errors['TWO_FA_REQUIRED'] ?? 0) + 1;
-        results.push({
-          email: acc.email, password: acc.password, userId: acc.userId, displayName: acc.displayName,
-          deviceInfo: acc.deviceInfo, dateOfBirth: acc.dateOfBirth, country: acc.country,
-          registeredAt: acc.registeredAt, status: 'failed', lastErrorCode: 'TWO_FA_REQUIRED', lastLoginAt: null,
-        });
-      } else {
-        summary.failed++;
-        const code = res.code || 'LOGIN_FAIL';
-        summary.errors[code] = (summary.errors[code] ?? 0) + 1;
-        results.push({
-          email: acc.email, password: acc.password, userId: acc.userId, displayName: acc.displayName,
-          deviceInfo: acc.deviceInfo, dateOfBirth: acc.dateOfBirth, country: acc.country,
-          registeredAt: acc.registeredAt, status: 'failed', lastErrorCode: code, lastLoginAt: null,
-        });
+  if (config.useExistingAccounts) {
+    // 1. Pool seed trong DB (seed-accounts.ts) — khớp gateway + targetUsers, mới nhất.
+    if (loadPoolFromDb) {
+      const dbAccounts = await loadPoolFromDb(gateway, config.targetUsers);
+      if (dbAccounts && dbAccounts.length > 0) {
+        ltLog.info(`Auth Factory: tái sử dụng DB pool (${dbAccounts.length} accounts) — login lại...`);
+        await loginAccounts(gateway, dbAccounts.slice(0, config.targetUsers), config, summary, loginLimiter, onProgress, shouldStop);
+        if (summary.accounts.length > 0) {
+          persistPool(env, config.runId, config, summary.accounts);
+          return summary;
+        }
+        ltLog.warn('Login DB pool toàn bộ fail — fallback disk pool rồi register mới.');
       }
-      done++;
-      onProgress?.(done, accounts.length);
-    });
-    summary.results = results;
-    if (summary.accounts.length === 0) {
-      ltLog.warn('Login toàn bộ fail — fallback register mới.');
-    } else {
-      persistPool(env, config.runId, config, summary.accounts);
-      return summary;
+    }
+
+    // 2. Pool file trên disk (AF-2/AF-4 — backward compat; file cũ bị xoá ở secret cleanup).
+    const existing = listPools(env.dataDir).find((p) => p.targetUsers === config.targetUsers && p.gatewayUrl === gateway);
+    if (existing) {
+      summary.poolSourceRunId = existing.runId;
+      ltLog.info(`Auth Factory: tái sử dụng pool ${existing.runId} (${existing.targetUsers} users) — login lại...`);
+      const pool = JSON.parse(
+        fs.readFileSync(path.join(env.dataDir, `accounts-${existing.runId}.json`), 'utf8'),
+      ) as { accounts: TestAccount[] };
+      await loginAccounts(gateway, pool.accounts.slice(0, config.targetUsers), config, summary, loginLimiter, onProgress, shouldStop);
+      if (summary.accounts.length === 0) {
+        ltLog.warn('Login toàn bộ fail — fallback register mới.');
+      } else {
+        persistPool(env, config.runId, config, summary.accounts);
+        return summary;
+      }
     }
   }
 
@@ -348,6 +323,64 @@ export async function provisionAccounts(
   summary.results = [...(summary.results ?? []), ...results];
   persistPool(env, config.runId, config, summary.accounts);
   return summary;
+}
+
+/**
+ * Login lại 1 pool account (AF-4) — dùng chung cho DB pool + disk pool.
+ * Rate-limited bởi registerRamp; per-account outcome append vào summary.results.
+ * Summary đếm dồn: login fail của bước này KHÔNG tính vào registerFailed (E1 chỉ đếm register).
+ */
+async function loginAccounts(
+  gateway: string,
+  accounts: TestAccount[],
+  config: RunConfig,
+  summary: ProvisionSummary,
+  limiter: SimpleRateLimiter,
+  onProgress?: (done: number, total: number) => void,
+  shouldStop?: () => boolean,
+): Promise<void> {
+  const results: AccountOutcome[] = [];
+  let done = 0;
+  await runWithConcurrency(accounts, PROVISION_CONCURRENCY, async (acc) => {
+    if (shouldStop?.()) return;
+    await limiter.acquire();
+    const res = await requestJson<{ accessToken: string; refreshToken: string; require2fa?: boolean; tempToken?: string }>(
+      gateway,
+      '/auth/login',
+      { method: 'POST', body: { email: acc.email, password: acc.password, deviceInfo: acc.deviceInfo } },
+    );
+    if (res.ok && res.data?.accessToken) {
+      acc.accessToken = res.data.accessToken;
+      acc.refreshToken = res.data.refreshToken ?? acc.refreshToken;
+      summary.loggedIn++;
+      summary.accounts.push(acc);
+      results.push({
+        email: acc.email, password: acc.password, userId: acc.userId, displayName: acc.displayName,
+        deviceInfo: acc.deviceInfo, dateOfBirth: acc.dateOfBirth, country: acc.country,
+        registeredAt: acc.registeredAt, status: 'logged_in', lastErrorCode: null, lastLoginAt: Date.now(),
+      });
+    } else if (res.ok && res.data?.require2fa) {
+      summary.failed++;
+      summary.errors['TWO_FA_REQUIRED'] = (summary.errors['TWO_FA_REQUIRED'] ?? 0) + 1;
+      results.push({
+        email: acc.email, password: acc.password, userId: acc.userId, displayName: acc.displayName,
+        deviceInfo: acc.deviceInfo, dateOfBirth: acc.dateOfBirth, country: acc.country,
+        registeredAt: acc.registeredAt, status: 'failed', lastErrorCode: 'TWO_FA_REQUIRED', lastLoginAt: null,
+      });
+    } else {
+      summary.failed++;
+      const code = res.code || 'LOGIN_FAIL';
+      summary.errors[code] = (summary.errors[code] ?? 0) + 1;
+      results.push({
+        email: acc.email, password: acc.password, userId: acc.userId, displayName: acc.displayName,
+        deviceInfo: acc.deviceInfo, dateOfBirth: acc.dateOfBirth, country: acc.country,
+        registeredAt: acc.registeredAt, status: 'failed', lastErrorCode: code, lastLoginAt: null,
+      });
+    }
+    done++;
+    onProgress?.(done, accounts.length);
+  });
+  summary.results = [...(summary.results ?? []), ...results];
 }
 
 function persistPool(env: LoadTestEnv, runId: string, config: RunConfig, accounts: TestAccount[]) {

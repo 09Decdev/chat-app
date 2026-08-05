@@ -283,6 +283,71 @@ describeDb('store — pools + pool_accounts', () => {
     await store.disconnect();
   });
 
+  it('findPool chọn pool MỚI NHẤT khớp gateway + targetUsers (DB reuse)', async () => {
+    const store = new LoadtestStore(TEST_DB_URL);
+    await store.connect();
+    await store.upsertPool({
+      poolId: 'lt-fp1', gatewayUrl: 'http://localhost:3000', targetUsers: 1000,
+      accountCount: 1, registered: 1, loggedIn: 0, failed: 0, errorsJson: '{}', reusedByRunIdsJson: '[]', createdAt: 1000,
+    });
+    await store.upsertPool({
+      poolId: 'lt-fp2', gatewayUrl: 'http://localhost:3000', targetUsers: 1000,
+      accountCount: 1, registered: 1, loggedIn: 0, failed: 0, errorsJson: '{}', reusedByRunIdsJson: '[]', createdAt: 2000,
+    });
+    await store.upsertPool({
+      poolId: 'lt-fp3', gatewayUrl: 'http://localhost:3001', targetUsers: 1000,
+      accountCount: 1, registered: 1, loggedIn: 0, failed: 0, errorsJson: '{}', reusedByRunIdsJson: '[]', createdAt: 3000,
+    });
+    const r = expectOk(await store.findPool('http://localhost:3000', 1000));
+    expect(r).toHaveLength(1);
+    expect(r[0].poolId).toBe('lt-fp2'); // created_at DESC
+    const none = expectOk(await store.findPool('http://localhost:9999', 1000));
+    expect(none).toHaveLength(0); // no pool ≠ DB fail (ok:true, rows rỗng)
+    await store.disconnect();
+  });
+
+  it('markPoolReused append runId idempotent + cập nhật per-account', async () => {
+    const store = new LoadtestStore(TEST_DB_URL);
+    await store.connect();
+    await store.upsertPool({
+      poolId: 'lt-mr1', gatewayUrl: 'http://localhost:3000', targetUsers: 1000,
+      accountCount: 1, registered: 1, loggedIn: 0, failed: 0, errorsJson: '{}', reusedByRunIdsJson: '[]',
+    });
+    await store.insertPoolAccounts([
+      { poolId: 'lt-mr1', email: 'mr@test.vn', password: 'pw', userId: 'u', displayName: 'MR', deviceInfo: {}, dateOfBirth: '2000-01-01', country: 'VN', status: 'registered' },
+    ]);
+    await store.markPoolReused('lt-mr1', 'lt-run-1', 1234);
+    await store.markPoolReused('lt-mr1', 'lt-run-1', 1235); // idempotent — không trùng
+    await store.markPoolReused('lt-mr1', 'lt-run-2', 1236);
+    const p = expectOk(await store.getPool('lt-mr1'))[0];
+    expect(JSON.parse(p!.reusedByRunIdsJson)).toEqual(['lt-run-1', 'lt-run-2']);
+    const acc = expectOk(await store.listPoolAccounts('lt-mr1'))[0];
+    expect(acc?.lastUsedRunId).toBe('lt-run-2');
+    expect(acc?.lastLoginAt).toBe(1236);
+    expect(acc?.status).toBe('logged_in');
+    const missing = await store.markPoolReused('lt-nonexistent', 'lt-run-x');
+    expect(missing.ok).toBe(false);
+    await store.disconnect();
+  });
+
+  it('listPoolAccounts limit lớn cho reuse (cap 100k, không chỉ 500)', async () => {
+    const store = new LoadtestStore(TEST_DB_URL);
+    await store.connect();
+    await store.upsertPool({
+      poolId: 'lt-p4', gatewayUrl: 'http://localhost:3000', targetUsers: 1000,
+      accountCount: 3, registered: 3, loggedIn: 0, failed: 0, errorsJson: '{}', reusedByRunIdsJson: '[]',
+    });
+    await store.insertPoolAccounts(
+      Array.from({ length: 3 }, (_, i) => ({
+        poolId: 'lt-p4', email: `big${i}@test.vn`, password: 'pw', userId: `u${i}`, displayName: `B${i}`,
+        deviceInfo: {}, dateOfBirth: '2000-01-01', country: 'VN', status: 'registered',
+      })),
+    );
+    const all = expectOk(await store.listPoolAccounts('lt-p4', { limit: 100_000 }));
+    expect(all).toHaveLength(3);
+    await store.disconnect();
+  });
+
   it('insertPoolAccounts fail (FK 23503) → error KHÔNG chứa sql/params/password (B-1)', async () => {
     const store = new LoadtestStore(TEST_DB_URL);
     await store.connect();

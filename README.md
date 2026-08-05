@@ -137,6 +137,35 @@ npm run loadtest:db:cleanup -- --older-than 30d   # retention thủ công (30d/1
 pg_dump -h localhost -p 5439 -U appuser -d loadtest -Fc -f loadtest-$(date +%F).dump
 ```
 
+## Account pool (dùng account có sẵn)
+
+Account test có thể **seed trước vào DB 1 lần** — các run sau **login lại** (không register) khi
+`useExistingAccounts=true` (mặc định — bỏ tick "fresh accounts" khi start). Register vẫn dùng
+khi cần account mới (`freshAccounts`).
+
+**Seed account vào DB** (dùng `LOADTEST_DATABASE_URL`):
+
+```bash
+# JSON — array [{ email, password, displayName?, userId?, dateOfBirth?, country? }]
+npm run loadtest:seed-accounts -- loadtest/data/seed-accounts.json
+
+# CSV — email,password[,displayName] (dòng đầu là header; auto-detect .json/.csv)
+npm run loadtest:seed-accounts -- loadtest/data/seed-accounts.csv
+
+# Pool riêng / gateway khác
+npm run loadtest:seed-accounts -- accounts.json --pool-id my-pool --gateway-url http://localhost:3000
+```
+
+- Pool id tự sinh `seed-<YYYYMMDDHHMMSS>-<rand4>` (hoặc set `--pool-id`). Chạy lại = **idempotent**
+  (`ON CONFLICT (pool_id, email)` cập nhật password/status).
+- Password lưu **plaintext** trong DB (THREAT-MODEL D-8 — bắt buộc để reuse login). Script
+  **không bao giờ in password**.
+- **Thứ tự tìm pool khi start** (`useExistingAccounts=true`): pool DB khớp `gateway_url` +
+  `target_users` (mới nhất, bảng `pools`/`pool_accounts`) → pool file trên disk
+  (`loadtest/data/accounts-*.json`, legacy) → register mới.
+- ⚠️ **Login vẫn bị rate-limit bởi gateway**: reuse dùng chung ramp `LOADTEST_REGISTER_RAMP`
+  (mặc định 100 req/s) — pool 10k users login lại mất ~100s (giới hạn guest bucket của gateway).
+
 ## Vận hành
 
 - **Health endpoint**: `GET /api/loadtest/health` → `{ status: 'ok'|'degraded'|'down', db, redis, workers, version, uptimeSec, timestamp }`. DB down → `degraded`/`down` — **không 500, không `ok` giả** (fix T-07); probe db/redis cache 10s. Docker healthcheck chỉ check HTTP 200 nên container sống khi `degraded` (D-25).

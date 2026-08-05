@@ -11,11 +11,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { LoadTestTick, RunConfig } from '../types';
-import { ltLog, normalizeUrl, subscribeLog } from '../util';
+import type { LoadTestTick, RunConfig, TestAccount } from '../types';
+import { genDateOfBirth, genDeviceInfo, ltLog, normalizeUrl, subscribeLog } from '../util';
 import { toEpochMs } from './int';
 import type { ProvisionSummary } from '../auth-factory';
-import { LoadtestStore, type MetricSampleRow, type PoolRow } from './store';
+import { LoadtestStore, type MetricSampleRow, type PoolAccountRow, type PoolRow } from './store';
 
 const FLUSH_INTERVAL_MS = 30_000; // batch insert mỗi ~30s
 const MAX_PENDING_TICKS = 500; // hoặc flush khi đủ 500 tick
@@ -220,6 +220,37 @@ export class DbWriter {
   }
 
   // ─── Pool + PoolAccount ──────────────────────────────────────────────────
+
+  /** Giới hạn account tải 1 lần cho DB pool reuse (≥ target tối đa 200k). */
+  private static readonly DB_POOL_MAX_ACCOUNTS = 200_000;
+
+  /**
+   * Tìm pool seed trong DB khớp gateway + targetUsers (seed-accounts.ts) → map sang
+   * TestAccount cho reuse login (provisionAccounts — DB path). Không có pool / DB fail
+   * → null (provisionAccounts fallback disk → register). Đánh dấu pool đã reuse (best-effort).
+   */
+  async findPoolForRun(gatewayUrl: string, targetUsers: number): Promise<TestAccount[] | null> {
+    if (!this.store.enabled || !this.currentRunId) return null;
+    const gw = normalizeUrl(gatewayUrl);
+    const found = await this.store.findPool(gw, targetUsers);
+    if (!found.ok) {
+      ltLog.warn(`[lt][db] findPool fail (${gw}): ${found.error.message}`);
+      return null;
+    }
+    const pool = found.rows[0];
+    if (!pool) return null;
+    const accRes = await this.store.listPoolAccounts(pool.poolId, { limit: DbWriter.DB_POOL_MAX_ACCOUNTS });
+    if (!accRes.ok) {
+      ltLog.warn(`[lt][db] listPoolAccounts fail (${pool.poolId}): ${accRes.error.message}`);
+      return null;
+    }
+    const accounts = accRes.rows.map((r) => poolAccountToTestAccount(r)).slice(0, targetUsers);
+    if (!accounts.length) return null;
+    const mark = await this.store.markPoolReused(pool.poolId, this.currentRunId);
+    if (!mark.ok) ltLog.warn(`[lt][db] markPoolReused fail (${pool.poolId}): ${mark.error.message}`);
+    ltLog.info(`[lt][db] reuse pool ${pool.poolId}: ${accounts.length} accounts (DB seed pool)`);
+    return accounts;
+  }
 
   /**
    * Ghi pool + per-account outcome sau khi provisioning xong (PRD B1).
@@ -443,5 +474,47 @@ function fromPoolRow(row: PoolRow): {
     reusedByRunIdsJson: row.reusedByRunIdsJson,
     importedFromFile: row.importedFromFile,
     createdAt: row.createdAt,
+  };
+}
+
+/**
+ * Map pool_accounts row → TestAccount để reuse login (DB pool).
+ * - deviceInfo: parse từ device_info_json (seed script luôn ghi hợp lệ); thiếu/parse fail
+ *   → sinh mới (legacy import) — nếu để trống, gateway reject login (DTO validation).
+ * - dateOfBirth/country rỗng → gen mặc định (chỉ dùng cho login — không gửi lên).
+ */
+function poolAccountToTestAccount(r: PoolAccountRow): TestAccount {
+  let deviceInfo: TestAccount['deviceInfo'] = { installationId: '', deviceFingerprint: '', platform: 'web', deviceName: '' };
+  try {
+    const parsed = JSON.parse(r.deviceInfoJson || '{}') as {
+      installationId?: unknown;
+      deviceFingerprint?: unknown;
+      deviceName?: unknown;
+    };
+    if (parsed && typeof parsed === 'object') {
+      deviceInfo = {
+        installationId: typeof parsed.installationId === 'string' ? parsed.installationId : '',
+        deviceFingerprint: typeof parsed.deviceFingerprint === 'string' ? parsed.deviceFingerprint : '',
+        platform: 'web',
+        deviceName: typeof parsed.deviceName === 'string' ? parsed.deviceName : '',
+      };
+    }
+  } catch {
+    // deviceInfo rỗng — fallback gen dưới
+  }
+  if (!deviceInfo.installationId || !deviceInfo.deviceFingerprint) {
+    deviceInfo = genDeviceInfo('seed', 0);
+  }
+  return {
+    email: r.email,
+    password: r.password,
+    userId: r.userId,
+    accessToken: '',
+    refreshToken: '',
+    displayName: r.displayName,
+    deviceInfo,
+    dateOfBirth: r.dateOfBirth || genDateOfBirth(),
+    country: r.country || 'VN',
+    registeredAt: r.registeredAt ?? Date.now(),
   };
 }

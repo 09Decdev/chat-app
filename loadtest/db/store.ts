@@ -494,6 +494,24 @@ export class LoadtestStore {
     );
   }
 
+  /**
+   * Tìm pool tái sử dụng cho run — DB-based reuse (seed-accounts.ts).
+   * Ưu tiên pool có account_count >= targetUsers (đủ dùng, mới nhất), nếu không có
+   * thì lấy pool mới nhất của gateway (caller slice theo targetUsers; thiếu < 50% → register fallback).
+   * Không có pool → ok:true, rows rỗng (caller phân biệt "no pool" vs "DB fail" — D-6).
+   */
+  async findPool(gatewayUrl: string, targetUsers: number): Promise<QueryResult<PoolRow>> {
+    return this.query<PoolRow>(
+      `SELECT pool_id AS "poolId", gateway_url AS "gatewayUrl", target_users AS "targetUsers",
+              account_count AS "accountCount", registered, logged_in AS "loggedIn", failed,
+              errors_json AS "errorsJson", reused_by_run_ids_json AS "reusedByRunIdsJson",
+              imported_from_file AS "importedFromFile", created_at AS "createdAt"
+       FROM pools WHERE gateway_url = $1
+       ORDER BY (account_count >= $2) DESC, created_at DESC LIMIT 1`,
+      [gatewayUrl, targetUsers],
+    );
+  }
+
   async listPools(): Promise<QueryResult<PoolRow>> {
     return this.query<PoolRow>(
       `SELECT pool_id AS "poolId", gateway_url AS "gatewayUrl", target_users AS "targetUsers",
@@ -566,7 +584,9 @@ export class LoadtestStore {
       params.push(opts.status);
       where.push(`status = $${params.length}`);
     }
-    const limit = Math.min(Math.max(1, opts?.limit ?? 200), 500);
+    // Cap 100k — đủ tải toàn bộ pool seed cho reuse (target tối đa 200k); dashboard
+    // phân trang vẫn dùng limit nhỏ (mặc định 200).
+    const limit = Math.min(Math.max(1, opts?.limit ?? 200), 100_000);
     const offset = Math.max(0, opts?.offset ?? 0);
     return this.query<PoolAccountRow>(
       `SELECT id, pool_id AS "poolId", email, password, user_id AS "userId", display_name AS "displayName",
@@ -575,6 +595,44 @@ export class LoadtestStore {
               last_used_run_id AS "lastUsedRunId", last_login_at AS "lastLoginAt"
        FROM pool_accounts WHERE ${where.join(' AND ')} ORDER BY id ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset],
+    );
+  }
+
+  /**
+   * Đánh dấu pool seed đã được 1 run reuse (DB-based reuse login):
+   * - Append runId vào reused_by_run_ids_json (idempotent — không trùng).
+   * - Cập nhật per-account last_used_run_id / last_login_at / status='logged_in'
+   *   (outcome login thật của run được writePool ghi vào pool của run đó).
+   */
+  async markPoolReused(poolId: string, runId: string, now = Date.now()): Promise<QueryResult<void>> {
+    const p = await this.query<PoolRow>(
+      `SELECT pool_id AS "poolId", gateway_url AS "gatewayUrl", target_users AS "targetUsers",
+              account_count AS "accountCount", registered, logged_in AS "loggedIn", failed,
+              errors_json AS "errorsJson", reused_by_run_ids_json AS "reusedByRunIdsJson",
+              imported_from_file AS "importedFromFile", created_at AS "createdAt"
+       FROM pools WHERE pool_id = $1 LIMIT 1`,
+      [poolId],
+    );
+    if (!p.ok) return { ok: false, error: p.error };
+    if (!p.rows[0]) {
+      return { ok: false, error: { code: 'POOL_NOT_FOUND', message: `pool ${poolId} không tồn tại`, context: 'write' } };
+    }
+    let reused: unknown;
+    try {
+      reused = JSON.parse(p.rows[0].reusedByRunIdsJson);
+    } catch {
+      reused = null;
+    }
+    const list = Array.isArray(reused) ? reused.filter((x): x is string => typeof x === 'string') : [];
+    if (!list.includes(runId)) list.push(runId);
+    const up = await this.query(`UPDATE pools SET reused_by_run_ids_json = $1 WHERE pool_id = $2`, [JSON.stringify(list), poolId], {
+      write: true,
+    });
+    if (!up.ok) return up;
+    return this.query(
+      `UPDATE pool_accounts SET last_used_run_id = $1, last_login_at = $2, status = 'logged_in' WHERE pool_id = $3`,
+      [runId, now, poolId],
+      { write: true },
     );
   }
 }

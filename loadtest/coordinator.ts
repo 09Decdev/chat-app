@@ -229,6 +229,7 @@ export class LoadTestCoordinator {
       }
       this.restDriver = new RestDriver(this.config.gatewayUrl, this.env);
 
+      const dbWriter = this.dbWriter;
       const summary = await provisionAccounts(
         this.redis,
         this.config,
@@ -238,6 +239,8 @@ export class LoadTestCoordinator {
           this.provisionProgress = { done, total };
         },
         () => this.finishing || ['stopped', 'error'].includes(this.phase),
+        // DB-based pool reuse (seed-accounts.ts): tìm pool seed khớp gateway + targetUsers → login lại.
+        dbWriter ? (gw, tu) => dbWriter.findPoolForRun(gw, tu) : undefined,
       );
       this.provisionSummary = summary;
       void this.dbWriter?.writePool(this.config, summary); // DB: pools + pool_accounts (per-account outcome) — PRD B1

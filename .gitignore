@@ -45,3 +45,6 @@ reports/
 
 # debug artifacts (manual runs)
 login*.json
+
+# seed input (credential thật — KHÔNG commit)
+users_accounts*.json
