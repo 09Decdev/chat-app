@@ -14,8 +14,9 @@
  */
 
 import { io, type Socket } from 'socket.io-client';
-import type { RunConfig, TestAccount, UserActionState, UserPhase, VirtualUserRow, WorkerTick } from './types';
+import type { RunConfig, TestAccount, UserActionState, UserPhase, VirtualUserRow, WorkerTick, ErrorSample, ConnectFailType } from './types';
 import { ACTION_TYPES, EMPTY_CONNECT_FAILS } from './types';
+import { sanitizeLogText } from './sanitize';
 import { normalizeSort, sortUsers } from './users-sort';
 import type { LoadTestEnv } from './config';
 import { BucketedHistogram, HISTOGRAM_BUCKETS } from './metrics';
@@ -36,6 +37,8 @@ const REST_READ_INTERVAL_MS = 3000;
 const REST_COMMENT_INTERVAL_MS = 10_000;
 const REST_LIKE_INTERVAL_MS = 15_000;
 const REST_VIEW_INTERVAL_MS = 5000;
+/** Cap số loại error code riêng biệt (S-4 R2): gateway bơm N code lạ → bucket 'OTHER' (chống map vô hạn). */
+const MAX_ERROR_CODES = 20;
 
 interface PendingMsg {
   clientMsgId: string;
@@ -60,6 +63,28 @@ export function pickProfile(profile: RunConfig['profile']): Profile {
     if (r < acc) return name;
   }
   return 'read';
+}
+
+/** Phân loại connect_error (DESIGN-loadtest-e2-connect-fail §6 heuristic — PLAN T4):
+ *  timeout (type==='TimeoutError' / /timeout/i) → transport (/xhr poll error|transport/i)
+ *  → reject (/websocket error|server|handshake|reject/i — gồm auth-reject vì client
+ *  không expose HTTP status, PRD §6.1) → other.
+ *  KHÔNG throw với mọi input (null/string/thiếu field/control chars — ST-5); sai loại chỉ
+ *  ảnh hưởng breakdown display, KHÔNG ảnh hưởng rate/auto-stop (R5). */
+export function classifyConnectError(err: unknown): ConnectFailType {
+  if (err !== null && typeof err === 'object') {
+    if ((err as { type?: unknown }).type === 'TimeoutError') return 'timeout';
+    const maybeMsg = (err as { message?: unknown }).message;
+    return typeof maybeMsg === 'string' ? classifyByMessage(maybeMsg) : 'other';
+  }
+  return typeof err === 'string' ? classifyByMessage(err) : 'other';
+}
+
+function classifyByMessage(message: string): ConnectFailType {
+  if (/timeout/i.test(message)) return 'timeout';
+  if (/xhr poll error|transport/i.test(message)) return 'transport';
+  if (/websocket error|server|handshake|reject/i.test(message)) return 'reject';
+  return 'other';
 }
 
 /** 1 virtual user — vòng đời theo SE-2. */
@@ -139,6 +164,12 @@ export class VirtualUser {
     const s = this.socket;
 
     s.on('connect', () => {
+      if (this.phase === 'failed') {
+        // S-2 (R2): connect in-flight về muộn sau cutover — 'failed' là TERMINAL (F-1:
+        // "tối đa 5 fail/user" là tiền đề số học E2) — KHÔNG resurrect, KHÔNG reset cap.
+        this.socket?.disconnect();
+        return;
+      }
       this.socketConnected = true;
       this.phase = this.roomId ? 'in_room' : 'connected';
       this.runtimeStats.connectAttempts++;
@@ -160,13 +191,14 @@ export class VirtualUser {
 
     s.on('connect_error', (err: Error) => {
       if (this.phase === 'failed') return; // sau cutover: không đếm gì (DESIGN §5.1)
-      this.lastError = `connect_error: ${err.message}`;
+      this.lastError = sanitizeLogText(`connect_error: ${err.message}`, 160); // F-2: sink sanitize
       // mỗi lần thử reconnect (thành công hay không) đều là 1 attempt → fail rate chính xác
       this.runtimeStats.connectAttempts++;
       this.runtimeStats.connectFails++;
-      // T4 thay 'other' bằng classifyConnectError(err) — T3 chỉ nối chỗ gọi (DESIGN §5.1)
-      this.runtimeStats.connectFailsByType.other++;
+      const t = classifyConnectError(err); // T4: phân loại (DESIGN §6)
+      this.runtimeStats.connectFailsByType[t]++;
       this.consecutiveConnectFails++;
+      this.onError?.(t, err.message, 'connect'); // M4: errorSamples action 'connect' (sanitize trong recordError)
       if (this.consecutiveConnectFails >= 5) {
         // Cap 5 consecutive cho MỌI user (F-1 — DESIGN §5.1): user token hết hạn giữa run
         // (đã từng connected) cũng cutover → 1 user hỏng vĩnh viễn sinh TỐI ĐA 5 fail,
@@ -178,7 +210,7 @@ export class VirtualUser {
         // io.reconnect(false), implement theo API v4 (cùng intent).
         this.socket?.io?.reconnection(false);
         // KHÔNG null this.socket (khác disconnect() :394-402) — tránh connect() re-invoke
-        this.lastError = `${this.lastError} | failed sau 5 connect_error liên tiếp (ngừng reconnect)`;
+        this.lastError = sanitizeLogText(`${this.lastError} | failed sau 5 connect_error liên tiếp (ngừng reconnect)`, 160);
       }
     });
 
@@ -213,7 +245,7 @@ export class VirtualUser {
     });
 
     s.on('chat:error', (p: { code?: string; message?: string }) => {
-      this.lastError = `chat:error ${p?.code ?? ''} ${p?.message ?? ''}`.trim();
+      this.lastError = sanitizeLogText(`chat:error ${p?.code ?? ''} ${p?.message ?? ''}`.trim(), 160); // F-2
       this.onError?.(`chat:${p?.code ?? 'ERROR'}`, this.lastError);
     });
 
@@ -223,7 +255,7 @@ export class VirtualUser {
 
   /** Sự kiện ngoài (worker runtime) — tránh callback lồng nhau. */
   onEchoOk: ((latencyMs: number) => void) | null = null;
-  onError: ((code: string, message: string) => void) | null = null;
+  onError: ((code: string, message: string, action?: ErrorSample['action']) => void) | null = null;
   /** Stats rẻ tiền cho auto-stop (connect attempts/fails) — đọc trong emitTick. */
   readonly runtimeStats = {
     connectAttempts: 0,
@@ -238,7 +270,7 @@ export class VirtualUser {
     this.cooldownUntil = Date.now() + COOLDOWN_MS;
     this.phase = 'cooldown';
     this.resetAction();
-    this.lastError = `leaveRoom(${reason})`;
+    this.lastError = sanitizeLogText(`leaveRoom(${reason})`, 160);
   }
 
   /** Scheduler 100ms — trả về 1 action cần chạy (null = chưa đến lúc). */
@@ -247,7 +279,7 @@ export class VirtualUser {
     if (this.phase === 'queued' && now - this.queuedAt > MATCH_WAIT_MS) {
       this.phase = 'idle';
       this.resetAction(); // FIX-2: không còn chờ matching → bảng users không thấy "Đang chat"
-      this.lastError = 'MATCH_TIMEOUT: không nhận matching:found trong 60s';
+      this.lastError = sanitizeLogText('MATCH_TIMEOUT: không nhận matching:found trong 60s', 160);
       worker.recordAction('chat', MATCH_WAIT_MS, false, this, 'MATCH_TIMEOUT');
       this.cooldownUntil = now + 30_000; // tránh thundering herd retry 3s/user
       this.queuedAt = 0;
@@ -395,7 +427,7 @@ export class VirtualUser {
         this.phase = 'idle';
       }
       this.resetAction(); // FIX-2: enqueue fail → không còn chờ matching — bảng users không thấy "Đang chat"
-      this.lastError = `enqueue: ${res.code}`;
+      this.lastError = sanitizeLogText(`enqueue: ${res.code}`, 160);
       worker.recordResult('chat', res, this);
     } else {
       this.phase = 'queued';
@@ -465,7 +497,7 @@ export class WorkerRuntime {
     actionsTotal: 0, successTotal: 0, failTotal: 0, echoOk: 0, echoSent: 0,
     droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
     connectAttempts: 0, connectFails: 0,
-    connectFailsByType: { ...EMPTY_CONNECT_FAILS }, // T3 nối chỗ tăng per-user (mặc định 'other'); T4 sum vào emitTick + classify
+    connectFailsByType: { ...EMPTY_CONNECT_FAILS }, // sum per-user runtimeStats trong emitTick (T4)
     usersFailed: 0, // T3 đếm phase 'failed' trong emitTick — init 0 (T1)
   };
   private histograms = new Map<string, BucketedHistogram>();
@@ -507,7 +539,7 @@ export class WorkerRuntime {
     );
     for (const u of this.users) {
       u.onEchoOk = (latencyMs) => this.recordEchoOk(latencyMs);
-      u.onError = (code, message) => this.recordError(code, message, u);
+      u.onError = (code, message, action) => this.recordError(code, message, u, action);
       // F3: KHÔNG connect ngay — scheduler connect theo rampRate (paced)
     }
     this.rampStartedAt = Date.now();
@@ -685,13 +717,17 @@ export class WorkerRuntime {
     }
     this.recordAction(action, res.latencyMs, res.ok, u, res.code || '');
     if (!res.ok) {
-      u.lastError = `${action}:${res.code}`;
+      u.lastError = sanitizeLogText(`${action}:${res.code}`, 160);
     }
   }
 
-  recordError(code: string, message: string, u: VirtualUser) {
-    this.errorCounters.set(code, (this.errorCounters.get(code) ?? 0) + 1);
-    this.errorSamples.push({ ts: Date.now(), action: 'chat', code, message: message.slice(0, 160), userId: u.account.email });
+  /** Cap số loại error code riêng biệt (S-4 R2): gateway bơm N code lạ → bucket 'OTHER' (chống map vô hạn). */
+  recordError(code: string, message: string, u: VirtualUser, action: ErrorSample['action'] = 'chat') {
+    code = sanitizeLogText(code, 64); // F-4: cap 64 — TOP ERRORS/report file không bị bloat
+    message = sanitizeLogText(message, 160); // F-2/F-3: errorSamples sạch (thay slice(0,160))
+    const key = this.errorCounters.has(code) || this.errorCounters.size < MAX_ERROR_CODES ? code : 'OTHER';
+    this.errorCounters.set(key, (this.errorCounters.get(key) ?? 0) + 1);
+    this.errorSamples.push({ ts: Date.now(), action, code, message, userId: u.account.email });
     if (this.errorSamples.length > 20) this.errorSamples.shift();
   }
 
@@ -725,12 +761,18 @@ export class WorkerRuntime {
       );
     }
     let cAttempts = 0, cFails = 0;
+    const cByType = { ...EMPTY_CONNECT_FAILS };
     for (const u of this.users) {
       cAttempts += u.runtimeStats.connectAttempts;
       cFails += u.runtimeStats.connectFails;
+      cByType.timeout += u.runtimeStats.connectFailsByType.timeout;
+      cByType.transport += u.runtimeStats.connectFailsByType.transport;
+      cByType.reject += u.runtimeStats.connectFailsByType.reject;
+      cByType.other += u.runtimeStats.connectFailsByType.other;
     }
     this.counters.connectAttempts = cAttempts;
     this.counters.connectFails = cFails;
+    this.counters.connectFailsByType = cByType; // P2 (R2): sum per-user — invariant sum(byType) == connectFails
 
     // actions/s = giây trước
     const prevKey = this.currentSecKey - 1;

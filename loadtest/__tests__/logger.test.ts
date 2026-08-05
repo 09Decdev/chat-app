@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { configureLogger, ltLog, logHistory, subscribeLog, redactSensitiveFields, createJsonlSink } from '../logger';
+import { configureLogger, ltLog, logHistory, subscribeLog, redactSensitiveFields, redactMsg, createJsonlSink } from '../logger';
 
 describe('logger — JSONL sink (T-07)', () => {
   let tmpFile: string;
@@ -99,6 +99,24 @@ describe('logger — JSONL sink (T-07)', () => {
     const ring = logHistory[logHistory.length - 1];
     expect(ring.msg).toContain('password=[REDACTED]');
     expect(ring.msg).not.toContain('SuperSecret1');
+  });
+
+  it('F-3: redactMsg strip control chars — msg chứa \n không tạo dòng log giả (DESIGN §3)', () => {
+    const out = redactMsg('connect_error: xhr poll error\n[lt][ERROR] forged line\r\nsecret=abc');
+    expect(out).not.toMatch(/\n/); // 1 dòng duy nhất — injection bị vô hiệu
+    expect(out).toContain('secret=[REDACTED]');
+    expect(out).not.toContain('abc');
+  });
+
+  it('ST-10: redactMsg với JWT trần (không kèm key) → [REDACTED], không lọt vào sink', () => {
+    configureLogger({ logFile: tmpFile });
+    logHistory.length = 0;
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+    ltLog.error(`verbose raw err: ${jwt}`);
+    const ring = logHistory[logHistory.length - 1];
+    expect(ring.msg).not.toContain('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9');
+    expect(ring.msg).toContain('[REDACTED]');
+    expect(ring.msg).not.toMatch(/\n/);
   });
 
   it('rotation size-based: tạo suffix .1/.2, giữ content gần nhất (retention window)', () => {

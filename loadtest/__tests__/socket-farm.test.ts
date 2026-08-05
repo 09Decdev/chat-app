@@ -3,7 +3,7 @@
  * VirtualUser cần socket.io-client thật — chỉ test phần thuần.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { pickProfile, VirtualUser, WorkerRuntime } from '../socket-farm';
+import { pickProfile, VirtualUser, WorkerRuntime, classifyConnectError } from '../socket-farm';
 import { getEnv } from '../config';
 import { genChatContent, genCommentContent, genTopicTitle, genPassword, genDateOfBirth, genDeviceInfo, uuidV4, randomHex } from '../util';
 import type { ActionProfile, TestAccount, WorkerTick, RunConfig } from '../types';
@@ -290,6 +290,148 @@ describe('T3 — cap retry 5 consecutive MỌI user (F-1, DESIGN §5.1)', () => 
     expect(u.phase).toBe('failed');
     u.disconnect(); // worker stop path — removeAllListeners + socket.disconnect + null
     expect(u.phase).toBe('failed');
+  });
+
+  it('(S-2) connect về muộn sau failed — KHÔNG resurrect, KHÔNG reset cap', () => {
+    const { u, handlers, socket } = connectUser(0, 'late@test.local');
+    fireConnectErrors(handlers, 5);
+    expect(u.phase).toBe('failed');
+    // connect in-flight về sau cutover (race gateway flip-flop — S-2 R2)
+    handlers.get('connect')?.();
+    expect(u.phase).toBe('failed'); // không resurrect về connected/in_room
+    expect(u.consecutiveConnectFails).toBe(5); // không reset cap — chu kỳ cap không khởi động lại
+    expect(u.everConnected).toBe(false);
+    expect(u.socketConnected).toBe(false);
+    expect(socket.disconnect).toHaveBeenCalledTimes(2); // cutover + đóng socket connect-muộn
+  });
+});
+
+describe('T4 — classifyConnectError (DESIGN §6 heuristic — PLAN T4)', () => {
+  it('timeout: type===\'TimeoutError\' + /timeout/i', () => {
+    expect(classifyConnectError({ type: 'TimeoutError', message: 'timeout' })).toBe('timeout');
+    expect(classifyConnectError(new Error('connection timeout after 20000ms'))).toBe('timeout');
+    expect(classifyConnectError('plain timeout string')).toBe('timeout');
+  });
+
+  it('transport: /xhr poll error|transport/i', () => {
+    expect(classifyConnectError(new Error('xhr poll error'))).toBe('transport');
+    expect(classifyConnectError({ message: 'websocket transport failed' })).toBe('transport');
+  });
+
+  it('reject: /websocket error|server|handshake|reject/i (gồm auth-reject)', () => {
+    expect(classifyConnectError(new Error('websocket error'))).toBe('reject');
+    expect(classifyConnectError(new Error('invalid token: handshake rejected'))).toBe('reject');
+    expect(classifyConnectError(new Error('unexpected server response'))).toBe('reject');
+  });
+
+  it('other: không khớp heuristic', () => {
+    expect(classifyConnectError(new Error('connection refused'))).toBe('other');
+  });
+
+  it('thứ tự spec: timeout → transport → reject', () => {
+    expect(classifyConnectError({ message: 'xhr poll error with timeout' })).toBe('timeout');
+    expect(classifyConnectError({ message: 'websocket error: transport failed' })).toBe('transport');
+  });
+
+  it('fuzz (ST-5): không throw với mọi input, luôn 1 trong 4 loại', () => {
+    const inputs: unknown[] = [
+      null, undefined, 42, 'plain string', {}, { message: null }, { message: 123 },
+      { message: 'x'.repeat(10_000) }, { message: 'a\nb\x00c' }, [], new Error('xhr poll error'),
+    ];
+    for (const input of inputs) {
+      expect(['timeout', 'transport', 'reject', 'other']).toContain(classifyConnectError(input));
+    }
+    expect(classifyConnectError({ message: 'x'.repeat(10_000) })).toBe('other');
+  });
+});
+
+describe('T4 — byType sum + recordError sanitize/cap + lastError sink (P2/F-4/S-3/S-4)', () => {
+  const JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+
+  function rtCollectingTick(users: VirtualUser[]) {
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: users.length } as RunConfig;
+    rt.users = users;
+    const msgs: unknown[] = [];
+    rt.onMessage = (m) => msgs.push(m);
+    return { rt, msgs };
+  }
+
+  it('(P2) emitTick sum byType per-user — invariant sum(byType) == connectFails', () => {
+    const { u, handlers } = connectUser(0, 'inv@test.local');
+    handlers.get('connect_error')?.({ message: 'timeout after 20000ms' } as Error); // timeout
+    handlers.get('connect_error')?.(new Error('xhr poll error')); // transport
+    handlers.get('connect_error')?.(new Error('xhr poll error')); // transport
+    handlers.get('connect_error')?.(new Error('invalid token: handshake rejected')); // reject
+    handlers.get('connect_error')?.(new Error('websocket error')); // reject — fail thứ 5 → cutover
+    expect(u.phase).toBe('failed');
+    const { rt, msgs } = rtCollectingTick([u]);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const counters = (msgs[0] as { tick: WorkerTick }).tick.counters;
+    expect(counters.connectFailsByType).toEqual({ timeout: 1, transport: 2, reject: 2, other: 0 });
+    const sum = Object.values(counters.connectFailsByType).reduce((a, b) => a + b, 0);
+    expect(sum).toBe(counters.connectFails); // invariant card breakdown
+    expect(counters.usersFailed).toBe(1);
+  });
+
+  it('(S-3) lastError từ connect_error sanitize + cap 160 (F-2)', () => {
+    const { u, handlers } = connectUser(0, 's3@test.local');
+    const evil = 'sneaky\nnext(err) password=TopSecret!' + 'y'.repeat(500);
+    handlers.get('connect_error')?.({ message: evil } as Error);
+    expect(u.lastError).not.toMatch(/\n/);
+    expect(u.lastError!.length).toBeLessThanOrEqual(160);
+    expect(u.lastError).not.toContain('TopSecret');
+    expect(u.lastError).toContain('password=[REDACTED]');
+  });
+
+  it('(M4/ST-6) recordError action \'connect\' + message sanitize', () => {
+    const u = makeUser(0, 'a@test.local');
+    const { rt, msgs } = rtCollectingTick([u]);
+    rt.recordError('E_CODE', `forged\n[lt][ERROR] fake password=TopSecret! token=${JWT}`, u, 'connect');
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.errorSamples[0].action).toBe('connect');
+    expect(tick.errorSamples[0].message).not.toMatch(/\n/);
+    expect(tick.errorSamples[0].message).not.toContain('TopSecret');
+    expect(tick.errorSamples[0].message).not.toContain('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9');
+    expect(tick.errorSamples[0].message.length).toBeLessThanOrEqual(160);
+    expect(tick.errorSamples[0].code).toBe('E_CODE');
+  });
+
+  it('(F-4) code quá dài → cap 64 (TOP ERRORS không bị bloat)', () => {
+    const u = makeUser(0, 'a@test.local');
+    const { rt, msgs } = rtCollectingTick([u]);
+    rt.recordError('X'.repeat(100), 'msg', u);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const errors = (msgs[0] as { tick: WorkerTick }).tick.errors;
+    const code = Object.keys(errors)[0];
+    expect(code.length).toBeLessThanOrEqual(64);
+  });
+
+  it('(S-4) errorCounters cap: > 20 code lạ → đếm vào OTHER, map bounded', () => {
+    const u = makeUser(0, 'a@test.local');
+    const { rt, msgs } = rtCollectingTick([u]);
+    for (let i = 0; i < 30; i++) rt.recordError(`CODE_${i}`, 'msg', u);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const errors = (msgs[0] as { tick: WorkerTick }).tick.errors;
+    expect(Object.keys(errors).length).toBeLessThanOrEqual(21); // 20 code + bucket OTHER
+    expect(errors.OTHER).toBe(10); // 10 code vượt cap chảy vào OTHER
+    expect(errors.CODE_0).toBe(1);
+    expect(errors.CODE_19).toBe(1);
+  });
+
+  it('(F-4/ST-6) chat:error code/message độc → lastError + errorSamples sạch (backward compat action chat)', () => {
+    const { u, handlers } = connectUser(0, 'f4@test.local');
+    const { rt, msgs } = rtCollectingTick([u]);
+    u.onError = (code, message, action) => rt.recordError(code, message, u, action); // wiring như start()
+    handlers.get('chat:error')?.({ code: 'X\nEVIL=' + 'A'.repeat(100), message: 'bad\ntoken=xyz' });
+    expect(u.lastError).not.toMatch(/\n/);
+    expect(u.lastError!.length).toBeLessThanOrEqual(160);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.errorSamples[0].action).toBe('chat'); // default backward compat
+    expect(tick.errorSamples[0].code.length).toBeLessThanOrEqual(64);
+    expect(tick.errorSamples[0].message).not.toContain('token=xyz');
   });
 });
 

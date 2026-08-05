@@ -23,6 +23,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { redactParams, redactSql } from './db/int';
+import { sanitizeLogText } from './sanitize';
 
 export type LogLevel = 'info' | 'warn' | 'error';
 
@@ -122,16 +123,14 @@ export function redactSensitiveFields(fields: Record<string, unknown>): Record<s
 
 /**
  * T-07 FIX-4: redact msg trước khi emit (B-1) — chạy qua redactSensitiveFields (redactUrl chuỗi)
- * + chặn value của field nhạy cảm nhúng trong text (`password=...`, `token=...`, ...).
+ * + sanitizeLogText (F-3/F-5 — DESIGN §3): strip control chars (chống dòng log giả), redact
+ * key=value nhạy cảm / URL credential / JWT / session 2-part / hex-40, cap 1000.
+ * MỌI sink (ring buffer, console, JSONL, subscriber → DB log_events) đều được lợi.
  */
 export function redactMsg(msg: string): string {
   const viaFields = redactSensitiveFields({ msg });
-  let s = typeof viaFields.msg === 'string' ? viaFields.msg : msg;
-  s = s.replace(
-    /\b((?:password|passwd|pwd|token|secret|otp|authorization|refreshToken)\s*[=:]\s*)([^\s,;|]+)/gi,
-    '$1[REDACTED]',
-  );
-  return s;
+  const s = typeof viaFields.msg === 'string' ? viaFields.msg : msg;
+  return sanitizeLogText(s, 1000);
 }
 
 // ─── JSONL file sink + rotation ───────────────────────────────────────────────
