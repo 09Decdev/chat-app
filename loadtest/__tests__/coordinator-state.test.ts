@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { canTransition, transition, decideAutoStop, endPhaseFromStop, aggregateTicks, peakThroughput } from '../coordinator-state';
+import {
+  canTransition, transition, decideAutoStop, endPhaseFromStop, aggregateTicks, peakThroughput,
+  rollWindow, sumWindow, windowSpanSecs, connectFailRateFromWindow, diffConnectWindowEntry,
+  E2_MIN_ATTEMPTS, E2_WINDOW_MS, E2_MAX_BUCKETS,
+} from '../coordinator-state';
 import type { WorkerTick } from '../types';
 
 function fakeTick(workerId: number, over: Partial<WorkerTick['counters']> = {}): WorkerTick {
@@ -158,16 +162,16 @@ describe('coordinator-state — biên auto-stop (E1/E2)', () => {
   });
 
   it('E2: đúng biên 30% KHÔNG dừng (điều kiện là > 30, không >=)', () => {
-    const at = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30, registeredTotal: 0, connectTotal: 10 });
+    const at = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30, registeredTotal: 0, connectTotal: 50 });
     expect(at.stop).toBe(false);
     expect(at.reason).toBeUndefined();
   });
 
-  it('E2: 30.1% + 10 connect → dừng với reason chính xác; 30% + 9 connect → không dừng', () => {
-    const over = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30.1, registeredTotal: 0, connectTotal: 10 });
+  it('E2: 30.1% + 50 connect (window) → dừng với reason chính xác; 30% + 49 connect → không dừng', () => {
+    const over = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30.1, registeredTotal: 0, connectTotal: 50 });
     expect(over.stop).toBe(true);
     expect(over.reason).toBe('auto-stop: connect fail 30% > 30% (E2)');
-    const below = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30, registeredTotal: 0, connectTotal: 9 });
+    const below = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30, registeredTotal: 0, connectTotal: 49 });
     expect(below.stop).toBe(false);
   });
 
@@ -175,9 +179,136 @@ describe('coordinator-state — biên auto-stop (E1/E2)', () => {
     expect(decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 29.9, registeredTotal: 0, connectTotal: 100 }).stop).toBe(false);
   });
 
+  it('E2: rate 100% nhưng window chưa đủ 50 attempts → KHÔNG dừng (AC-3)', () => {
+    const d = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 100, registeredTotal: 0, connectTotal: 49 });
+    expect(d.stop).toBe(false);
+  });
+
+  it('E2: window rỗng (rate 0, attempts 0) → không dừng', () => {
+    const d = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 0, registeredTotal: 0, connectTotal: 0 });
+    expect(d.stop).toBe(false);
+  });
+
   it('fail rate cao nhưng phase không phải provisioning/ramping → vẫn dừng theo input (thuần)', () => {
     const d = decideAutoStop({ phase: 'error', registerFailRate: 100, connectFailRate: 100, registeredTotal: 20, connectTotal: 20 });
     expect(d.stop).toBe(true);
+  });
+});
+
+// ─── T2 (DESIGN §4): sliding window 60s WALL-CLOCK + diff clamp ─────────────
+
+describe('coordinator-state — E2 sliding window (T2)', () => {
+  const now = 1_700_000_000_000;
+  const BY = (timeout = 0, transport = 0, reject = 0, other = 0) => ({ timeout, transport, reject, other });
+
+  it('diffConnectWindowEntry: prev undefined → null (skip-first-tick sau restart — PF1)', () => {
+    const cur = { attempts: 200, fails: 40, byType: BY(10, 20, 5, 5) };
+    expect(diffConnectWindowEntry(undefined, cur)).toBeNull();
+  });
+
+  it('diffConnectWindowEntry: delta đúng + clamp delta âm (S2/ST-3)', () => {
+    const prev = { attempts: 100, fails: 10, byType: BY(5, 3, 1, 1) };
+    const cur = { attempts: 250, fails: 25, byType: BY(9, 11, 2, 3) };
+    expect(diffConnectWindowEntry(prev, cur)).toEqual({
+      attempts: 150, fails: 15, byType: BY(4, 8, 1, 2),
+    });
+    // Restart race: cumulative mới NHỎ HƠN prev → delta = 0 (không âm — rate không bao giờ âm)
+    const reset = { attempts: 5, fails: 1, byType: BY(0, 1, 0, 0) };
+    expect(diffConnectWindowEntry(prev, reset)).toEqual({ attempts: 0, fails: 0, byType: BY(0, 0, 0, 0) });
+    // Clamp theo từng key byType riêng
+    const partial = { attempts: 150, fails: 0, byType: BY(0, 0, 2, 0) };
+    expect(diffConnectWindowEntry(prev, partial)).toEqual({
+      attempts: 50, fails: 0, byType: BY(0, 0, 1, 0),
+    });
+  });
+
+  it('rollWindow: 1 entry → [entry] (PURE — không mutate input)', () => {
+    const buckets: ReturnType<typeof rollWindow> = [];
+    const out = rollWindow(buckets, now, 10, 2, BY(1, 1, 0, 0));
+    expect(out).toEqual([{ ts: now, attempts: 10, fails: 2, byType: BY(1, 1, 0, 0) }]);
+    expect(buckets).toEqual([]); // immutability
+  });
+
+  it('rollWindow: evict theo WALL-CLOCK age > 60s (không đếm bucket)', () => {
+    let buckets: ReturnType<typeof rollWindow> = [];
+    // 65 tick, ts cách 1s từ now-64s → now
+    for (let i = 0; i < 65; i++) {
+      const ts = now - (64 - i) * 1000;
+      buckets = rollWindow(buckets, ts, 10, 1, BY(1, 0, 0, 0));
+    }
+    // Chỉ giữ 60s thực: ts ∈ [now-60s, now] → 61 bucket, oldest = now-60s
+    expect(buckets.length).toBe(61);
+    expect(buckets[0].ts).toBe(now - 60_000);
+    expect(buckets[buckets.length - 1].ts).toBe(now);
+  });
+
+  it('rollWindow: safety cap length ≤ 120 kể cả khi mọi entry trong window (evict hỏng)', () => {
+    let buckets: ReturnType<typeof rollWindow> = [];
+    for (let i = 0; i < 150; i++) {
+      buckets = rollWindow(buckets, now, 1, 0, BY(0, 0, 0, 0), E2_MAX_BUCKETS);
+    }
+    expect(buckets.length).toBe(120);
+  });
+
+  it('rollWindow: entry quá hạn bị evict dù length < max (age, không phải count)', () => {
+    const buckets = [
+      { ts: now - 90_000, attempts: 999, fails: 999, byType: BY(999, 0, 0, 0) }, // quá hạn
+      { ts: now - 30_000, attempts: 5, fails: 1, byType: BY(1, 0, 0, 0) },
+    ];
+    const out = rollWindow(buckets, now, 2, 0, BY(0, 0, 0, 0));
+    expect(out).toHaveLength(2); // entry 90s cũ bị evict, chỉ còn 30s + mới
+    expect(out[0].ts).toBe(now - 30_000);
+  });
+
+  it('sumWindow: rỗng → zeros; sum attempts/fails + merge byType (sum 4 loại == fails)', () => {
+    expect(sumWindow([])).toEqual({ attempts: 0, fails: 0, byType: BY(0, 0, 0, 0) });
+    const buckets = [
+      { ts: now - 2000, attempts: 100, fails: 20, byType: BY(10, 5, 3, 2) },
+      { ts: now - 1000, attempts: 50, fails: 12, byType: BY(4, 6, 1, 1) },
+    ];
+    const s = sumWindow(buckets);
+    expect(s.attempts).toBe(150);
+    expect(s.fails).toBe(32);
+    expect(s.byType).toEqual(BY(14, 11, 4, 3));
+    expect(s.byType.timeout + s.byType.transport + s.byType.reject + s.byType.other).toBe(s.fails); // bất biến
+  });
+
+  it('windowSpanSecs: rỗng → 0; span thật không hardcode 60 (BE-3)', () => {
+    expect(windowSpanSecs([], now)).toBe(0);
+    const buckets = [
+      { ts: now - 62_400, attempts: 1, fails: 0, byType: BY(0, 0, 0, 0) },
+      { ts: now, attempts: 1, fails: 0, byType: BY(0, 0, 0, 0) },
+    ];
+    expect(windowSpanSecs(buckets, now)).toBe(62); // stall bucket → span thật
+    const full = Array.from({ length: 60 }, (_, i) => ({
+      ts: now - (59 - i) * 1000, attempts: 1, fails: 0, byType: BY(0, 0, 0, 0),
+    }));
+    expect(windowSpanSecs(full, now)).toBe(59);
+  });
+
+  it('connectFailRateFromWindow: chưa đủ 50 attempts → 0 (AC-3); đủ → fails/attempts*100', () => {
+    expect(connectFailRateFromWindow(0, 0)).toBe(0);
+    expect(connectFailRateFromWindow(49, 49)).toBe(0); // 100% fail nhưng thiếu mẫu
+    expect(connectFailRateFromWindow(50, 17)).toBe(34);
+    expect(connectFailRateFromWindow(50, 50)).toBe(100);
+    expect(connectFailRateFromWindow(E2_MIN_ATTEMPTS, 15)).toBe(30); // biên 30% với 50 attempts
+  });
+
+  it('decideAutoStop: rate 100% attempts 49 → không dừng; 50 → dừng (E2)', () => {
+    expect(decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 100, registeredTotal: 0, connectTotal: 49 }).stop).toBe(false);
+    const d = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 100, registeredTotal: 0, connectTotal: 50 });
+    expect(d.stop).toBe(true);
+    expect(d.reason).toContain('E2');
+  });
+
+  it('decideAutoStop: boundary 30% + 50 attempts → không dừng (> thật)', () => {
+    expect(decideAutoStop({ phase: 'steady', registerFailRate: 0, connectFailRate: 30, registeredTotal: 0, connectTotal: 50 }).stop).toBe(false);
+    expect(decideAutoStop({ phase: 'steady', registerFailRate: 0, connectFailRate: 30.1, registeredTotal: 0, connectTotal: 50 }).stop).toBe(true);
+  });
+
+  it('hằng số: E2_WINDOW_MS = 60s, E2_MIN_ATTEMPTS = 50', () => {
+    expect(E2_WINDOW_MS).toBe(60_000);
+    expect(E2_MIN_ATTEMPTS).toBe(50);
   });
 });
 

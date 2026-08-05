@@ -4,7 +4,7 @@
  *        → (lỗi) ERROR · (dừng tay) STOPPED
  */
 
-import type { LoadTestTick, RunPhase, WorkerTick, ActionType, ErrorSample } from './types';
+import type { ConnectFailsByType, LoadTestTick, RunPhase, WorkerTick, ActionType, ErrorSample } from './types';
 import { ACTION_TYPES, EMPTY_CONNECT_FAILS } from './types';
 import { BucketedHistogram } from './metrics';
 
@@ -57,10 +57,108 @@ export function decideAutoStop(input: AutoStopInput): StopDecision {
   if (input.registerFailRate > 50 && input.registeredTotal >= 10) {
     return { stop: true, reason: `auto-stop: register fail ${input.registerFailRate.toFixed(0)}% > 50% (E1)` };
   }
-  if (input.connectFailRate > 30 && input.connectTotal >= 10) {
-    return { stop: true, reason: `auto-stop: connect fail ${input.connectFailRate.toFixed(0)}% > 30% (E2)` };
+  // E2: connectTotal = attempts TRONG window 60s (semantics đổi — PRD §6.6 chấp nhận; window chưa đủ
+  // 50 attempts → rate 0 từ connectFailRateFromWindow nên nhánh này không trigger — AC-3).
+  if (input.connectFailRate > E2_FAIL_RATE_PCT && input.connectTotal >= E2_MIN_ATTEMPTS) {
+    return { stop: true, reason: `auto-stop: connect fail ${input.connectFailRate.toFixed(0)}% > ${E2_FAIL_RATE_PCT}% (E2)` };
   }
   return { stop: false };
+}
+
+// ─── E2 sliding window 60s WALL-CLOCK (DESIGN-loadtest-e2-connect-fail §4) ───
+
+/** Cumulative connect của 1 worker tại 1 tick (snapshot để diff). */
+export interface ConnectCountersSnapshot {
+  attempts: number;
+  fails: number;
+  byType: ConnectFailsByType;
+}
+
+/** 1 bucket = delta của 1 lần aggregateTick (đã diff + clamp). `ts` = wall-clock ms lúc roll. */
+export interface ConnectWindowBucket {
+  ts: number;
+  attempts: number;
+  fails: number;
+  byType: ConnectFailsByType;
+}
+
+/** Cửa sổ 60s thật (wall-clock age — không đếm bucket, PF1). */
+export const E2_WINDOW_MS = 60_000;
+/** Threshold M2: window phải đủ ≥ 50 attempts mới evaluate (PRD §3 M2 — thay 10 cumulative). */
+export const E2_MIN_ATTEMPTS = 50;
+/** Safety cap: chống length vô hạn nếu evict hỏng (roll bug). */
+export const E2_MAX_BUCKETS = 120;
+/** Ngưỡng fail rate E2 (PRD §6.6: KHÔNG cấu hình hóa). */
+export const E2_FAIL_RATE_PCT = 30;
+
+/**
+ * Diff cumulative per-worker → delta bucket (T5 wiring dùng).
+ * - `prev` undefined (worker mới spawn / vừa E3-restart) → SKIP tick đầu (return null, không tạo bucket
+ *   phình 2-15s — PF1). T5 set prev = snapshot hiện tại rồi continue.
+ * - Clamp delta âm max(0, …) cho attempts/fails/byType — restart race / counter reset không được tạo
+ *   rate âm giấu outage thật (S2/ST-3).
+ */
+export function diffConnectWindowEntry(
+  prev: ConnectCountersSnapshot | undefined,
+  cur: ConnectCountersSnapshot,
+): Omit<ConnectWindowBucket, 'ts'> | null {
+  if (!prev) return null;
+  return {
+    attempts: Math.max(0, cur.attempts - prev.attempts),
+    fails: Math.max(0, cur.fails - prev.fails),
+    byType: {
+      timeout: Math.max(0, cur.byType.timeout - prev.byType.timeout),
+      transport: Math.max(0, cur.byType.transport - prev.byType.transport),
+      reject: Math.max(0, cur.byType.reject - prev.byType.reject),
+      other: Math.max(0, cur.byType.other - prev.byType.other),
+    },
+  };
+}
+
+/**
+ * Roll window WALL-CLOCK (DESIGN §4.2): push entry rồi evict bucket có `ts < now - E2_WINDOW_MS`
+ * (age > 60s — không đếm số bucket) + safety cap `max`. PURE — không mutate input.
+ */
+export function rollWindow(
+  buckets: ConnectWindowBucket[],
+  ts: number,
+  attempts: number,
+  fails: number,
+  byType: ConnectFailsByType,
+  max = E2_MAX_BUCKETS,
+): ConnectWindowBucket[] {
+  const next = [...buckets, { ts, attempts, fails, byType }];
+  const cutoff = ts - E2_WINDOW_MS;
+  while (next.length && next[0].ts < cutoff) next.shift();
+  while (next.length > max) next.shift();
+  return next;
+}
+
+/** Sum toàn bộ bucket — bất biến: sum 4 loại byType == fails (SEC-1: log/dashboard dùng chung 1 mẫu số). */
+export function sumWindow(buckets: ConnectWindowBucket[]): ConnectCountersSnapshot {
+  let attempts = 0;
+  let fails = 0;
+  const byType = { ...EMPTY_CONNECT_FAILS };
+  for (const b of buckets) {
+    attempts += b.attempts;
+    fails += b.fails;
+    byType.timeout += b.byType.timeout;
+    byType.transport += b.byType.transport;
+    byType.reject += b.byType.reject;
+    byType.other += b.byType.other;
+  }
+  return { attempts, fails, byType };
+}
+
+/** Span THẬT của window (BE-3 — log windowSec không hardcode 60). Rỗng → 0; clamp [0, 120]. */
+export function windowSpanSecs(buckets: ConnectWindowBucket[], now: number): number {
+  if (!buckets.length) return 0;
+  return Math.min(120, Math.max(0, Math.round((now - buckets[0].ts) / 1000)));
+}
+
+/** Rate E2 từ window: 0 khi chưa đủ mẫu (AC-3 — window < 50 attempts không evaluate). */
+export function connectFailRateFromWindow(attempts: number, fails: number, minAttempts = E2_MIN_ATTEMPTS): number {
+  return attempts >= minAttempts ? (fails / attempts) * 100 : 0;
 }
 
 /** Pha cuối dựa trên cách run kết thúc: natural → finished, auto lỗi → error, manual → stopped. */
