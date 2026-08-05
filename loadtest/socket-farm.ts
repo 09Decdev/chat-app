@@ -72,6 +72,10 @@ export class VirtualUser {
   roomEndsAt: number | null = null;
   socketConnected = false;
   reconnectCount = 0;
+  /** Đã từng connect thành công (DESIGN §5.1 — F-1: cap 5 consecutive áp MỌI user, kể cả đã connected). */
+  everConnected = false;
+  /** Số connect_error LIÊN TIẾP chưa có connect thành công xen giữa — reset ở 'connect' (DESIGN §5.1). */
+  consecutiveConnectFails = 0;
   cooldownUntil = 0;
   lastSendAt = 0;
   lastTypingAt = 0;
@@ -138,6 +142,8 @@ export class VirtualUser {
       this.socketConnected = true;
       this.phase = this.roomId ? 'in_room' : 'connected';
       this.runtimeStats.connectAttempts++;
+      this.everConnected = true;
+      this.consecutiveConnectFails = 0; // streak thành công → reset cap (DESIGN §5.1)
       // Reconcile trên reconnect (PRD §1.2): nếu đang trong phòng → re-join
       if (this.roomId) {
         s.emit('chat:join', { roomId: this.roomId });
@@ -153,10 +159,27 @@ export class VirtualUser {
     });
 
     s.on('connect_error', (err: Error) => {
+      if (this.phase === 'failed') return; // sau cutover: không đếm gì (DESIGN §5.1)
       this.lastError = `connect_error: ${err.message}`;
       // mỗi lần thử reconnect (thành công hay không) đều là 1 attempt → fail rate chính xác
       this.runtimeStats.connectAttempts++;
       this.runtimeStats.connectFails++;
+      // T4 thay 'other' bằng classifyConnectError(err) — T3 chỉ nối chỗ gọi (DESIGN §5.1)
+      this.runtimeStats.connectFailsByType.other++;
+      this.consecutiveConnectFails++;
+      if (this.consecutiveConnectFails >= 5) {
+        // Cap 5 consecutive cho MỌI user (F-1 — DESIGN §5.1): user token hết hạn giữa run
+        // (đã từng connected) cũng cutover → 1 user hỏng vĩnh viễn sinh TỐI ĐA 5 fail,
+        // không tái hiện E2 false-positive. Transient thật (fail < 5 rồi success) vẫn retry vô hạn.
+        this.phase = 'failed';
+        this.socket?.disconnect();
+        // R4: chặn manager retry. socket.io-client 4.8.3: Manager.reconnect() là private
+        // no-arg (API v3); API public để tắt reconnect là reconnection(false) — DESIGN ghi
+        // io.reconnect(false), implement theo API v4 (cùng intent).
+        this.socket?.io?.reconnection(false);
+        // KHÔNG null this.socket (khác disconnect() :394-402) — tránh connect() re-invoke
+        this.lastError = `${this.lastError} | failed sau 5 connect_error liên tiếp (ngừng reconnect)`;
+      }
     });
 
     s.on('matching:found', (p: { roomId: string; roomEndsAt?: number | null }) => {
@@ -202,7 +225,11 @@ export class VirtualUser {
   onEchoOk: ((latencyMs: number) => void) | null = null;
   onError: ((code: string, message: string) => void) | null = null;
   /** Stats rẻ tiền cho auto-stop (connect attempts/fails) — đọc trong emitTick. */
-  readonly runtimeStats = { connectAttempts: 0, connectFails: 0 };
+  readonly runtimeStats = {
+    connectAttempts: 0,
+    connectFails: 0,
+    connectFailsByType: { ...EMPTY_CONNECT_FAILS }, // T3 nối chỗ gọi (mặc định 'other') — T4 classify thật
+  };
 
   private leaveRoom(reason: string) {
     this.roomId = null;
@@ -348,6 +375,7 @@ export class VirtualUser {
   /** Chat cycle: enqueue khi chưa có việc — gọi định kỳ từ scheduler. */
   async ensureChatCycle(worker: WorkerRuntime, now: number) {
     if (this.profile !== 'chat') return;
+    if (this.phase === 'failed') return; // M7: user failed không enqueue lại (DESIGN §5.1)
     if (this.phase === 'in_room' || this.phase === 'queued' || this.phase === 'connecting') return;
     if (now < this.cooldownUntil) return; // cooldown 900s sau leave (AC3.5) + backoff timeout
     // idle/connected/cooldown-qua → enqueue lại
@@ -437,8 +465,8 @@ export class WorkerRuntime {
     actionsTotal: 0, successTotal: 0, failTotal: 0, echoOk: 0, echoSent: 0,
     droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
     connectAttempts: 0, connectFails: 0,
-    connectFailsByType: { ...EMPTY_CONNECT_FAILS }, // T4 tăng theo loại — init 0 (T1)
-    usersFailed: 0, // T4 đếm trong emitTick — init 0 (T1)
+    connectFailsByType: { ...EMPTY_CONNECT_FAILS }, // T3 nối chỗ tăng per-user (mặc định 'other'); T4 sum vào emitTick + classify
+    usersFailed: 0, // T3 đếm phase 'failed' trong emitTick — init 0 (T1)
   };
   private histograms = new Map<string, BucketedHistogram>();
   private actionOk = new Map<string, number>();
@@ -550,6 +578,7 @@ export class WorkerRuntime {
 
     for (const u of this.users) {
       if (this.paused) continue;
+      if (u.phase === 'failed') continue; // M7: user failed không tham gia vòng lặp action (DESIGN §5.1)
       const next = u.tick(now, this);
       if (next) {
         switch (next.action) {
@@ -670,19 +699,21 @@ export class WorkerRuntime {
     if (!this.config) return;
     const now = Date.now();
     // đếm phase
-    let connected = 0, active = 0, queued = 0, inRoom = 0, reconnect = 0;
+    let connected = 0, active = 0, queued = 0, inRoom = 0, reconnect = 0, failed = 0;
     for (const u of this.users) {
+      reconnect += u.reconnectCount; // cumulative — cộng cho mọi user (kể cả failed)
+      if (u.phase === 'failed') { failed++; continue; } // failed không vào connected/active
       if (u.socketConnected) connected++;
       if (u.phase === 'in_room') { inRoom++; active++; }
       else if (u.phase === 'queued') queued++;
       else if (u.phase === 'connected' || u.phase === 'idle' || u.phase === 'cooldown') active++;
-      reconnect += u.reconnectCount;
     }
     this.counters.usersConnected = connected;
     this.counters.usersActive = active;
     this.counters.usersQueued = queued;
     this.counters.usersInRoom = inRoom;
     this.counters.reconnectCount = reconnect;
+    this.counters.usersFailed = failed; // phase 'failed' terminal (DESIGN §5.1) → đếm đúng 1 lần/user
     // Periodic summary 10s/worker — dễ theo dõi worker đang làm gì.
     if (!final && now - this.lastSummaryAt > 10_000) {
       this.lastSummaryAt = now;

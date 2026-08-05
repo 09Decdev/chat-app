@@ -6,8 +6,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { pickProfile, VirtualUser, WorkerRuntime } from '../socket-farm';
 import { getEnv } from '../config';
 import { genChatContent, genCommentContent, genTopicTitle, genPassword, genDateOfBirth, genDeviceInfo, uuidV4, randomHex } from '../util';
-import type { ActionProfile, TestAccount } from '../types';
-import type { ActionResult } from '../rest-actions';
+import type { ActionProfile, TestAccount, WorkerTick, RunConfig } from '../types';
+import type { ActionResult, RestDriver } from '../rest-actions';
 
 const ioMock = vi.hoisted(() => vi.fn());
 vi.mock('socket.io-client', () => ({ io: ioMock }));
@@ -140,6 +140,158 @@ function makeUser(index: number, email: string, phase: VirtualUser['phase'] = 'c
   u.phase = phase;
   return u;
 }
+
+// ─── T3 — cap retry 5 consecutive MỌI user (F-1) + skip user failed (M7) ─────
+
+/** Tạo user đã connect() với socket giả — trả về handlers để mô phỏng event socket.io. */
+function connectUser(index: number, email: string) {
+  ioMock.mockReset();
+  const handlers = new Map<string, (p?: unknown) => void>();
+  const manager = { reconnection: vi.fn() };
+  const socket = {
+    on: vi.fn((evt: string, h: (p?: unknown) => void) => handlers.set(evt, h)),
+    emit: vi.fn(),
+    removeAllListeners: vi.fn(),
+    disconnect: vi.fn(),
+    connected: false,
+    io: manager,
+  };
+  ioMock.mockReturnValue(socket);
+  const u = makeUser(index, email);
+  u.connect();
+  return { u, handlers, socket, manager };
+}
+
+function fireConnectErrors(handlers: Map<string, (p?: unknown) => void>, n: number) {
+  for (let i = 0; i < n; i++) handlers.get('connect_error')?.({ message: `err-${i}` } as Error);
+}
+
+describe('T3 — cap retry 5 consecutive MỌI user (F-1, DESIGN §5.1)', () => {
+  it('(T3-1) user CHƯA từng connected: 5 connect_error liên tiếp → phase failed, counters đúng', () => {
+    const { u, handlers } = connectUser(0, 'never@test.local');
+    expect(u.phase).toBe('connecting');
+    expect(u.everConnected).toBe(false);
+    fireConnectErrors(handlers, 5);
+    expect(u.phase).toBe('failed');
+    expect(u.consecutiveConnectFails).toBe(5);
+    expect(u.runtimeStats.connectAttempts).toBe(5);
+    expect(u.runtimeStats.connectFails).toBe(5);
+    expect(u.runtimeStats.connectFailsByType.other).toBe(5); // T3 nối chỗ gọi — mặc định 'other'
+  });
+
+  it('(T3-2/F-1) user ĐÃ everConnected: 5 connect_error liên tiếp → phase failed (cap áp mọi user)', () => {
+    const { u, handlers } = connectUser(0, 'ever@test.local');
+    handlers.get('connect')?.(); // đã từng connect thành công
+    expect(u.everConnected).toBe(true);
+    expect(u.consecutiveConnectFails).toBe(0);
+    fireConnectErrors(handlers, 5);
+    // F-1 regression: trước đây điều kiện !everConnected bỏ qua user này → retry vô hạn.
+    expect(u.phase).toBe('failed');
+    expect(u.runtimeStats.connectAttempts).toBe(6); // 1 success + 5 fail
+    expect(u.runtimeStats.connectFails).toBe(5);
+    expect(u.lastError).toContain('failed sau 5 connect_error');
+  });
+
+  it('(R4/e) dừng reconnect THẬT: socket.disconnect() + io.reconnection(false), connect() không re-invoke, không còn fail mới', () => {
+    const { u, handlers, socket, manager } = connectUser(0, 'stop@test.local');
+    fireConnectErrors(handlers, 5);
+    expect(u.phase).toBe('failed');
+    // 1) chặn manager retry — socket.io-client 4.8.3: Manager.reconnection(false)
+    //    (DESIGN ghi io.reconnect(false) — API v3; v4 private no-arg — implement theo v4)
+    expect(socket.disconnect).toHaveBeenCalledTimes(1);
+    expect(manager.reconnection).toHaveBeenCalledWith(false);
+    // 2) connect_error sau failed: KHÔNG đếm gì (guard đầu handler)
+    fireConnectErrors(handlers, 3);
+    expect(u.runtimeStats.connectAttempts).toBe(5);
+    expect(u.runtimeStats.connectFails).toBe(5);
+    expect(u.consecutiveConnectFails).toBe(5);
+    expect(u.phase).toBe('failed');
+    // 3) KHÔNG null this.socket → connect() lần nữa không tạo socket mới (no re-invoke)
+    u.connect();
+    expect(ioMock).toHaveBeenCalledTimes(1);
+    expect(u.phase).toBe('failed');
+  });
+
+  it('(T3-3) consecutive reset: fail 3 → connect OK → fail 4 KHÔNG failed (reset), fail 5 → failed', () => {
+    const { u, handlers } = connectUser(0, 'transient@test.local');
+    fireConnectErrors(handlers, 3);
+    expect(u.consecutiveConnectFails).toBe(3);
+    expect(u.phase).not.toBe('failed');
+    handlers.get('connect')?.(); // thành công → reset streak
+    expect(u.consecutiveConnectFails).toBe(0);
+    expect(u.everConnected).toBe(true);
+    // fail thứ 2 trong streak mới: nếu KHÔNG reset (3+2=5) đã cutover nhầm — đây là điểm chứng minh
+    fireConnectErrors(handlers, 2);
+    expect(u.consecutiveConnectFails).toBe(2);
+    expect(u.phase).not.toBe('failed');
+    fireConnectErrors(handlers, 2); // tổng 4 trong streak mới
+    expect(u.consecutiveConnectFails).toBe(4);
+    expect(u.phase).not.toBe('failed'); // transient vẫn retry — chưa tới cap
+    fireConnectErrors(handlers, 1); // fail thứ 5 trong streak mới → cutover
+    expect(u.phase).toBe('failed');
+    expect(u.consecutiveConnectFails).toBe(5);
+    expect(u.runtimeStats.connectFails).toBe(8); // 3 trước reset + 5 sau reset
+  });
+
+  it('(T3-4) emitTick: usersFailed = số user failed — đếm 1 lần/user, không đổi qua các tick', () => {
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: 3 } as RunConfig;
+    const u1 = makeUser(0, 'fail-a@test.local');
+    u1.phase = 'failed';
+    const u2 = makeUser(1, 'fail-b@test.local');
+    u2.phase = 'failed';
+    const u3 = makeUser(2, 'ok@test.local', 'connected');
+    rt.users = [u1, u2, u3];
+    const msgs: unknown[] = [];
+    rt.onMessage = (msg) => msgs.push(msg);
+    (rt as unknown as { emitTick: (final?: boolean) => void }).emitTick();
+    (rt as unknown as { emitTick: (final?: boolean) => void }).emitTick();
+    expect(msgs).toHaveLength(2);
+    const tick1 = (msgs[0] as { type: string; tick: WorkerTick }).tick.counters;
+    const tick2 = (msgs[1] as { type: string; tick: WorkerTick }).tick.counters;
+    expect(tick1.usersFailed).toBe(2);
+    expect(tick2.usersFailed).toBe(2); // không đếm lại qua tick
+    expect(tick1.usersConnected).toBe(0); // failed không vào connected/active
+    expect(tick1.usersActive).toBe(1); // chỉ user connected còn lại
+  });
+
+  it('(T3-5/M7) scheduler bỏ qua user failed — không enqueue, không REST, phase giữ failed', () => {
+    const { u, handlers } = connectUser(0, 'skip@test.local');
+    u.profile = 'chat';
+    fireConnectErrors(handlers, 5);
+    expect(u.phase).toBe('failed');
+    // user failed có mọi điều kiện "sẵn sàng enqueue" — nếu không guard sẽ bị resurrect về queued
+    u.cooldownUntil = 0;
+    (u as unknown as { lastEnqueueAt: number }).lastEnqueueAt = 0;
+    // user khỏe mạnh cùng worker — chứng minh guard chỉ chặn failed, không chặn cả loop
+    const healthy = makeUser(1, 'healthy@test.local', 'idle');
+    healthy.profile = 'chat';
+    healthy.cooldownUntil = 0;
+    (healthy as unknown as { lastEnqueueAt: number }).lastEnqueueAt = 0;
+    healthy.lastRestAt = Date.now(); // tránh REST pacing trong tick này
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.users = [u, healthy];
+    const enqueueSpy = vi.spyOn(rt.rest, 'chatEnqueue');
+    const readSpy = vi.spyOn(rt.rest, 'readPostDetail').mockResolvedValue({
+      detail: { ok: true, latencyMs: 5, code: '', failClass: 'OK' },
+      view: null,
+    } as unknown as Awaited<ReturnType<RestDriver['readPostDetail']>>);
+    (rt as unknown as { schedulerTick: () => void }).schedulerTick();
+    expect(u.phase).toBe('failed'); // không bị resurrect về queued
+    expect(readSpy).not.toHaveBeenCalled(); // failed user không REST
+    // user khỏe vẫn chạy bình thường — ensureChatCycle enqueue OK
+    expect(enqueueSpy).toHaveBeenCalledTimes(1);
+    expect(healthy.phase).toBe('queued');
+  });
+
+  it('(T3-6) disconnect() sau failed không đổi phase', () => {
+    const { u, handlers } = connectUser(0, 'd@test.local');
+    fireConnectErrors(handlers, 5);
+    expect(u.phase).toBe('failed');
+    u.disconnect(); // worker stop path — removeAllListeners + socket.disconnect + null
+    expect(u.phase).toBe('failed');
+  });
+});
 
 describe('VirtualUser — action state + toRow', () => {
   it('toRow() trả đủ field mới với giá trị mặc định (chưa hành động)', () => {
