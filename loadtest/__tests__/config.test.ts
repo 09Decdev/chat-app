@@ -411,6 +411,8 @@ describe('config — getEnv defaults đầy đủ (T-11)', () => {
     const env = getEnv({
       LOADTEST_DB_REQUIRED: 'false',
       LOADTEST_DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      // Cô lập khỏi file loadtest/.env của máy (có thể set gateway khác) — '' → fallback default.
+      LOADTEST_GATEWAY_URL: '',
     });
     expect(env.port).toBe(3401);
     expect(env.host).toBe('127.0.0.1');
