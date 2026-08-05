@@ -10,7 +10,7 @@ import Redis from 'ioredis';
 import type { LoadTestEnv } from './config';
 import { buildRunConfig, mergedAllowlist } from './config';
 import type { LoadTestTick, RunConfig, RunPhase, StartRunRequest, TestAccount, UserPhase, VirtualUserRow, WorkerMessage, WorkerTick } from './types';
-import { ACTION_TYPES } from './types';
+import { ACTION_TYPES, EMPTY_CONNECT_FAILS } from './types';
 import { mergePhaseCounts, normalizeSort, sortUsers } from './users-sort';
 import { WorkerFarm } from './worker-farm';
 import { createRedis, provisionAccounts } from './auth-factory';
@@ -432,14 +432,17 @@ export class LoadTestCoordinator {
           usersConnected: 0, usersActive: 0, usersQueued: 0, usersInRoom: 0,
           actionsTotal: 0, successTotal: 0, failTotal: 0, echoOk: 0, echoSent: 0,
           queueCount: 0, roomCount: 0, droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
+          connectAttempts: 0, connectFails: 0, usersFailed: 0,
+          connectFailsByType: { ...EMPTY_CONNECT_FAILS },
         },
-        rates: { successRate: 100, echoRate: 100 },
+        rates: { successRate: 100, echoRate: 100, connectFailRate: 0 },
         actionsPerSec: {},
         latency: { p50: 0, p95: 0, p99: 0 },
         errors: [],
         server: { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0 },
         // Chưa spawn worker (đang register users) — total=0 tránh UI hiểu nhầm "worker chết" (E3 giả)
         workers: { alive: 0, total: 0, cpuAvg: 0 },
+        hasConnectData: true, // tick LIVE (DESIGN §2.1)
       };
       this.pushTick(tick);
       return;

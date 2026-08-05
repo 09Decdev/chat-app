@@ -15,7 +15,7 @@
 
 import { io, type Socket } from 'socket.io-client';
 import type { RunConfig, TestAccount, UserActionState, UserPhase, VirtualUserRow, WorkerTick } from './types';
-import { ACTION_TYPES } from './types';
+import { ACTION_TYPES, EMPTY_CONNECT_FAILS } from './types';
 import { normalizeSort, sortUsers } from './users-sort';
 import type { LoadTestEnv } from './config';
 import { BucketedHistogram, HISTOGRAM_BUCKETS } from './metrics';
@@ -437,6 +437,8 @@ export class WorkerRuntime {
     actionsTotal: 0, successTotal: 0, failTotal: 0, echoOk: 0, echoSent: 0,
     droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
     connectAttempts: 0, connectFails: 0,
+    connectFailsByType: { ...EMPTY_CONNECT_FAILS }, // T4 tăng theo loại — init 0 (T1)
+    usersFailed: 0, // T4 đếm trong emitTick — init 0 (T1)
   };
   private histograms = new Map<string, BucketedHistogram>();
   private actionOk = new Map<string, number>();

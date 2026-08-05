@@ -262,6 +262,31 @@ describe('coordinator — FIX-7: users TTL cache (poll /users không re-query m�
   });
 });
 
+describe('coordinator — T1: provisioning tick có connect metrics = 0 + hasConnectData true', () => {
+  it('aggregateTick phase=provisioning → lastTick đủ field connect (0) + hasConnectData true', async () => {
+    const env = getEnv({ LOADTEST_DATA_DIR: tmpDir(), LOADTEST_REPORTS_DIR: tmpDir() });
+    const db = mockDb();
+    const c = new LoadTestCoordinator(env, {}, db);
+    const p = priv(c);
+    p.phase = 'provisioning';
+    p.runId = 'lt-c1-test';
+    p.startAt = Date.now();
+    p.config = runConfig();
+
+    await p.aggregateTick();
+
+    const t = c.lastTick;
+    expect(t).not.toBeNull();
+    expect(t!.phase).toBe('provisioning');
+    expect(t!.counters.connectAttempts).toBe(0);
+    expect(t!.counters.connectFails).toBe(0);
+    expect(t!.counters.connectFailsByType).toEqual({ timeout: 0, transport: 0, reject: 0, other: 0 });
+    expect(t!.counters.usersFailed).toBe(0);
+    expect(t!.rates.connectFailRate).toBe(0);
+    expect(t!.hasConnectData).toBe(true); // tick LIVE (DESIGN §2.1)
+  });
+});
+
 describe('coordinator — FIX-5: E1 auto-stop sau manual stop không flip stopped → error', () => {
   it('manual stop (provisioning) → phase stopped; finishRun("auto", E1) sau đó bị bỏ qua', async () => {
     const env = getEnv({ LOADTEST_DATA_DIR: tmpDir(), LOADTEST_REPORTS_DIR: tmpDir() });

@@ -107,6 +107,10 @@ export interface WorkerTick {
     rateLimitedNoEcho: number; // send không echo (rate-limit silent drop / Kafka chậm)
     connectAttempts: number; // socket connect attempts (auto-stop E2)
     connectFails: number; // connect_error count
+    /** Connect fail theo loại (T4) — sum 4 key == connectFails trên tick live. */
+    connectFailsByType: ConnectFailsByType;
+    /** Số user phase='failed' (T3/T4) — cumulative per-worker từ lúc process khởi động. */
+    usersFailed: number;
   };
   actionsPerSec: Partial<Record<ActionType, number>>;
   /** Kết quả theo action (cumulative) — AC6.1 per-action success rate. */
@@ -128,6 +132,20 @@ export interface ErrorSample {
   message: string; // rút gọn
   userId: string;
 }
+
+/** Loại connect fail (DESIGN-loadtest-e2-connect-fail §2.1 — classify heuristic T4). */
+export type ConnectFailType = 'timeout' | 'transport' | 'reject' | 'other';
+
+/** Counter connect fail theo loại (DESIGN §2.1) — sum 4 key == connectFails trên tick live. */
+export interface ConnectFailsByType {
+  timeout: number;
+  transport: number;
+  reject: number;
+  other: number;
+}
+
+/** Giá trị zero cho byType — dùng mọi nơi init counters. */
+export const EMPTY_CONNECT_FAILS: ConnectFailsByType = { timeout: 0, transport: 0, reject: 0, other: 0 };
 
 /** Trạng thái 1 user ảo (bảng user virtualized — Màn 3 khung v1.1). */
 export interface VirtualUserRow {
@@ -174,8 +192,14 @@ export interface LoadTestTick {
     droppedOutbox: number;
     reconnectCount: number;
     rateLimitedNoEcho: number;
+    connectAttempts: number; // cumulative per-worker, sum tick mới nhất (BE-2 — có thể tụt khi worker E3-restart)
+    connectFails: number; // cùng semantics
+    connectFailsByType: ConnectFailsByType;
+    usersFailed: number; // user phase='failed' (cumulative per-worker)
   };
-  rates: { successRate: number; echoRate: number };
+  rates: { successRate: number; echoRate: number; connectFailRate: number };
+  /** TRUE trên tick LIVE (aggregate/provisioning); FALSE trên DB-replay (toMetricTick — MVP không persist) — UI-1. */
+  hasConnectData?: boolean;
   actionsPerSec: Partial<Record<ActionType, number>>;
   latency: { p50: number; p95: number; p99: number };
   errors: { code: string; count: number }[];

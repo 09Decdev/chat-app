@@ -12,7 +12,9 @@ function fakeTick(workerId: number, over: Partial<WorkerTick['counters']> = {}):
       usersTotal: 100, usersCreated: 100, usersConnected: 100, usersActive: 100,
       usersQueued: 5, usersInRoom: 60, actionsTotal: 1000, successTotal: 950,
       failTotal: 50, echoOk: 90, echoSent: 100, droppedOutbox: 0, reconnectCount: 2,
-      rateLimitedNoEcho: 10, connectAttempts: 100, connectFails: 5, ...over,
+      rateLimitedNoEcho: 10, connectAttempts: 100, connectFails: 5,
+      connectFailsByType: { timeout: 3, transport: 1, reject: 1, other: 0 },
+      usersFailed: 2, ...over,
     },
     actionsPerSec: { chat: 10, read: 20 },
     actionOk: { chat: 9, read: 19 },
@@ -75,6 +77,31 @@ describe('coordinator-state — auto-stop', () => {
 });
 
 describe('coordinator-state — aggregateTicks', () => {
+  it('T1: gộp connect metrics (attempts/fails/byType/usersFailed) + hasConnectData true + rates.connectFailRate 0', () => {
+    const t0 = fakeTick(0, { connectAttempts: 100, connectFails: 4, usersFailed: 2, connectFailsByType: { timeout: 2, transport: 1, reject: 1, other: 0 } });
+    const t1 = fakeTick(1, { connectAttempts: 50, connectFails: 6, usersFailed: 3, connectFailsByType: { timeout: 0, transport: 4, reject: 1, other: 1 } });
+    const agg = aggregateTicks('run1', 1_700_000_001_000, 10, 'steady', [t0, t1]);
+
+    expect(agg.tick.counters.connectAttempts).toBe(150);
+    expect(agg.tick.counters.connectFails).toBe(10);
+    expect(agg.tick.counters.connectFailsByType).toEqual({ timeout: 2, transport: 5, reject: 2, other: 1 });
+    expect(agg.tick.counters.usersFailed).toBe(5);
+    // rates.connectFailRate: coordinator T5 override trước pushTick — aggregate trả 0 (chưa có window)
+    expect(agg.tick.rates.connectFailRate).toBe(0);
+    // tick LIVE: hasConnectData = true (replay toMetricTick đặt false)
+    expect(agg.tick.hasConnectData).toBe(true);
+  });
+
+  it('T1: window rỗng workers → connect metrics zeros, không crash', () => {
+    const agg = aggregateTicks('run1', 1_700_000_001_000, 1, 'ramping', []);
+    expect(agg.tick.counters.connectAttempts).toBe(0);
+    expect(agg.tick.counters.connectFails).toBe(0);
+    expect(agg.tick.counters.connectFailsByType).toEqual({ timeout: 0, transport: 0, reject: 0, other: 0 });
+    expect(agg.tick.counters.usersFailed).toBe(0);
+    expect(agg.tick.rates.connectFailRate).toBe(0);
+    expect(agg.tick.hasConnectData).toBe(true);
+  });
+
   it('gộp counters + histogram từ nhiều worker', () => {
     const ticks = [fakeTick(0), fakeTick(1, { actionsTotal: 2000, successTotal: 1950, failTotal: 50, usersConnected: 50 })];
     const agg = aggregateTicks('run1', 1_700_000_001_000, 10, 'steady', ticks);

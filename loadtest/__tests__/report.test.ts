@@ -43,13 +43,17 @@ function fakeTick(ts: number, over: Partial<LoadTestTick['counters']> = {}, late
       successTotal: 99_000, failTotal: 1_000, echoOk: 950, echoSent: 1_000,
       queueCount: 200, roomCount: 1_333, droppedOutbox: 0, reconnectCount: 5,
       rateLimitedNoEcho: 50,
+      connectAttempts: 10_000, connectFails: 30,
+      connectFailsByType: { timeout: 20, transport: 5, reject: 3, other: 2 },
+      usersFailed: 0,
     },
-    rates: { successRate: 99, echoRate: 95 },
+    rates: { successRate: 99, echoRate: 95, connectFailRate: 0 },
     actionsPerSec: { chat: 400, read: 300 },
     latency: { p50: 40, p95: latencyP95, p99: 300 },
     errors: [{ code: 'HTTP_429', count: 10 }],
     server: { wsConnections: 10_000, wsMessagesEmitted: 1_000_000, wsMessagesPerSec: 5_000 },
     workers: { alive: 4, total: 4, cpuAvg: 50 },
+    hasConnectData: true,
   };
   return { ...base, counters: { ...base.counters, ...over } };
 }

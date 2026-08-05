@@ -69,12 +69,17 @@ export function toMetricTick(row: MetricSampleRow) {
       droppedOutbox: row.droppedOutbox,
       reconnectCount: row.reconnectCount,
       rateLimitedNoEcho: row.rateLimitedNoEcho,
+      connectAttempts: 0, // DB không có cột (R1 — MVP chưa persist, DESIGN §8)
+      connectFails: 0,
+      connectFailsByType: { timeout: 0, transport: 0, reject: 0, other: 0 },
+      usersFailed: 0,
     },
-    rates: { successRate: row.successRate, echoRate: row.echoRate },
+    rates: { successRate: row.successRate, echoRate: row.echoRate, connectFailRate: 0 },
     actionsPerSec: parse(row.actionsPerSecJson, {}),
     latency: parse(row.latencyJson, { p50: 0, p95: 0, p99: 0 }),
     errors: parse(row.errorsJson, []),
     server: parse(row.serverJson, {}),
     workers: parse(row.workersJson, {}),
+    hasConnectData: false, // replay — UI phân biệt "không persist" vs "thật 0" (DESIGN §2.1, UI-1)
   };
 }

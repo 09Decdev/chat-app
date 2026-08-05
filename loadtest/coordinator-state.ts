@@ -5,7 +5,7 @@
  */
 
 import type { LoadTestTick, RunPhase, WorkerTick, ActionType, ErrorSample } from './types';
-import { ACTION_TYPES } from './types';
+import { ACTION_TYPES, EMPTY_CONNECT_FAILS } from './types';
 import { BucketedHistogram } from './metrics';
 
 export type StopKind = 'auto' | 'manual' | 'kill';
@@ -90,6 +90,8 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
     usersCreated: 0, usersConnected: 0, usersActive: 0, usersQueued: 0, usersInRoom: 0,
     actionsTotal: 0, successTotal: 0, failTotal: 0, echoOk: 0, echoSent: 0,
     droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
+    connectAttempts: 0, connectFails: 0, usersFailed: 0,
+    connectFailsByType: { ...EMPTY_CONNECT_FAILS },
   };
   const actionsPerSec: Partial<Record<ActionType, number>> = {};
   const actionOk: Partial<Record<ActionType, number>> = {};
@@ -115,6 +117,14 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
     C.droppedOutbox += t.counters.droppedOutbox;
     C.reconnectCount += t.counters.reconnectCount;
     C.rateLimitedNoEcho += t.counters.rateLimitedNoEcho;
+    // Connect metrics (DESIGN §2) — cumulative per-worker, sum tick mới nhất (BE-2)
+    C.connectAttempts += t.counters.connectAttempts;
+    C.connectFails += t.counters.connectFails;
+    C.usersFailed += t.counters.usersFailed;
+    C.connectFailsByType.timeout += t.counters.connectFailsByType.timeout;
+    C.connectFailsByType.transport += t.counters.connectFailsByType.transport;
+    C.connectFailsByType.reject += t.counters.connectFailsByType.reject;
+    C.connectFailsByType.other += t.counters.connectFailsByType.other;
 
     for (const action of ACTION_TYPES) {
       const v = t.actionsPerSec[action];
@@ -178,16 +188,23 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
       droppedOutbox: C.droppedOutbox,
       reconnectCount: C.reconnectCount,
       rateLimitedNoEcho: C.rateLimitedNoEcho,
+      connectAttempts: C.connectAttempts,
+      connectFails: C.connectFails,
+      connectFailsByType: C.connectFailsByType,
+      usersFailed: C.usersFailed,
     },
     rates: {
       successRate: successTotal > 0 ? Math.round((C.successTotal / successTotal) * 1000) / 10 : 100,
       echoRate: echoTotal > 0 ? Math.round((C.echoOk / echoTotal) * 1000) / 10 : 100,
+      // Window 60s — coordinator (T5) override TRƯỚC pushTick; 0 = chưa đủ mẫu (DESIGN §4).
+      connectFailRate: 0,
     },
     actionsPerSec,
     latency: { p50: q.p50, p95: q.p95, p99: q.p99 },
     errors: topErrors,
     server: { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0 },
     workers: { alive: ticks.length, total: ticks.length, cpuAvg: cpuN > 0 ? Math.round(cpuSum / cpuN) : 0 },
+    hasConnectData: true, // tick LIVE (DESIGN §2.1 — replay đặt false ở toMetricTick)
   };
 
   return { tick, perActionHistograms: histograms, actionOk, actionFail, errorSamples };

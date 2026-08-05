@@ -29,12 +29,15 @@ import { routes } from '@/lib/env';
 import { TERMINAL_PHASES } from '@/types/loadtest';
 import type { ErrorBucket, ErrorSample, LoadTestTick } from '@/types/loadtest';
 
-/** Sparkline từ ring buffer (60 tick cuối). */
+/** Sparkline từ ring buffer (60 tick cuối). Counters giờ chứa cả field object (connectFailsByType — T1) → narrow về number. */
 function useSpark(key: keyof LoadTestTick['counters'], n = 60) {
   const ticks = useLoadtestStore((s) => s.ticks);
   return useMemo(() => {
     const slice = ticks.slice(-n);
-    return slice.map((t) => t.counters[key]);
+    return slice.map((t) => {
+      const v = t.counters[key];
+      return typeof v === 'number' ? v : 0;
+    });
   }, [ticks, key, n]);
 }
 

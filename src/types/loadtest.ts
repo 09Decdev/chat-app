@@ -142,8 +142,14 @@ export interface LoadTestTick {
     droppedOutbox: number;
     reconnectCount: number;
     rateLimitedNoEcho: number;
+    connectAttempts: number; // cumulative per-worker, sum tick mới nhất (BE-2 — có thể tụt khi worker E3-restart)
+    connectFails: number;
+    connectFailsByType: { timeout: number; transport: number; reject: number; other: number };
+    usersFailed: number;
   };
-  rates: { successRate: number; echoRate: number };
+  rates: { successRate: number; echoRate: number; connectFailRate: number }; // connectFailRate = window 60s
+  /** FALSE trên DB-replay (MVP không persist connect) — UI phân biệt no-data vs 0 (UI-1). */
+  hasConnectData?: boolean;
   actionsPerSec: Partial<Record<ActionType, number>>;
   latency: { p50: number; p95: number; p99: number };
   errors: { code: string; count: number }[];
