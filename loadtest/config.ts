@@ -347,7 +347,7 @@ export const PRESETS: Preset[] = [
 export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0 };
 
 /** Ước lượng hạ tầng cho UI (Màn 1 "ƯỚC LƯỢNG"). */
-export function estimateInfra(targetUsers: number, env: LoadTestEnv) {
+export function estimateInfra(targetUsers: number, _env: LoadTestEnv) {
   const workers = Math.min(Math.max(1, Math.ceil(targetUsers / 10_000)), 32);
   const ramGB = Math.ceil((targetUsers * 60 * 1024) / (1024 ** 3)); // ~60KB/socket (PRD §5.1)
   const seatMin = Math.ceil(targetUsers / 100 / 60); // matching ~100 user/s

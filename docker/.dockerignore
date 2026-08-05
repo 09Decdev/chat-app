@@ -1,0 +1,24 @@
+# Docker build context — loại bỏ file không cần thiết + NGĂN secret vào image.
+# BẮT BUỘC: `loadtest/.env` + `loadtest/data/*` chứa secret thật (T-01) — nếu
+# build context bỏ qua .env, `COPY . .` sẽ nướng secret vào image.
+
+# deps (npm ci trong container sẽ cài lại; Windows node_modules có binary khác Alpine)
+node_modules
+
+# env — secret! KHÔNG bao giờ vào image
+.env
+.env.*
+!.env.example
+loadtest/.env
+
+# runtime data — secret (auth-secret, accounts pool)
+loadtest/data
+
+# build artifacts / local
+dist
+coverage
+reports
+docs/loadtest-reports
+*.tsbuildinfo
+*.log
+.git

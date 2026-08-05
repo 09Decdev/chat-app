@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useChatStore } from '@/store/chat.store';
 import { useAuthStore } from '@/store/auth.store';
 import { env } from '@/lib/env';
@@ -40,7 +40,7 @@ export function MatchingScreen() {
   const matched = phase === 'matched';
   const [filled, setFilled] = useState(0);
   const [countdown, setCountdown] = useState(COUNTDOWN_FROM);
-  const [search, setSearch] = useState('<span class="spin"></span>Đang tìm người quanh bạn…');
+  const [search, setSearch] = useState<ReactNode>(<><span className="spin" />Đang tìm người quanh bạn…</>);
   const [showCard, setShowCard] = useState(false);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -50,7 +50,7 @@ export function MatchingScreen() {
     DEMO_PEOPLE.forEach((p, i) => {
       const t = setTimeout(() => {
         setFilled(i + 1);
-        setSearch(`Đã tìm thấy <span style="color:var(--mint)">${p.n}</span> · đang ghép phòng…`);
+        setSearch(<>Đã tìm thấy <span style={{ color: 'var(--mint)' }}>{p.n}</span> · đang ghép phòng…</>);
       }, 700 + i * 850);
       timersRef.current.push(t);
     });
@@ -128,7 +128,7 @@ export function MatchingScreen() {
         <div className="youchip">
           <span className="dot">{youInitial}</span> Bạn đang ở đây
         </div>
-        <div className="searchtxt" dangerouslySetInnerHTML={{ __html: search }} />
+        <div className="searchtxt">{search}</div>
       </div>
 
       <div className="queuecard">

@@ -540,7 +540,7 @@ export class WorkerRuntime {
   }
 
   /** Chat send attempt — chỉ đếm attempt (AC3.3: success quyết định bởi echo). */
-  onChatSent(u: VirtualUser) {
+  onChatSent(_u: VirtualUser) {
     this.counters.actionsTotal++;
     this.counters.echoSent++;
     this.bumpPerSec('chat');

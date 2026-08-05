@@ -334,7 +334,7 @@ export async function provisionAccounts(
         summary.errors[code] = (summary.errors[code] ?? 0) + 1;
         results.push(failResult(code));
       }
-    } catch (err) {
+    } catch (_err) {
       summary.failed++;
       summary.registerFailed++;
       summary.errors['EXCEPTION'] = (summary.errors['EXCEPTION'] ?? 0) + 1;

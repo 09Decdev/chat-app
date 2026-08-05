@@ -96,7 +96,7 @@ export class RestDriver {
     }
   }
 
-  private action<T>(res: HttpResult<T>, action: string): ActionResult {
+  private action<T>(res: HttpResult<T>, _action: string): ActionResult {
     return {
       ok: res.ok,
       latencyMs: res.latencyMs,

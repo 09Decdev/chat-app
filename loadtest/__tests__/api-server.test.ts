@@ -93,6 +93,7 @@ describeDb('api-server — admin auth + gate + history', () => {
     } catch {
       body = text;
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test helper: parse-anybody body
     return { status: res.status, body: body as { success?: boolean; statusCode?: number; message?: string; data?: any } };
   }
 

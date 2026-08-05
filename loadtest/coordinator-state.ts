@@ -85,7 +85,7 @@ export interface AggregatedTick {
   errorSamples: ErrorSample[];
 }
 
-export function aggregateTicks(runId: string, ts: number, elapsedSec: number, phase: RunPhase, ticks: WorkerTick[], prev?: AggregatedTick): AggregatedTick {
+export function aggregateTicks(runId: string, ts: number, elapsedSec: number, phase: RunPhase, ticks: WorkerTick[], _prev?: AggregatedTick): AggregatedTick {
   const C = {
     usersCreated: 0, usersConnected: 0, usersActive: 0, usersQueued: 0, usersInRoom: 0,
     actionsTotal: 0, successTotal: 0, failTotal: 0, echoOk: 0, echoSent: 0,

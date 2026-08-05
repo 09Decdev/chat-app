@@ -39,6 +39,7 @@ const PENDING_CHAT_TTL_MS = 60_000;
 
 function genClientMsgId(): string {
   return (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy-compat guard: crypto.randomUUID not in older runtimes
     (crypto as any)?.randomUUID?.() ??
     `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
   );
