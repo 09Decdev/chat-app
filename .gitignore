@@ -48,3 +48,6 @@ login*.json
 
 # seed input (credential thật — KHÔNG commit)
 users_accounts*.json
+
+# loadtest run reports (tự sinh mỗi run)
+docs/loadtest-reports/
