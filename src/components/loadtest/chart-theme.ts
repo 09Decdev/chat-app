@@ -2,7 +2,7 @@
  * Palette chung cho biểu đồ loadtest (UsersPage + LiveDashboard) — màu NHẤT QUÁN.
  * Màu theo --chart-N (src/index.css) — không hardcode hex rải rác.
  */
-import type { ActionType, UserPhase } from '@/types/loadtest';
+import type { ActionType, ConnectFailType, UserPhase } from '@/types/loadtest';
 
 export const CHART_COLORS = {
   1: 'hsl(var(--chart-1))',
@@ -50,3 +50,15 @@ export const PERCENTILE_COLORS = {
   p95: CHART_COLORS[1],
   p99: CHART_COLORS[6],
 } as const;
+
+/**
+ * Màu breakdown connect fail theo loại (UI-SPEC §4.3 — token --chart-N):
+ * timeout --chart-4 (vàng) · transport --chart-2 (xanh da trời) ·
+ * reject --chart-6 (đỏ) · other --chart-8 (tím nhạt).
+ */
+export const CONNECT_FAIL_COLORS: Record<ConnectFailType, string> = {
+  timeout: CHART_COLORS[4],
+  transport: CHART_COLORS[2],
+  reject: CHART_COLORS[6],
+  other: CHART_COLORS[8],
+};

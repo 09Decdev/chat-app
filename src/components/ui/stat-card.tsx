@@ -14,6 +14,11 @@ export interface StatCardProps {
   delta?: number;
   trend?: 'up' | 'down' | 'flat';
   sparkline?: number[];
+  /**
+   * Sparkline thủ công (D8/PF2 — tile Connect fail): render trong slot h-6 thay recharts
+   * khi `sparkline` không được truyền — tránh chart recharts thứ 5 re-render 1Hz.
+   */
+  sparklineNode?: React.ReactNode;
   variant?: StatVariant;
   hint?: string;
   className?: string;
@@ -43,6 +48,7 @@ const StatCard = memo(function StatCard({
   delta,
   trend,
   sparkline,
+  sparklineNode,
   variant = 'default',
   hint,
   className,
@@ -99,6 +105,11 @@ const StatCard = memo(function StatCard({
               dot={false}
             />
           </AreaChart>
+        </div>
+      )}
+      {sparklineNode && !sparkData && (
+        <div className="pointer-events-none mt-2 h-6 w-full" aria-hidden>
+          {sparklineNode}
         </div>
       )}
     </Card>

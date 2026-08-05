@@ -5,6 +5,10 @@
 
 export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing' | 'topic' | 'vote_kick';
 
+/** Loại lỗi connect — khớp loadtest/types.ts ConnectFailType (DESIGN §2.1, T1). */
+export type ConnectFailType = 'timeout' | 'transport' | 'reject' | 'other';
+export type ConnectFailsByType = Record<ConnectFailType, number>;
+
 export type RunPhase =
   | 'idle'
   | 'provisioning'
@@ -144,7 +148,7 @@ export interface LoadTestTick {
     rateLimitedNoEcho: number;
     connectAttempts: number; // cumulative per-worker, sum tick mới nhất (BE-2 — có thể tụt khi worker E3-restart)
     connectFails: number;
-    connectFailsByType: { timeout: number; transport: number; reject: number; other: number };
+    connectFailsByType: ConnectFailsByType;
     usersFailed: number;
   };
   rates: { successRate: number; echoRate: number; connectFailRate: number }; // connectFailRate = window 60s

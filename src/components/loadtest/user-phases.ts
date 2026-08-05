@@ -59,7 +59,8 @@ export function slicesFromPhaseCounts(counts: Partial<Record<UserPhase, number>>
 
 /**
  * Phân bố user theo phase từ tick counters (LiveDashboard — không cần gọi /users).
- * Rời rạc, không chồng lấp: in_room → queued → connected (idle) → chưa kết nối.
+ * Rời rạc, không chồng lấp: in_room → queued → connected (idle) → chưa kết nối → failed.
+ * failed (D7) lấy từ c.usersFailed, trừ khỏi notConnected — tổng donut = usersCreated.
  * Nếu chưa có user nào → [].
  */
 export function slicesFromTick(tick: LoadTestTick | null | undefined): PhaseSlice[] {
@@ -68,12 +69,13 @@ export function slicesFromTick(tick: LoadTestTick | null | undefined): PhaseSlic
   const total = c.usersCreated;
   if (total <= 0) return [];
   const connectedIdle = Math.max(0, c.usersConnected - c.usersInRoom - c.usersQueued);
-  const notConnected = Math.max(0, total - c.usersConnected);
+  const notConnected = Math.max(0, total - c.usersConnected - (c.usersFailed ?? 0));
   const parts: { key: UserPhase; value: number }[] = [
     { key: 'in_room', value: c.usersInRoom },
     { key: 'queued', value: c.usersQueued },
     { key: 'connected', value: connectedIdle },
     { key: 'provisioned', value: notConnected },
+    ...((c.usersFailed ?? 0) > 0 ? [{ key: 'failed' as const, value: c.usersFailed }] : []),
   ];
   return parts
     .filter((p) => p.value > 0)
