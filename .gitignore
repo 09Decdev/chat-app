@@ -39,3 +39,6 @@ loadtest/data/*
 
 # test coverage reports
 coverage
+
+# test artifacts
+reports/
