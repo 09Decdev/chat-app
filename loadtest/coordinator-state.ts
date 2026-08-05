@@ -53,14 +53,19 @@ export interface AutoStopInput {
   connectTotal: number; // tổng đã thử connect
 }
 
+/** Format rate cho reason/stopReason — 1 chữ số thập phân (F6: 30.1 → "30.1", không làm tròn 30). */
+function formatRatePct(rate: number): string {
+  return String(Math.round(rate * 10) / 10);
+}
+
 export function decideAutoStop(input: AutoStopInput): StopDecision {
   if (input.registerFailRate > 50 && input.registeredTotal >= 10) {
-    return { stop: true, reason: `auto-stop: register fail ${input.registerFailRate.toFixed(0)}% > 50% (E1)` };
+    return { stop: true, reason: `auto-stop: register fail ${formatRatePct(input.registerFailRate)}% > 50% (E1)` };
   }
   // E2: connectTotal = attempts TRONG window 60s (semantics đổi — PRD §6.6 chấp nhận; window chưa đủ
   // 50 attempts → rate 0 từ connectFailRateFromWindow nên nhánh này không trigger — AC-3).
   if (input.connectFailRate > E2_FAIL_RATE_PCT && input.connectTotal >= E2_MIN_ATTEMPTS) {
-    return { stop: true, reason: `auto-stop: connect fail ${input.connectFailRate.toFixed(0)}% > ${E2_FAIL_RATE_PCT}% (E2)` };
+    return { stop: true, reason: `auto-stop: connect fail ${formatRatePct(input.connectFailRate)}% > ${E2_FAIL_RATE_PCT}% (E2)` };
   }
   return { stop: false };
 }
@@ -127,7 +132,8 @@ export function rollWindow(
   byType: ConnectFailsByType,
   max = E2_MAX_BUCKETS,
 ): ConnectWindowBucket[] {
-  const next = [...buckets, { ts, attempts, fails, byType }];
+  // F7: clone byType — KHÔNG alias object của caller (bucket bất biến sau khi roll)
+  const next = [...buckets, { ts, attempts, fails, byType: { ...byType } }];
   const cutoff = ts - E2_WINDOW_MS;
   while (next.length && next[0].ts < cutoff) next.shift();
   while (next.length > max) next.shift();
@@ -159,6 +165,35 @@ export function windowSpanSecs(buckets: ConnectWindowBucket[], now: number): num
 /** Rate E2 từ window: 0 khi chưa đủ mẫu (AC-3 — window < 50 attempts không evaluate). */
 export function connectFailRateFromWindow(attempts: number, fails: number, minAttempts = E2_MIN_ATTEMPTS): number {
   return attempts >= minAttempts ? (fails / attempts) * 100 : 0;
+}
+
+/** Context cho formatE2Log (DESIGN §6 — 8 trường AC-4, 1 dòng regex-assertable). */
+export interface E2LogContext {
+  phase: RunPhase;
+  elapsedSec: number;
+  /** Span THẬT của window (windowSpanSecs — BE-3, không hardcode 60). */
+  windowSecs: number;
+  /** attempts/fails/byType TỪ WINDOW (SEC-1: sum 4 loại byType == windowFails). */
+  window: ConnectCountersSnapshot;
+  /** Cumulative (F-7 — suffix Cum; KHÔNG phải số trong window). */
+  usersFailedCum: number;
+  workersAlive: number;
+  workersTotal: number;
+}
+
+/**
+ * Log E2 8 trường — PURE (test chuỗi). Format chuẩn DESIGN §6:
+ *   phase=… elapsedSec=… windowSec=… windowAttempts=… windowFails=…
+ *   byType=timeout:N,transport:N,reject:N,other:N usersFailedCum=N workersAlive=N workersTotal=N
+ */
+export function formatE2Log(ctx: E2LogContext): string {
+  const w = ctx.window;
+  return (
+    `phase=${ctx.phase} elapsedSec=${ctx.elapsedSec} windowSec=${ctx.windowSecs} ` +
+    `windowAttempts=${w.attempts} windowFails=${w.fails} ` +
+    `byType=timeout:${w.byType.timeout},transport:${w.byType.transport},reject:${w.byType.reject},other:${w.byType.other} ` +
+    `usersFailedCum=${ctx.usersFailedCum} workersAlive=${ctx.workersAlive} workersTotal=${ctx.workersTotal}`
+  );
 }
 
 /** Pha cuối dựa trên cách run kết thúc: natural → finished, auto lỗi → error, manual → stopped. */

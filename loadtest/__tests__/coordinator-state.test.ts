@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   canTransition, transition, decideAutoStop, endPhaseFromStop, aggregateTicks, peakThroughput,
-  rollWindow, sumWindow, windowSpanSecs, connectFailRateFromWindow, diffConnectWindowEntry,
+  rollWindow, sumWindow, windowSpanSecs, connectFailRateFromWindow, diffConnectWindowEntry, formatE2Log,
   E2_MIN_ATTEMPTS, E2_WINDOW_MS, E2_MAX_BUCKETS,
 } from '../coordinator-state';
 import type { WorkerTick } from '../types';
@@ -152,7 +152,7 @@ describe('coordinator-state — biên auto-stop (E1/E2)', () => {
   it('E1: 50.1% + 10 sample → dừng với reason chính xác; 50% + 9 sample → không dừng', () => {
     const over = decideAutoStop({ phase: 'provisioning', registerFailRate: 50.1, connectFailRate: 0, registeredTotal: 10, connectTotal: 0 });
     expect(over.stop).toBe(true);
-    expect(over.reason).toBe('auto-stop: register fail 50% > 50% (E1)');
+    expect(over.reason).toBe('auto-stop: register fail 50.1% > 50% (E1)'); // F6: 50.1 không làm tròn "50"
     const below = decideAutoStop({ phase: 'provisioning', registerFailRate: 50, connectFailRate: 0, registeredTotal: 9, connectTotal: 0 });
     expect(below.stop).toBe(false);
   });
@@ -170,7 +170,7 @@ describe('coordinator-state — biên auto-stop (E1/E2)', () => {
   it('E2: 30.1% + 50 connect (window) → dừng với reason chính xác; 30% + 49 connect → không dừng', () => {
     const over = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30.1, registeredTotal: 0, connectTotal: 50 });
     expect(over.stop).toBe(true);
-    expect(over.reason).toBe('auto-stop: connect fail 30% > 30% (E2)');
+    expect(over.reason).toBe('auto-stop: connect fail 30.1% > 30% (E2)'); // F6: 30.1 không làm tròn "30"
     const below = decideAutoStop({ phase: 'ramping', registerFailRate: 0, connectFailRate: 30, registeredTotal: 0, connectTotal: 49 });
     expect(below.stop).toBe(false);
   });
@@ -224,9 +224,11 @@ describe('coordinator-state — E2 sliding window (T2)', () => {
 
   it('rollWindow: 1 entry → [entry] (PURE — không mutate input)', () => {
     const buckets: ReturnType<typeof rollWindow> = [];
-    const out = rollWindow(buckets, now, 10, 2, BY(1, 1, 0, 0));
+    const byTypeIn = BY(1, 1, 0, 0);
+    const out = rollWindow(buckets, now, 10, 2, byTypeIn);
     expect(out).toEqual([{ ts: now, attempts: 10, fails: 2, byType: BY(1, 1, 0, 0) }]);
     expect(buckets).toEqual([]); // immutability
+    expect(out[0].byType).not.toBe(byTypeIn); // F7: không alias object caller (clone)
   });
 
   it('rollWindow: evict theo WALL-CLOCK age > 60s (không đếm bucket)', () => {
@@ -309,6 +311,49 @@ describe('coordinator-state — E2 sliding window (T2)', () => {
   it('hằng số: E2_WINDOW_MS = 60s, E2_MIN_ATTEMPTS = 50', () => {
     expect(E2_WINDOW_MS).toBe(60_000);
     expect(E2_MIN_ATTEMPTS).toBe(50);
+  });
+});
+
+// ─── T5 (DESIGN §6): formatE2Log 8 trường — regex-assertable (AC-4/ST-7) ─────
+
+describe('coordinator-state — formatE2Log (T5)', () => {
+  const E2_LOG_RE =
+    /^phase=\S+ elapsedSec=\d+ windowSec=\d+ windowAttempts=\d+ windowFails=\d+ byType=timeout:\d+,transport:\d+,reject:\d+,other:\d+ usersFailedCum=\d+ workersAlive=\d+ workersTotal=\d+$/;
+
+  it('8 trường đủ + byType sum == windowFails + khớp regex', () => {
+    const s = formatE2Log({
+      phase: 'ramping',
+      elapsedSec: 87,
+      windowSecs: 60,
+      window: { attempts: 8120, fails: 3330, byType: { timeout: 2500, transport: 500, reject: 300, other: 30 } },
+      usersFailedCum: 450,
+      workersAlive: 10,
+      workersTotal: 10,
+    });
+    expect(s).toMatch(E2_LOG_RE);
+    expect(s).toContain('phase=ramping');
+    expect(s).toContain('elapsedSec=87');
+    expect(s).toContain('windowSec=60');
+    expect(s).toContain('windowAttempts=8120');
+    expect(s).toContain('windowFails=3330');
+    expect(s).toContain('byType=timeout:2500,transport:500,reject:300,other:30'); // TỪ WINDOW (SEC-1)
+    expect(s).toContain('usersFailedCum=450'); // cumulative — suffix Cum (F-7)
+    expect(s).toContain('workersAlive=10');
+    expect(s).toContain('workersTotal=10');
+  });
+
+  it('window rỗng → 8 trường zeros, vẫn khớp regex (không crash)', () => {
+    const s = formatE2Log({
+      phase: 'steady',
+      elapsedSec: 1,
+      windowSecs: 0,
+      window: { attempts: 0, fails: 0, byType: { timeout: 0, transport: 0, reject: 0, other: 0 } },
+      usersFailedCum: 0,
+      workersAlive: 0,
+      workersTotal: 1,
+    });
+    expect(s).toMatch(E2_LOG_RE);
+    expect(s).toContain('windowAttempts=0');
   });
 });
 

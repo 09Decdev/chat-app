@@ -5,15 +5,16 @@
  *   (không kẹt 'ramping' vĩnh viễn); prune workerTicks khi worker chết.
  * - FIX-5 (C-3): E1 auto-stop sau manual stop KHÔNG đổi 'stopped' → 'error'.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getEnv } from '../config';
 import { LoadTestCoordinator } from '../coordinator';
 import { WorkerFarm } from '../worker-farm';
+import { ltLog } from '../util';
 import type { DbWriter } from '../db/writer';
-import type { RunConfig, StartRunRequest } from '../types';
+import type { RunConfig, StartRunRequest, WorkerTick } from '../types';
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'lt-coordinator-'));
@@ -58,9 +59,13 @@ type CoordinatorPriv = {
   workerDeathTimes: number[];
   pendingRestarts: number;
   finishing: boolean;
+  prevConnectCumulative: Map<number, { attempts: number; fails: number; byType: Record<string, number> }>;
+  windowBuckets: Array<{ ts: number; attempts: number; fails: number; byType: Record<string, number> }>;
+  lastWindow: { attempts: number; fails: number; byType: Record<string, number> };
   handleWorkerDied: (workerId: number) => void;
   finishRun: (kind: 'natural' | 'auto' | 'manual', reason: string, force?: boolean) => Promise<void>;
   aggregateTick: () => Promise<void>;
+  resetRunState: () => void;
 };
 
 function priv(c: LoadTestCoordinator): CoordinatorPriv {
@@ -303,5 +308,171 @@ describe('coordinator — FIX-5: E1 auto-stop sau manual stop không flip stoppe
     expect(priv(c).phase).toBe('stopped'); // KHÔNG flip sang error
     expect(db.writeRunFinish).toHaveBeenCalledTimes(1);
     expect(db.writeRunFinish).toHaveBeenCalledWith(expect.any(String), 'stopped', expect.any(String), expect.anything(), expect.any(Number));
+  });
+});
+
+// ─── T5 (DESIGN §7): wire window E2 + reorder BE-4 ───────────────────────────
+
+/** Tick worker có connect counters (cumulative — diff xử lý ở coordinator). */
+function connectTick(workerId: number, attempts: number, fails: number, usersFailed = 0): WorkerTick {
+  return {
+    type: 'tick', workerId, ts: Date.now(), phase: 'ramping',
+    counters: {
+      usersTotal: 1000, usersCreated: 1000, usersConnected: 100, usersActive: 100,
+      usersQueued: 0, usersInRoom: 0, actionsTotal: 0, successTotal: 0, failTotal: 0,
+      echoOk: 0, echoSent: 0, droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
+      connectAttempts: attempts, connectFails: fails,
+      connectFailsByType: { timeout: fails, transport: 0, reject: 0, other: 0 },
+      usersFailed,
+    },
+    actionsPerSec: {}, actionOk: {}, actionFail: {}, errors: {},
+    errorSamples: [], histograms: {}, histogramBucketCount: 0, cpuPct: 0, rssMb: 10,
+  };
+}
+
+describe('coordinator — T5: wire window E2 (DESIGN §7)', () => {
+  const BASE = 1_700_000_000_000;
+  let c: LoadTestCoordinator;
+  let db: DbWriter;
+  let p: CoordinatorPriv;
+  let tickSec: number;
+
+  function setup(phase: 'ramping' | 'steady' = 'ramping') {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(BASE);
+    const env = getEnv({ LOADTEST_DATA_DIR: tmpDir(), LOADTEST_REPORTS_DIR: tmpDir() });
+    db = mockDb();
+    c = new LoadTestCoordinator(env, {}, db);
+    p = priv(c);
+    p.phase = phase;
+    p.runId = 'lt-c1-test';
+    // steady: startAt lùi 58s → tick 1 elapsedSec 59, tick 2 = 60 (đúng tick duration hết — BE-4)
+    p.startAt = phase === 'steady' ? BASE - 58_000 : BASE;
+    p.config = runConfig();
+    tickSec = 0;
+  }
+
+  async function runTick(attempts: number, fails: number, usersFailed = 0) {
+    tickSec++;
+    vi.setSystemTime(BASE + tickSec * 1000);
+    p.workerTicks.set(0, connectTick(0, attempts, fails, usersFailed));
+    await p.aggregateTick();
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('wiring: spike 25% 3s rồi sạch → không stop; sau 60s wall-clock rate về 0 (phục hồi)', async () => {
+    setup();
+    await runTick(0, 0); // tick đầu: skip-first (prev missing)
+    await runTick(200, 50); // delta 200/50 → 25% < 30, attempts 200 ≥ 50 → không stop
+    expect(c.lastTick?.rates.connectFailRate).toBe(25);
+    await runTick(400, 100); // window 400/100 → 25%
+    expect(db.writeRunFinish).not.toHaveBeenCalled();
+    // healthy: fails giữ 100, attempts +200/tick trong 63 tick → spike trôi khỏi window sau 60s
+    for (let i = 4; i <= 66; i++) await runTick(400 + (i - 3) * 200, 100);
+    expect(c.lastTick?.rates.connectFailRate).toBe(0); // fails window = 0 (spike đã evict)
+    expect(db.writeRunFinish).not.toHaveBeenCalled(); // AC-1: không false-positive
+    expect(p.windowBuckets.length).toBeLessThanOrEqual(61); // wall-clock evict
+  });
+
+  it('100% fail liên tục → stop E2:, stopReason prefix "E2:" (AC-2)', async () => {
+    setup();
+    await runTick(0, 0); // tick đầu bị skip-first (PF1) — window cần dữ liệu từ tick 2
+    await runTick(200, 200); // delta 200/200 → 100% ≥ 50 attempts → stop
+    expect(db.writeRunFinish).toHaveBeenCalledTimes(1);
+    expect(db.writeRunFinish).toHaveBeenCalledWith('lt-c1-test', 'error', expect.stringMatching(/^E2:/), expect.anything(), expect.any(Number));
+    expect(p.phase).toBe('error');
+  });
+
+  it('window < 50 attempts → rate 0, không stop (AC-3)', async () => {
+    setup();
+    await runTick(20, 20); // window {20,20} — 100% fail nhưng < 50 attempts
+    expect(c.lastTick?.rates.connectFailRate).toBe(0);
+    await runTick(40, 40);
+    await runTick(49, 49); // window {49,49} — vẫn < 50
+    expect(c.lastTick?.rates.connectFailRate).toBe(0);
+    expect(db.writeRunFinish).not.toHaveBeenCalled();
+  });
+
+  it('log E2 đủ 8 trường + khớp regex (AC-4/ST-7)', async () => {
+    setup();
+    const spy = vi.spyOn(ltLog, 'error');
+    await runTick(0, 0); // skip-first — window có dữ liệu từ tick 2
+    await runTick(200, 200); // delta 200/200 → stop
+    const lines = spy.mock.calls.map((m) => String(m[0])); // đọc TRƯỚC restore (mockRestore xóa calls)
+    spy.mockRestore();
+    const e2 = lines.find((l) => l.startsWith('E2:'));
+    expect(e2).toBeDefined();
+    expect(e2).toMatch(
+      /^E2: auto-stop: connect fail 100% > 30% \(E2\) \| phase=\S+ elapsedSec=\d+ windowSec=\d+ windowAttempts=\d+ windowFails=\d+ byType=timeout:\d+,transport:\d+,reject:\d+,other:\d+ usersFailedCum=\d+ workersAlive=\d+ workersTotal=\d+$/,
+    );
+  });
+
+  it('BE-4: duration hết đúng tick + rate 100% → E2 thắng natural-end (không lọt finished)', async () => {
+    setup('steady'); // tick 1: elapsedSec 59 (< 60) — tick 2: 60 (đúng mốc duration hết)
+    await runTick(0, 0); // skip-first, chưa có data → phase-advance chưa kích (59 < 60)
+    await runTick(200, 200); // elapsedSec 60 + rate 100% → E2 (reorder) thắng phase-advance
+    expect(db.writeRunFinish).toHaveBeenCalledTimes(1);
+    expect(db.writeRunFinish).toHaveBeenCalledWith('lt-c1-test', 'error', expect.stringMatching(/^E2:/), expect.anything(), expect.any(Number));
+    expect(p.phase).toBe('error'); // không phải 'finished' (AC-7)
+  });
+
+  it('F4: restart loop (worker chết + skip-first) → rate giữ ~20.8%, không stop (AC-1)', async () => {
+    setup();
+    const restartSpy = vi.spyOn(WorkerFarm.prototype, 'restart').mockResolvedValue(null);
+    try {
+      // Cycle A: 1000 user/worker, 50 broken (5%) → 1200 attempts / 250 fails per cycle = 20.8%
+      await runTick(0, 0); // skip-first — window có dữ liệu từ tick 2
+      await runTick(400, 83);
+      await runTick(800, 167);
+      await runTick(1200, 250);
+      expect(c.lastTick?.rates.connectFailRate).toBeCloseTo(20.8, 1);
+      expect(db.writeRunFinish).not.toHaveBeenCalled();
+      // Worker chết → prevConnectCumulative bị xóa (wiring T5)
+      p.handleWorkerDied(0);
+      p.workerDeathTimes = []; // handleWorkerDied đẩy 1 death marker → xóa để E3 zero-workers
+      // (farm.total=0 trong test) không stop — không liên quan F4
+      expect(p.prevConnectCumulative.size).toBe(0);
+      // Cycle B (process mới, counters reset): tick đầu bị SKIP → không bucket phình
+      await runTick(100, 21); // skip-first
+      await runTick(500, 104);
+      await runTick(900, 188);
+      await runTick(1200, 250);
+      expect(c.lastTick?.rates.connectFailRate).toBeCloseTo(20.8, 1); // 2 chu kỳ vẫn ~20.8%
+      expect(db.writeRunFinish).not.toHaveBeenCalled(); // AC-1 giữ: 5% broken + restart loop không false-positive
+    } finally {
+      restartSpy.mockRestore();
+    }
+  });
+
+  it('không double-count: cùng tick 2 lần → delta 0 (window không tăng đúp)', async () => {
+    setup();
+    await runTick(200, 40); // window 200/40 → 20%
+    const before = p.lastWindow.attempts;
+    await p.aggregateTick(); // workerTicks không đổi → delta 0
+    expect(p.lastWindow.attempts).toBe(before);
+  });
+
+  it('resetRunState xóa window + prevConnectCumulative (ST-4)', async () => {
+    setup();
+    await runTick(200, 40);
+    expect(p.windowBuckets.length).toBeGreaterThan(0);
+    expect(p.prevConnectCumulative.size).toBeGreaterThan(0);
+    p.resetRunState();
+    expect(p.windowBuckets).toEqual([]);
+    expect(p.prevConnectCumulative.size).toBe(0);
+    expect(p.lastWindow).toEqual({ attempts: 0, fails: 0, byType: { timeout: 0, transport: 0, reject: 0, other: 0 } });
+  });
+
+  it('AC-1 verify: 100% fail burst thật (10k user fail 1 lần) → STOP (fail thật ≥ 30% — ngoài premise AC-1)', async () => {
+    // AC-1 premise: "connect-fail THẬT < 30% trong window" — burst 100% là sự cố thật, E2 dừng đúng
+    // (chỉ 5% broken + bounded-5 mới được bảo vệ — test F4). KHÔNG đổi ngưỡng.
+    setup();
+    await runTick(0, 0); // skip-first
+    await runTick(10_000, 10_000); // delta 10000/10000 → 100% ≥ 50 attempts → stop
+    expect(db.writeRunFinish).toHaveBeenCalledTimes(1);
+    expect(db.writeRunFinish).toHaveBeenCalledWith('lt-c1-test', 'error', expect.stringMatching(/^E2:/), expect.anything(), expect.any(Number));
   });
 });

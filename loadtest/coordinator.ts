@@ -14,7 +14,11 @@ import { ACTION_TYPES, EMPTY_CONNECT_FAILS } from './types';
 import { mergePhaseCounts, normalizeSort, sortUsers } from './users-sort';
 import { WorkerFarm } from './worker-farm';
 import { createRedis, provisionAccounts } from './auth-factory';
-import { aggregateTicks, decideAutoStop, endPhaseFromStop, transition, type AggregatedTick } from './coordinator-state';
+import {
+  aggregateTicks, connectFailRateFromWindow, decideAutoStop, diffConnectWindowEntry, endPhaseFromStop,
+  formatE2Log, rollWindow, sumWindow, transition, windowSpanSecs,
+  type AggregatedTick, type ConnectCountersSnapshot, type ConnectWindowBucket,
+} from './coordinator-state';
 import { ActionHistograms } from './metrics';
 import { RestDriver } from './rest-actions';
 import { buildReport } from './report';
@@ -65,6 +69,13 @@ export class LoadTestCoordinator {
   private provisionProgress = { done: 0, total: 0 };
   private workerDoneCount = 0;
   private workerDeathTimes: number[] = [];
+  /** T5 (DESIGN §7.1): cumulative connect của tick MỚI NHẤT từng worker — diff ra delta mỗi tick.
+   *  Worker chết → xóa entry (handleWorkerDied) → tick đầu sau restart bị SKIP (PF1). */
+  private prevConnectCumulative = new Map<number, ConnectCountersSnapshot>();
+  /** T5: sliding window 60s WALL-CLOCK — bucket delta 1 tick (T2 helpers). */
+  private windowBuckets: ConnectWindowBucket[] = [];
+  /** T5: sum window mới nhất — nguồn cho E2 decide + log. */
+  private lastWindow: ConnectCountersSnapshot = { attempts: 0, fails: 0, byType: EMPTY_CONNECT_FAILS };
   private serverMetrics = { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0, lastScrapeAt: 0 };
   private queueCount = 0;
   private restDriver: RestDriver | null = null;
@@ -106,6 +117,7 @@ export class LoadTestCoordinator {
     while (this.workerDeathTimes.length && this.workerDeathTimes[0] < cutoff) this.workerDeathTimes.shift();
     this.workerTicks.delete(workerId);
     this.workerHistograms.delete(workerId);
+    this.prevConnectCumulative.delete(workerId); // T5: worker mới (restart) → tick đầu bị skip — delta tính từ 0
     ltLog.warn(`coordinator: worker#${workerId} died`);
     // E3: tự restart worker crash (trừ khi đang stop/finish)
     if (this.isRunning && !this.finishing && this.phase !== 'cooldown') {
@@ -229,6 +241,9 @@ export class LoadTestCoordinator {
     this.queueCount = 0;
     this.serverMetrics = { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0, lastScrapeAt: 0 };
     this.workerDeathTimes = []; // không reset → run sau E3 giả (worker chết run trước cộng dồn)
+    this.prevConnectCumulative.clear(); // T5 (ST-4): window run trước không rò sang run sau
+    this.windowBuckets = [];
+    this.lastWindow = { attempts: 0, fails: 0, byType: EMPTY_CONNECT_FAILS };
     this.noPostFixtureCount = 0;
   }
 
@@ -484,6 +499,37 @@ export class LoadTestCoordinator {
     this.peakActionsPerSec = Math.max(this.peakActionsPerSec, aps);
     this.actionsPerSecSeries.push(aps);
 
+    // ── T5 (DESIGN §7.1): window connect WALL-CLOCK — diff per-worker + roll + rate TRƯỚC pushTick ──
+    // (rates.connectFailRate phải vào tick để dashboard/report có đúng rate — AC-6; E2 evaluate dưới)
+    if (this.phase === 'ramping' || this.phase === 'steady') {
+      let dA = 0, dF = 0;
+      const dByType = { ...EMPTY_CONNECT_FAILS };
+      for (const t of ticks) {
+        const cur: ConnectCountersSnapshot = {
+          attempts: t.counters.connectAttempts,
+          fails: t.counters.connectFails,
+          byType: t.counters.connectFailsByType,
+        };
+        const delta = diffConnectWindowEntry(this.prevConnectCumulative.get(t.workerId), cur);
+        if (!delta) {
+          // Skip-first-tick sau spawn/restart (PF1): cumulative process mới có thể chứa 2-15s
+          // attempt/fail (pacing + reconnect storm) → không tạo bucket phình; prev = cur cho tick sau.
+          this.prevConnectCumulative.set(t.workerId, cur);
+          continue;
+        }
+        dA += delta.attempts;
+        dF += delta.fails;
+        dByType.timeout += delta.byType.timeout;
+        dByType.transport += delta.byType.transport;
+        dByType.reject += delta.byType.reject;
+        dByType.other += delta.byType.other;
+        this.prevConnectCumulative.set(t.workerId, cur);
+      }
+      this.windowBuckets = rollWindow(this.windowBuckets, now, dA, dF, dByType);
+      this.lastWindow = sumWindow(this.windowBuckets);
+      agg.tick.rates.connectFailRate = connectFailRateFromWindow(this.lastWindow.attempts, this.lastWindow.fails);
+    }
+
     this.pushTick(agg.tick);
 
     // Periodic summary 15s — dễ theo dõi quy trình run trên terminal/log.
@@ -497,23 +543,8 @@ export class LoadTestCoordinator {
       );
     }
 
-    // Phase advance
-    if (this.phase === 'ramping' && agg.tick.counters.usersConnected >= this.config.targetUsers) {
-      this.setPhase(transition(this.phase, 'steady'));
-      ltLog.info(`run ${this.runId}: STEADY — ${agg.tick.counters.usersConnected} connected`);
-    }
-    if (this.phase === 'steady' && elapsedSec >= this.config.durationSec) {
-      this.setPhase(transition(this.phase, 'cooldown'));
-      this.stopReason = 'duration hết';
-      this.farm.broadcast({ type: 'stop', reason: 'duration ended', force: false });
-      ltLog.info(`run ${this.runId}: COOLDOWN (duration ${this.config.durationSec}s)`);
-      // timeout an toàn nếu worker không done
-      setTimeout(() => {
-        if (this.phase === 'cooldown') void this.finishRun('natural', this.stopReason || 'cooldown timeout', false);
-      }, COOLDOWN_WAIT_MS);
-    }
-
-    // Auto-stop E2: connect fail > 30%
+    // ── T5 (BE-4): auto-stop E2/E3 TRƯỚC phase-advance — duration hết đúng tick mà window vượt
+    // ngưỡng → E2 thắng natural-end (status 'error', không lọt 'finished' — AC-7). ──
     if (this.phase === 'ramping' || this.phase === 'steady') {
       // C-2: heartbeat detect (wiring — trước đây checkHeartbeats là dead code).
       // Worker im lặng > WORKER_HEARTBEAT_STALE_MS = treo (event loop đứng / IPC chết):
@@ -531,22 +562,27 @@ export class LoadTestCoordinator {
         }
       }
 
-      let attempts = 0, fails = 0;
-      for (const t of ticks) {
-        attempts += t.counters.connectAttempts;
-        fails += t.counters.connectFails;
-      }
-      const connectFailRate = attempts >= 10 ? (fails / attempts) * 100 : 0;
+      // E2: connect fail > 30% trong window 60s — rate từ Bước A, attempts = window (DESIGN §4)
       const decision = decideAutoStop({
         phase: this.phase,
         registerFailRate: 0,
-        connectFailRate,
+        connectFailRate: agg.tick.rates.connectFailRate,
         registeredTotal: 0,
-        connectTotal: attempts,
+        connectTotal: this.lastWindow.attempts,
       });
       if (decision.stop) {
-        ltLog.error(`E2: ${decision.reason}`);
-        return this.finishRun('auto', decision.reason ?? 'connect fail', false);
+        const stopReason = `E2: ${decision.reason}`; // AC-2: stopReason bắt đầu "E2:" (hiện tại bắt đầu "auto-stop:")
+        const usersFailed = ticks.reduce((a, t) => a + t.counters.usersFailed, 0);
+        ltLog.error(`E2: ${decision.reason} | ${formatE2Log({
+          phase: this.phase,
+          elapsedSec,
+          windowSecs: windowSpanSecs(this.windowBuckets, now), // BE-3: span thật, không hardcode 60
+          window: this.lastWindow, // byType TỪ WINDOW — sum 4 loại == windowFails (SEC-1)
+          usersFailedCum: usersFailed, // cumulative (F-7)
+          workersAlive: this.farm.alive,
+          workersTotal: this.farm.total,
+        })}`);
+        return this.finishRun('auto', stopReason, false);
       }
       // E3: > 50% worker chết trong 60s
       if (this.farm.total > 0 && this.workerDeathTimes.length > this.farm.total * 0.5) {
@@ -559,6 +595,22 @@ export class LoadTestCoordinator {
         ltLog.error(`E3: toàn bộ ${this.workerDeathTimes.length} worker chết — auto-stop`);
         return this.finishRun('auto', 'E3: toàn bộ worker chết', true);
       }
+    }
+
+    // Phase advance (natural end) — SAU auto-stop (BE-4)
+    if (this.phase === 'ramping' && agg.tick.counters.usersConnected >= this.config.targetUsers) {
+      this.setPhase(transition(this.phase, 'steady'));
+      ltLog.info(`run ${this.runId}: STEADY — ${agg.tick.counters.usersConnected} connected`);
+    }
+    if (this.phase === 'steady' && elapsedSec >= this.config.durationSec) {
+      this.setPhase(transition(this.phase, 'cooldown'));
+      this.stopReason = 'duration hết';
+      this.farm.broadcast({ type: 'stop', reason: 'duration ended', force: false });
+      ltLog.info(`run ${this.runId}: COOLDOWN (duration ${this.config.durationSec}s)`);
+      // timeout an toàn nếu worker không done
+      setTimeout(() => {
+        if (this.phase === 'cooldown') void this.finishRun('natural', this.stopReason || 'cooldown timeout', false);
+      }, COOLDOWN_WAIT_MS);
     }
   }
 
