@@ -1,0 +1,24 @@
+# Postgres cho loadtest tool (chat-app). Port 5439 khớp LOADTEST_DATABASE_URL.
+# Chạy:   LOADTEST_DB_PASSWORD=<pass> docker compose -f docker/compose.db.yml up -d
+# Migrate: npm run loadtest:db:up
+services:
+  db:
+    image: postgres:16
+    container_name: loadtest-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: ${LOADTEST_DB_PASSWORD:?thiếu LOADTEST_DB_PASSWORD (lấy từ NEW-ROTATED-SECRETS.txt)}
+      POSTGRES_DB: loadtest
+    ports:
+      - "5439:5432"
+    volumes:
+      - loadtest-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d loadtest"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  loadtest-pgdata:
