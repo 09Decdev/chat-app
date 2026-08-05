@@ -201,30 +201,35 @@ async function main(): Promise<void> {
     );
 
     // Multi-row INSERT — ON CONFLICT (pool_id, email) DO UPDATE (idempotent re-seed).
+    // BATCH theo chunk (Postgres giới hạn 65.535 params/query — 10.5k accounts × 10 cols = 105k > limit).
     const cols = ['pool_id', 'email', 'password', 'user_id', 'display_name', 'device_info_json', 'date_of_birth', 'country', 'registered_at', 'status'];
-    const values: unknown[] = [];
-    const placeholders: string[] = [];
-    accounts.forEach((a, i) => {
-      const base = i * cols.length;
-      placeholders.push(`(${cols.map((_, j) => `$${base + j + 1}`).join(', ')})`);
-      values.push(
-        poolId, a.email, a.password, a.userId ?? '', a.displayName ?? '',
-        JSON.stringify(genSeedDeviceInfo()),
-        a.dateOfBirth ?? genDateOfBirth(), a.country ?? 'VN', now, 'registered',
+    const CHUNK = 500;
+    for (let start = 0; start < accounts.length; start += CHUNK) {
+      const chunk = accounts.slice(start, start + CHUNK);
+      const values: unknown[] = [];
+      const placeholders: string[] = [];
+      chunk.forEach((a, i) => {
+        const base = i * cols.length;
+        placeholders.push(`(${cols.map((_, j) => `$${base + j + 1}`).join(', ')})`);
+        values.push(
+          poolId, a.email, a.password, a.userId ?? '', a.displayName ?? '',
+          JSON.stringify(genSeedDeviceInfo()),
+          a.dateOfBirth ?? genDateOfBirth(), a.country ?? 'VN', now, 'registered',
+        );
+      });
+      await client.query(
+        `INSERT INTO pool_accounts (${cols.join(', ')}) VALUES ${placeholders.join(', ')}
+         ON CONFLICT (pool_id, email) DO UPDATE SET
+           password = EXCLUDED.password,
+           display_name = EXCLUDED.display_name,
+           user_id = EXCLUDED.user_id,
+           device_info_json = EXCLUDED.device_info_json,
+           date_of_birth = EXCLUDED.date_of_birth,
+           country = EXCLUDED.country,
+           status = 'registered'`,
+        values,
       );
-    });
-    await client.query(
-      `INSERT INTO pool_accounts (${cols.join(', ')}) VALUES ${placeholders.join(', ')}
-       ON CONFLICT (pool_id, email) DO UPDATE SET
-         password = EXCLUDED.password,
-         display_name = EXCLUDED.display_name,
-         user_id = EXCLUDED.user_id,
-         device_info_json = EXCLUDED.device_info_json,
-         date_of_birth = EXCLUDED.date_of_birth,
-         country = EXCLUDED.country,
-         status = 'registered'`,
-      values,
-    );
+    }
   } catch (err) {
     // B-1: chỉ in message (không có sql/params — parameterized query) — KHÔNG in password.
     console.error(`[lt][seed] Insert fail: ${err instanceof Error ? err.message : String(err)}`);
