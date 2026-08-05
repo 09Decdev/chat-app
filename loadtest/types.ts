@@ -8,6 +8,12 @@ export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing
 
 export const ACTION_TYPES: ActionType[] = ['chat', 'read', 'comment', 'like', 'view', 'typing', 'topic', 'vote_kick'];
 
+/** Trạng thái action hiện tại của 1 virtual user ('idle' = không làm gì, null = chưa hành động). */
+export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing' | 'topic' | 'idle';
+
+/** Phase lifecycle 1 virtual user (bảng users virtualized). */
+export type UserPhase = 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';
+
 /** Phase của run (CP-3 — state machine Coordinator). */
 export type RunPhase =
   | 'idle'
@@ -127,7 +133,17 @@ export interface ErrorSample {
 export interface VirtualUserRow {
   index: number; // thứ tự trong run (0..target-1)
   email: string;
-  phase: 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';
+  phase: UserPhase;
+  /** Action đang thực hiện ngay lúc này ('idle' = rảnh, null = chưa bắt đầu hành động nào). */
+  currentAction: UserActionState | null;
+  /** Epoch ms lúc action hiện tại bắt đầu (null = chưa có). */
+  lastActionAt: number | null;
+  /** Độ dài action vừa kết thúc (ms) — null = chưa kết thúc action nào. */
+  lastActionMs: number | null;
+  /** Số chat:send đã emit thành công. */
+  messagesSent: number;
+  /** Số chat:send nhận echo chat:message khớp clientMsgId. */
+  messagesEchoed: number;
   roomId: string | null;
   socketConnected: boolean;
   reconnectCount: number;
@@ -225,14 +241,21 @@ export type WorkerCommand =
   | { type: 'stop'; reason: string; force: boolean }
   | { type: 'pause' }
   | { type: 'resume' }
-  | { type: 'query-users'; requestId: number; offset: number; limit: number; filter?: string }
+  | { type: 'query-users'; requestId: number; offset: number; limit: number; filter?: string; phase?: string; sortBy?: string; sortDir?: string }
   | { type: 'ping' };
 
 /** Message IPC worker → coordinator. */
 export type WorkerMessage =
   | { type: 'ready'; workerId: number; pid: number }
   | { type: 'tick'; tick: WorkerTick }
-  | { type: 'users-response'; requestId: number; rows: VirtualUserRow[]; total: number }
+  | {
+      type: 'users-response';
+      requestId: number;
+      rows: VirtualUserRow[];
+      total: number;
+      /** Đếm user theo phase (toàn bộ user của worker, KHÔNG theo filter) — donut dashboard. */
+      phaseCounts?: Partial<Record<UserPhase, number>>;
+    }
   | { type: 'log'; level: 'info' | 'warn' | 'error'; msg: string }
   | { type: 'done'; reason: string; status: 'finished' | 'stopped' | 'error' }
   | { type: 'fatal'; error: string };

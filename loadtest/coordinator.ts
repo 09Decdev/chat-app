@@ -9,8 +9,9 @@
 import Redis from 'ioredis';
 import type { LoadTestEnv } from './config';
 import { buildRunConfig, mergedAllowlist } from './config';
-import type { LoadTestTick, RunConfig, RunPhase, StartRunRequest, TestAccount, WorkerMessage, WorkerTick } from './types';
+import type { LoadTestTick, RunConfig, RunPhase, StartRunRequest, TestAccount, UserPhase, VirtualUserRow, WorkerMessage, WorkerTick } from './types';
 import { ACTION_TYPES } from './types';
+import { mergePhaseCounts, normalizeSort, sortUsers } from './users-sort';
 import { WorkerFarm } from './worker-farm';
 import { createRedis, provisionAccounts } from './auth-factory';
 import { aggregateTicks, decideAutoStop, endPhaseFromStop, transition, type AggregatedTick } from './coordinator-state';
@@ -27,6 +28,9 @@ const COOLDOWN_WAIT_MS = 10_000; // chờ worker done tối đa
 const WORKER_RESTART_BACKOFF_MS = 2000;
 /** C-2: worker không tick trong N ms = chết im lặng (treo event loop) — 5 tick @1s, khớp farm.checkHeartbeats default. */
 const WORKER_HEARTBEAT_STALE_MS = 5000;
+/** FIX-7: TTL cache queryUsers — ngắn hơn poll dashboard 2.5s nên dữ liệu luôn tươi, nhưng
+ *  N dashboard client × poll không re-query + re-sort ~3MB rows/10k user từ mọi worker mỗi lần. */
+const USERS_CACHE_TTL_MS = 1000;
 
 export interface CoordinatorEvents {
   onPhaseChange?: (phase: RunPhase) => void;
@@ -76,6 +80,9 @@ export class LoadTestCoordinator {
   private actionsPerSecSeries: number[] = [];
   /** C-2: số restart đang chờ backoff — E3 "toàn bộ worker chết" phải trừ đi để không auto-stop nhầm khi restart đang bay. */
   private pendingRestarts = 0;
+  /** FIX-7: cache queryUsers — merged+sorted (CHƯA slice — dùng chung mọi offset/limit).
+   *  Cache check = 1 Map lookup (hot path); vô hiệu khi phase đổi (setPhase). */
+  private usersCache = new Map<string, { at: number; rows: VirtualUserRow[]; total: number; phaseCounts: Partial<Record<UserPhase, number>> }>();
 
   constructor(
     private env: LoadTestEnv,
@@ -119,6 +126,13 @@ export class LoadTestCoordinator {
    */
   get isRunning(): boolean {
     return ['provisioning', 'ramping', 'steady', 'cooldown', 'report'].includes(this.phase);
+  }
+
+  /** Chuyển phase + notify + vô hiệu users cache (FIX-7 — dữ liệu run mới không trả cache cũ). */
+  private setPhase(next: RunPhase) {
+    this.phase = next;
+    this.usersCache.clear();
+    this.events.onPhaseChange?.(next);
   }
 
   /** Số worker còn sống — health endpoint (T-07). */
@@ -176,8 +190,7 @@ export class LoadTestCoordinator {
     if (this.phase !== 'idle') this.phase = 'idle'; // cho phép start lại sau finished/stopped/error
     this.config = config;
     this.runId = config.runId;
-    this.phase = transition(this.phase, 'provisioning');
-    this.events.onPhaseChange?.(this.phase);
+    this.setPhase(transition(this.phase, 'provisioning'));
     this.startAt = Date.now();
     this.resetRunState();
     this.stopReason = '';
@@ -265,8 +278,7 @@ export class LoadTestCoordinator {
 
       this.farm.setRunConfig(this.config);
       this.farm.spawnAll(this.config.workerCount, summary.accounts);
-      this.phase = transition(this.phase, 'ramping');
-      this.events.onPhaseChange?.(this.phase);
+      this.setPhase(transition(this.phase, 'ramping'));
       this.broadcastRun();
     } catch (err) {
       ltLog.error(`provisioning exception: ${err instanceof Error ? err.message : String(err)}`);
@@ -343,8 +355,7 @@ export class LoadTestCoordinator {
       // không có worker — dừng luôn
       return this.finishRun('manual', 'run bị dừng khi đang provisioning');
     }
-    this.phase = transition(this.phase, 'cooldown');
-    this.events.onPhaseChange?.(this.phase);
+    this.setPhase(transition(this.phase, 'cooldown'));
     this.farm.broadcast({ type: 'stop', reason: 'manual stop', force: false });
     // finishRun gọi khi đủ worker done (onWorkerMessage) hoặc timeout an toàn
     setTimeout(() => {
@@ -370,7 +381,7 @@ export class LoadTestCoordinator {
         if (msg.tick.histograms) this.workerHistograms.set(workerId, msg.tick.histograms);
         break;
       case 'users-response':
-        this.farm.resolveUsers(msg.requestId, msg.rows, msg.total);
+        this.farm.resolveUsers(msg.requestId, msg.rows, msg.total, msg.phaseCounts as Record<string, number> | undefined);
         break;
       case 'done':
         this.workerDoneCount++;
@@ -470,13 +481,11 @@ export class LoadTestCoordinator {
 
     // Phase advance
     if (this.phase === 'ramping' && agg.tick.counters.usersConnected >= this.config.targetUsers) {
-      this.phase = transition(this.phase, 'steady');
-      this.events.onPhaseChange?.(this.phase);
+      this.setPhase(transition(this.phase, 'steady'));
       ltLog.info(`run ${this.runId}: STEADY — ${agg.tick.counters.usersConnected} connected`);
     }
     if (this.phase === 'steady' && elapsedSec >= this.config.durationSec) {
-      this.phase = transition(this.phase, 'cooldown');
-      this.events.onPhaseChange?.(this.phase);
+      this.setPhase(transition(this.phase, 'cooldown'));
       this.stopReason = 'duration hết';
       this.farm.broadcast({ type: 'stop', reason: 'duration ended', force: false });
       ltLog.info(`run ${this.runId}: COOLDOWN (duration ${this.config.durationSec}s)`);
@@ -605,8 +614,7 @@ export class LoadTestCoordinator {
       // T-07 FIX-2: KHÔNG disconnect Redis ở finishRun — giữ connection cho health trung thực
       // (redis 'up' chỉ khi connected) + run sau reuse. ioredis tự reconnect nếu server drop.
       const { phase, stopReason } = endPhaseFromStop(kind, reason);
-      this.phase = 'report';
-      this.events.onPhaseChange?.(this.phase);
+      this.setPhase('report');
       try {
         this.latestReport = buildReport({
           runId: this.runId,
@@ -626,14 +634,12 @@ export class LoadTestCoordinator {
           stopReason,
           noPostFixtureSkipped: this.noPostFixtureCount,
         });
-        this.phase = phase;
-        this.events.onPhaseChange?.(this.phase);
+        this.setPhase(phase);
         saveReportFiles(this.latestReport, this.tickHistory, this.env.reportsDir);
         ltLog.info(`=== run ${this.runId} ${this.phase} — ${reason} ===`, { runId: this.runId });
       } catch (err) {
         ltLog.error(`buildReport fail: ${String(err)}`);
-        this.phase = 'error';
-        this.events.onPhaseChange?.(this.phase);
+        this.setPhase('error');
       }
       // DB finalize (best-effort): status + stop_reason + summary_json + flush ticks còn lại — PRD A1
       // B-2 (T-06): AWAIT writeRunFinish — finalize UPDATE phải xong TRƯỚC khi dbWriter.shutdown()
@@ -656,20 +662,44 @@ export class LoadTestCoordinator {
     }
   }
 
-  /** Truy vấn user từ các worker (virtualized). */
-  async queryUsers(offset: number, limit: number, filter?: string): Promise<{ rows: unknown[]; total: number }> {
-    const per = Math.ceil(limit / Math.max(1, this.farm.total));
-    const rows: unknown[] = [];
-    let total = 0;
-    const idList = [...Array(this.farm.total).keys()];
-    for (const id of idList) {
-      const localOffset = Math.max(0, offset - total);
-      const res = await this.farm.queryUsers(id, localOffset, per, filter);
-      rows.push(...res.rows);
-      total += res.total;
-      if (rows.length >= limit) break;
+  /**
+   * Truy vấn user từ các worker (virtualized).
+   * Global merge: kéo TOÀN BỘ rows đã filter từ MỌI worker → merge → sort theo
+   * whitelist (users-sort.ts) → slice page. (Pattern cũ per-worker offset/limit
+   * cho kết quả sai khi offset > 0 — sort toàn cục bắt buộc merge đủ rows.)
+   * phaseCounts: tổng hợp từ worker (toàn bộ user, không theo filter).
+   */
+  async queryUsers(
+    offset: number,
+    limit: number,
+    filter?: string,
+    phase?: string,
+    sortBy?: string,
+    sortDir?: string,
+  ): Promise<{ rows: VirtualUserRow[]; total: number; phaseCounts: Partial<Record<UserPhase, number>> }> {
+    const { sortBy: field, sortDir: dir } = normalizeSort(sortBy, sortDir);
+    // FIX-7: TTL cache keyed (filter, phase, sortBy, sortDir) — 1 Map lookup trên hot path.
+    // Chỉ cache merged+sorted (chưa slice) → mọi offset/limit dùng chung 1 entry.
+    const key = [filter ?? '', phase ?? '', field, dir].join('|');
+    const hit = this.usersCache.get(key);
+    if (hit && Date.now() - hit.at < USERS_CACHE_TTL_MS) {
+      return { rows: hit.rows.slice(offset, offset + limit), total: hit.total, phaseCounts: hit.phaseCounts };
     }
-    return { rows: rows.slice(0, limit), total };
+    const results = await Promise.all(
+      [...Array(this.farm.total).keys()].map((id) =>
+        this.farm.queryUsers(id, 0, Number.MAX_SAFE_INTEGER, filter, phase, sortBy, sortDir),
+      ),
+    );
+    let total = 0;
+    const allRows: VirtualUserRow[] = [];
+    for (const r of results) {
+      allRows.push(...(r.rows as VirtualUserRow[]));
+      total += r.total;
+    }
+    const phaseCounts = mergePhaseCounts(results.map((r) => r.phaseCounts as Partial<Record<UserPhase, number>> | undefined));
+    const sorted = sortUsers(allRows, field, dir);
+    this.usersCache.set(key, { at: Date.now(), rows: sorted, total, phaseCounts });
+    return { rows: sorted.slice(offset, offset + limit), total, phaseCounts };
   }
 
   getRunSnapshot() {

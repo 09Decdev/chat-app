@@ -11,6 +11,7 @@ import {
   Settings2,
   SlidersHorizontal,
   TerminalSquare,
+  Users,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -131,6 +132,7 @@ function RunStickyHeader() {
 const NAV_ITEMS = [
   { to: routes.loadtest, label: 'Cấu hình', icon: Settings2 },
   { to: routes.loadtestLive, label: 'Live', icon: Activity },
+  { to: routes.loadtestUsers, label: 'Users', icon: Users },
   { to: routes.loadtestHistory, label: 'Lịch sử', icon: History },
   { to: routes.loadtestReport, label: 'Báo cáo', icon: FileBarChart },
   { to: routes.loadtestSettings, label: 'Cài đặt', icon: SlidersHorizontal },
@@ -144,7 +146,7 @@ function MobileBottomNav() {
       className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/80 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden"
       aria-label="Điều hướng chính"
     >
-      <div className="grid grid-cols-5">
+      <div className="grid grid-cols-6">
         {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
           const disabled = to === routes.loadtestReport && !reportEnabled;
           const item = (

@@ -39,8 +39,15 @@ process.on('message', (msg: WorkerCommand) => {
       runtime.resume();
       break;
     case 'query-users': {
-      const { rows, total } = runtime.queryUsers(msg.offset, msg.limit, msg.filter);
-      if (process.send) process.send({ type: 'users-response', requestId: msg.requestId, rows, total });
+      const { rows, total, phaseCounts } = runtime.queryUsers(
+        msg.offset,
+        msg.limit,
+        msg.filter,
+        msg.phase,
+        msg.sortBy,
+        msg.sortDir,
+      );
+      if (process.send) process.send({ type: 'users-response', requestId: msg.requestId, rows, total, phaseCounts });
       break;
     }
     case 'ping':

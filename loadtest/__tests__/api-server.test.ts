@@ -188,6 +188,32 @@ describeDb('api-server — admin auth + gate + history', () => {
     expect(r.body.success).toBe(true);
   });
 
+  // ─── GET /users — sortBy/sortDir whitelist (không worker → rows trống) ──
+
+  it('GET /users mặc định: index asc + envelope đủ field (sortBy/sortDir/phaseCounts)', async () => {
+    const r = await request('GET', '/api/loadtest/users', { token });
+    expect(r.status).toBe(200);
+    expect(r.body.success).toBe(true);
+    expect(r.body.data).toMatchObject({ rows: [], total: 0, offset: 0, limit: 100, sortBy: 'index', sortDir: 'asc' });
+    expect(r.body.data.phaseCounts).toBeDefined();
+  });
+
+  it('GET /users sortBy=email&sortDir=desc → param xuyên qua + echo lại', async () => {
+    const r = await request('GET', '/api/loadtest/users?sortBy=email&sortDir=desc&filter=x&offset=5&limit=20', { token });
+    expect(r.status).toBe(200);
+    expect(r.body.data.sortBy).toBe('email');
+    expect(r.body.data.sortDir).toBe('desc');
+    expect(r.body.data.offset).toBe(5);
+    expect(r.body.data.limit).toBe(20);
+  });
+
+  it('GET /users sortBy lạ → mặc định index asc (whitelist chặn chuỗi tuỳ ý)', async () => {
+    const r = await request('GET', '/api/loadtest/users?sortBy=email;%20DROP&sortDir=asc', { token });
+    expect(r.status).toBe(200);
+    expect(r.body.data.sortBy).toBe('index');
+    expect(r.body.data.sortDir).toBe('asc');
+  });
+
   // ─── History / Replay (PRD D1) ──────────────────────────────────────────
 
   it('GET /runs DB trống → mảng rỗng', async () => {

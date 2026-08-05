@@ -5,12 +5,16 @@
 
 import * as http from 'node:http';
 import type { RouteCtx } from '../http-server';
-import type { StartRunRequest } from '../types';
+import type { StartRunRequest, UserPhase } from '../types';
+import { normalizeSort } from '../users-sort';
 import { PRESETS, validateRunRequest, estimateInfra, mergedAllowlist } from '../config';
 import { logHistory } from '../util';
 import { ticksToCsv, reportToMarkdown } from '../report';
 import { createHealthProbe, healthDepsFrom, type HealthReport } from '../health';
 import type { LoadTestCoordinator } from '../coordinator';
+
+/** Whitelist phase cho query param /users?phase= (8 phase user — chuỗi lạ bị bỏ qua). */
+const USER_PHASES: UserPhase[] = ['provisioned', 'connecting', 'connected', 'queued', 'in_room', 'idle', 'cooldown', 'failed'];
 
 // T-07 FIX-1: probe cache 10s — 1 probe/server (keyed theo coordinator, không singleton module).
 // KHÔNG gọi buildHealth (đấm DB/Redis mỗi poll). DB/Redis probe có timeout
@@ -101,8 +105,15 @@ export const runHandlers = {
     const offset = Math.max(0, Number(ctx.url.searchParams.get('offset') ?? 0));
     const limit = Math.min(Math.max(1, Number(ctx.url.searchParams.get('limit') ?? 100)), 500);
     const filter = ctx.url.searchParams.get('filter') ?? undefined;
-    const result = await ctx.coordinator.queryUsers(offset, limit, filter);
-    return ctx.ok(res, { rows: result.rows, total: result.total, offset, limit });
+    // phase: whitelist 8 phase user — chuỗi lạ bỏ qua (filter không bắt buộc)
+    const phaseRaw = ctx.url.searchParams.get('phase') ?? undefined;
+    const phase = phaseRaw && USER_PHASES.includes(phaseRaw as UserPhase) ? (phaseRaw as UserPhase) : undefined;
+    // sortBy/sortDir: whitelist cứng (users-sort.ts) — chuỗi lạ → mặc định index asc
+    const sortBy = ctx.url.searchParams.get('sortBy') ?? undefined;
+    const sortDir = ctx.url.searchParams.get('sortDir') ?? undefined;
+    const result = await ctx.coordinator.queryUsers(offset, limit, filter, phase, sortBy, sortDir);
+    const { sortBy: field, sortDir: dir } = normalizeSort(sortBy, sortDir);
+    return ctx.ok(res, { rows: result.rows, total: result.total, offset, limit, sortBy: field, sortDir: dir, phaseCounts: result.phaseCounts });
   },
 
   errors: async (ctx: RouteCtx, _req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {

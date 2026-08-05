@@ -34,6 +34,7 @@ export const routes = {
   // LoadTest tool (docs/UI-SPEC-loadtest-tool.md §2)
   loadtest: '/loadtest',
   loadtestLive: '/loadtest/live',
+  loadtestUsers: '/loadtest/users',
   loadtestScenario: '/loadtest/scenario',
   loadtestReport: '/loadtest/report',
   loadtestSettings: '/loadtest/settings',

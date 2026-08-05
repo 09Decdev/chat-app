@@ -54,6 +54,16 @@ export function fmtDateTime(ts: number): string {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 }
 
+/** epoch ms → "5 giây trước" / "3 phút trước" / "1 giờ trước" (null → '—'). Không import thư viện mới. */
+export function fmtRelative(ts: number | null | undefined, now = Date.now()): string {
+  if (ts === null || ts === undefined || !Number.isFinite(ts)) return '—';
+  const diffSec = Math.max(0, Math.round((now - ts) / 1000));
+  if (diffSec < 1) return 'vừa xong';
+  if (diffSec < 60) return `${diffSec} giây trước`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} phút trước`;
+  return `${Math.floor(diffSec / 3600)} giờ trước`;
+}
+
 /** Duration phút → "30 phút" / "30–60 phút". */
 export function fmtRange(startAt: number, endAt: number): string {
   const start = new Date(startAt);

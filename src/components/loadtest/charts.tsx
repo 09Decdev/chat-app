@@ -2,12 +2,17 @@
  * Charts Live Dashboard — UI-SPEC §4.2–4.4.
  * HARD RULES: isAnimationActive={false} MỌI series; React.memo; transform trong
  * useMemo; P50/P95/P99 phân biệt bằng dash-pattern + nhãn chữ, KHÔNG chỉ màu.
+ * Màu NHẤT QUÁN qua chart-theme.ts (dùng chung UsersPage).
  */
 import { memo, useMemo, useState } from 'react';
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
+  Legend,
   Line,
   LineChart,
   ResponsiveContainer,
@@ -21,22 +26,18 @@ import { cn } from '@/lib/utils';
 import { fmtCompact, fmtMs, fmtTickTime } from '@/lib/loadtest-format';
 import type { ActionType, LoadTestTick } from '@/types/loadtest';
 import { ACTION_LABELS } from '@/types/loadtest';
+import { ACTION_COLORS, PERCENTILE_COLORS } from './chart-theme';
 
 // ─── Chart chrome (UI-SPEC 1.1) ────────────────────────────────────────────
 const AXIS_TICK = { fontSize: 12, fill: 'hsl(var(--muted-foreground))' } as const;
 const GRID_STROKE = 'hsl(var(--border))';
 const CURSOR_STROKE = 'hsl(var(--border))';
+const LEGEND_STYLE = { fontSize: 12 } as const;
 
-export const ACTION_SERIES: { key: ActionType; color: string }[] = [
-  { key: 'chat', color: 'hsl(var(--chart-1))' },
-  { key: 'read', color: 'hsl(var(--chart-2))' },
-  { key: 'comment', color: 'hsl(var(--chart-3))' },
-  { key: 'like', color: 'hsl(var(--chart-4))' },
-  { key: 'view', color: 'hsl(var(--chart-5))' },
-  { key: 'topic', color: 'hsl(var(--chart-6))' },
-  { key: 'typing', color: 'hsl(var(--chart-7))' },
-  { key: 'vote_kick', color: 'hsl(var(--chart-8))' },
-];
+/** Series theo action — màu từ ACTION_COLORS (chart-theme.ts), giữ mapping cũ. */
+export const ACTION_SERIES: { key: ActionType; color: string }[] = (
+  Object.entries(ACTION_COLORS) as [ActionType, string][]
+).map(([key, color]) => ({ key, color }));
 
 /** Downsample đều (không lọc min/max — tránh sai dạng) — max 1800 điểm (4.8 #4). */
 export function downsample<T>(data: T[], maxPoints: number): T[] {
@@ -63,7 +64,7 @@ export function sliceRange(ticks: LoadTestTick[], range: RangeKey): LoadTestTick
   return ticks.filter((t) => t.ts >= cutoff);
 }
 
-// ─── Tooltip 1 điểm (UI-SPEC 4.8 #5) ───────────────────────────────────────
+// ─── Tooltip 1 điểm (UI-SPEC 4.8 #5) — thời gian đã format (labelFormatter) ──
 interface TooltipRow {
   dataKey: string;
   name: string;
@@ -79,9 +80,11 @@ interface ChartTooltipProps {
   label?: number | string;
   format?: (v: number) => string;
   showTotal?: boolean;
+  /** Hậu tố đơn vị sau giá trị (vd 'ms') — rõ ràng theo từng chart. */
+  unit?: string;
 }
 
-function ChartTooltip({ active, payload, label, format, showTotal }: ChartTooltipProps) {
+function ChartTooltip({ active, payload, label, format, showTotal, unit }: ChartTooltipProps) {
   if (!active || !payload?.length) return null;
   const rows: TooltipRow[] = payload.map((p) => ({
     dataKey: String(p.dataKey ?? ''),
@@ -104,7 +107,10 @@ function ChartTooltip({ active, payload, label, format, showTotal }: ChartToolti
             aria-hidden
           />
           <span className="flex-1">{r.name}</span>
-          <span className="font-medium">{fmt(r.value)}</span>
+          <span className="font-medium">
+            {fmt(r.value)}
+            {unit ? <span className="ml-0.5 text-muted-foreground">{unit}</span> : null}
+          </span>
         </p>
       ))}
       {total !== null && (
@@ -115,6 +121,11 @@ function ChartTooltip({ active, payload, label, format, showTotal }: ChartToolti
       )}
     </div>
   );
+}
+
+/** Format thời gian cho tooltip mọi chart theo giây (ts epoch ms → HH:mm:ss). */
+function tickLabelFormatter(v: number | string): string {
+  return typeof v === 'number' ? fmtTickTime(v) : String(v);
 }
 
 // ─── 4.2 Connections ───────────────────────────────────────────────────────
@@ -147,7 +158,12 @@ const ConnectionsLineChart = memo(function ConnectionsLineChart({ ticks, range }
           stroke={GRID_STROKE}
         />
         <YAxis width={44} tickFormatter={(v: number) => fmtCompact(v)} tick={AXIS_TICK} allowDecimals={false} stroke={GRID_STROKE} />
-        <Tooltip content={<ChartTooltip />} cursor={{ stroke: CURSOR_STROKE }} />
+        <Legend
+          iconType="line"
+          wrapperStyle={LEGEND_STYLE}
+          formatter={(value: string) => (value === 'Connect' ? 'Connect (socket)' : 'Active (đang làm việc)')}
+        />
+        <Tooltip content={<ChartTooltip />} cursor={{ stroke: CURSOR_STROKE }} labelFormatter={tickLabelFormatter} />
         <Line
           type="monotone"
           dataKey="connections"
@@ -263,7 +279,7 @@ const ActionsStackedAreaChart = memo(function ActionsStackedAreaChart({ ticks }:
               stroke={GRID_STROKE}
             />
             <YAxis width={44} tickFormatter={(v: number) => fmtCompact(v)} tick={AXIS_TICK} allowDecimals={false} stroke={GRID_STROKE} />
-            <Tooltip content={<ChartTooltip showTotal />} cursor={{ stroke: CURSOR_STROKE }} />
+            <Tooltip content={<ChartTooltip showTotal />} cursor={{ stroke: CURSOR_STROKE }} labelFormatter={tickLabelFormatter} />
             {visible.map((s) => (
               <Area
                 key={s.key}
@@ -292,9 +308,9 @@ interface LatencyChartProps {
 }
 
 const LATENCY_SERIES = [
-  { key: 'p50', name: 'P50', color: 'hsl(var(--chart-2))', dash: undefined },
-  { key: 'p95', name: 'P95', color: 'hsl(var(--chart-1))', dash: '6 4' },
-  { key: 'p99', name: 'P99', color: 'hsl(var(--chart-6))', dash: '2 3' },
+  { key: 'p50', name: 'P50', color: PERCENTILE_COLORS.p50, dash: undefined },
+  { key: 'p95', name: 'P95', color: PERCENTILE_COLORS.p95, dash: '6 4' },
+  { key: 'p99', name: 'P99', color: PERCENTILE_COLORS.p99, dash: '2 3' },
 ] as const;
 
 const LatencyLineChart = memo(function LatencyLineChart({ ticks, logScale }: LatencyChartProps) {
@@ -308,46 +324,58 @@ const LatencyLineChart = memo(function LatencyLineChart({ ticks, logScale }: Lat
   );
   const maxLat = data.length > 0 ? Math.max(...data.map((d) => d.p99), 1) : 1;
   return (
-    <ResponsiveContainer width="100%" height="100%">
-      <LineChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-        <CartesianGrid stroke={GRID_STROKE} strokeWidth={1} vertical={false} />
-        <XAxis
-          dataKey="ts"
-          type="number"
-          scale="time"
-          domain={['dataMin', 'dataMax']}
-          tickFormatter={(v: number) => fmtTickTime(v)}
-          tick={AXIS_TICK}
-          minTickGap={48}
-          tickMargin={6}
-          stroke={GRID_STROKE}
-        />
-        <YAxis
-          width={44}
-          scale={logScale ? 'log' : 'linear'}
-          domain={logScale ? [1, maxLat * 1.1] : [0, maxLat * 1.1]}
-          tickFormatter={(v: number) => fmtMs(v)}
-          tick={AXIS_TICK}
-          stroke={GRID_STROKE}
-          allowDataOverflow
-        />
-        <Tooltip content={<ChartTooltip format={fmtMs} />} cursor={{ stroke: CURSOR_STROKE }} />
-        {LATENCY_SERIES.map((s) => (
-          <Line
-            key={s.key}
-            type="monotone"
-            dataKey={s.key}
-            name={s.name}
-            stroke={s.color}
-            strokeWidth={1.5}
-            strokeDasharray={s.dash}
-            dot={false}
-            activeDot={{ r: 3 }}
-            isAnimationActive={false}
-          />
-        ))}
-      </LineChart>
-    </ResponsiveContainer>
+    <div className="flex h-full flex-col">
+      <div className="mb-1 text-[11px] text-muted-foreground" aria-hidden>
+        P50 — trung vị · P95 — 95% nhanh hơn · P99 — 99% nhanh hơn (đơn vị ms)
+      </div>
+      <div className="min-h-0 flex-1">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+            <CartesianGrid stroke={GRID_STROKE} strokeWidth={1} vertical={false} />
+            <XAxis
+              dataKey="ts"
+              type="number"
+              scale="time"
+              domain={['dataMin', 'dataMax']}
+              tickFormatter={(v: number) => fmtTickTime(v)}
+              tick={AXIS_TICK}
+              minTickGap={48}
+              tickMargin={6}
+              stroke={GRID_STROKE}
+            />
+            <YAxis
+              width={44}
+              scale={logScale ? 'log' : 'linear'}
+              domain={logScale ? [1, maxLat * 1.1] : [0, maxLat * 1.1]}
+              tickFormatter={(v: number) => fmtMs(v)}
+              tick={AXIS_TICK}
+              stroke={GRID_STROKE}
+              allowDataOverflow
+            />
+            <Legend
+              iconType="line"
+              wrapperStyle={LEGEND_STYLE}
+              formatter={(value: string) => `${value} (ms)`}
+            />
+            <Tooltip content={<ChartTooltip format={fmtMs} />} cursor={{ stroke: CURSOR_STROKE }} labelFormatter={tickLabelFormatter} />
+            {LATENCY_SERIES.map((s) => (
+              <Line
+                key={s.key}
+                type="monotone"
+                dataKey={s.key}
+                name={s.name}
+                stroke={s.color}
+                strokeWidth={1.5}
+                strokeDasharray={s.dash}
+                dot={false}
+                activeDot={{ r: 3 }}
+                isAnimationActive={false}
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
   );
 });
 
@@ -367,4 +395,67 @@ const LogToggle = memo(function LogToggle({ value, onChange }: { value: boolean;
   );
 });
 
-export { ConnectionsLineChart, RangeSelect, ActionsStackedAreaChart, LatencyLineChart, LogToggle, ChartTooltip };
+// ─── Actions/s HIỆN TẠI theo loại (tick cuối — không có per-action ok/fail trong tick,
+//     nên hiển thị action rate thay cho success/fail split; series theo thời gian ở stacked area) ──
+
+interface ActionRateChartProps {
+  tick: LoadTestTick | null;
+}
+
+const ActionRateBarChart = memo(function ActionRateBarChart({ tick }: ActionRateChartProps) {
+  const data = useMemo(() => {
+    if (!tick) return [];
+    const aps = tick.actionsPerSec ?? {};
+    return ACTION_SERIES.filter((s) => (aps[s.key] ?? 0) > 0).map((s) => ({
+      key: s.key,
+      name: ACTION_LABELS[s.key],
+      value: aps[s.key] ?? 0,
+      color: s.color,
+    }));
+  }, [tick]);
+  const total = data.reduce((acc, d) => acc + d.value, 0);
+
+  if (data.length === 0) {
+    return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Chưa có action nào</div>;
+  }
+  return (
+    <div className="flex h-full flex-col">
+      <div className="mb-1 text-[11px] text-muted-foreground" aria-hidden>
+        Tổng {fmtCompact(total)} actions/s ở giây hiện tại
+      </div>
+      <div className="min-h-0 flex-1">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} layout="vertical" margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
+            <CartesianGrid stroke={GRID_STROKE} strokeWidth={1} horizontal={false} />
+            <XAxis type="number" tickFormatter={(v: number) => fmtCompact(v)} tick={AXIS_TICK} stroke={GRID_STROKE} allowDecimals={false} />
+            <YAxis
+              type="category"
+              dataKey="name"
+              width={72}
+              tick={AXIS_TICK}
+              stroke={GRID_STROKE}
+              tickLine={false}
+              axisLine={false}
+            />
+            <Tooltip content={<ChartTooltip unit="act/s" />} cursor={{ fill: 'hsl(var(--muted) / 0.2)' }} />
+            <Bar dataKey="value" name="Actions/s" radius={[0, 3, 3, 0]} isAnimationActive={false} maxBarSize={18}>
+              {data.map((d) => (
+                <Cell key={d.key} fill={d.color} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+});
+
+export {
+  ConnectionsLineChart,
+  RangeSelect,
+  ActionsStackedAreaChart,
+  LatencyLineChart,
+  LogToggle,
+  ChartTooltip,
+  ActionRateBarChart,
+};

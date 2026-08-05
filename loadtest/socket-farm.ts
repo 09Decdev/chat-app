@@ -14,15 +14,17 @@
  */
 
 import { io, type Socket } from 'socket.io-client';
-import type { RunConfig, TestAccount, VirtualUserRow, WorkerTick } from './types';
+import type { RunConfig, TestAccount, UserActionState, UserPhase, VirtualUserRow, WorkerTick } from './types';
 import { ACTION_TYPES } from './types';
+import { normalizeSort, sortUsers } from './users-sort';
 import type { LoadTestEnv } from './config';
 import { BucketedHistogram, HISTOGRAM_BUCKETS } from './metrics';
 import { RestDriver, type ActionResult } from './rest-actions';
 import { genChatContent, genTopicTitle, jitter, ltLog, normalizeUrl, sleep, uuidV4 } from './util';
 import * as os from 'node:os';
 
-export type UserPhase = 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';
+// Re-export cho backward compat (trước đây UserPhase khai báo tại đây).
+export type { UserPhase, UserActionState };
 
 const MATCH_WAIT_MS = 60_000; // timeout chờ matching:found (PRD AC3.2)
 const ECHO_TTL_MS = 60_000; // echo TTL (SF-5)
@@ -77,6 +79,12 @@ export class VirtualUser {
   lastRestAt = 0;
   lastError: string | null = null;
   outbox = new Map<string, PendingMsg>();
+  // ── Action state (bảng users — chỉ gán biến, KHÔNG log — hot path) ──
+  currentAction: UserActionState | null = null;
+  lastActionAt: number | null = null;
+  lastActionMs: number | null = null;
+  messagesSent = 0;
+  messagesEchoed = 0;
   private socket: Socket | null = null;
   private wsUrl: string;
 
@@ -85,6 +93,25 @@ export class VirtualUser {
     this.account = account;
     this.profile = profile;
     this.wsUrl = normalizeUrl(gatewayUrl).replace(/^http/, 'ws');
+  }
+
+  /** Đánh dấu bắt đầu action (gán biến rẻ — gọi từ action scheduler). */
+  markActionStart(action: UserActionState) {
+    this.currentAction = action;
+    this.lastActionAt = Date.now();
+  }
+
+  /** Kết thúc action (ms = độ dài vừa đo). currentAction chỉ về 'idle' nếu đúng action đang chạy. */
+  markActionEnd(action: UserActionState, ms: number) {
+    this.lastActionMs = ms;
+    if (this.currentAction === action) this.currentAction = 'idle';
+  }
+
+  /** Đưa currentAction về 'idle' bất kể action nào đang chạy — dùng khi phase chuyển sang
+   *  idle/cooldown ngoài markActionEnd (MATCH_TIMEOUT, enqueue fail): bảng users không
+   *  hiển thị "Đang chat" cho user thực tế đang rảnh. */
+  resetAction() {
+    this.currentAction = 'idle';
   }
 
   connect() {
@@ -155,6 +182,8 @@ export class VirtualUser {
         if (pending) {
           // AC3.3: SUCCESS = echo chat:message cùng clientMsgId — đo latency end-to-end
           this.outbox.delete(p.clientMsgId);
+          this.messagesEchoed++;
+          this.markActionEnd('chat', Date.now() - pending.sentAt);
           this.onEchoOk?.(Date.now() - pending.sentAt);
         }
       }
@@ -181,6 +210,7 @@ export class VirtualUser {
     this.outbox.clear();
     this.cooldownUntil = Date.now() + COOLDOWN_MS;
     this.phase = 'cooldown';
+    this.resetAction();
     this.lastError = `leaveRoom(${reason})`;
   }
 
@@ -189,6 +219,7 @@ export class VirtualUser {
     // Timeout chờ matching (AC3.2): 60s không thấy matching:found → backoff 30s rồi thử lại
     if (this.phase === 'queued' && now - this.queuedAt > MATCH_WAIT_MS) {
       this.phase = 'idle';
+      this.resetAction(); // FIX-2: không còn chờ matching → bảng users không thấy "Đang chat"
       this.lastError = 'MATCH_TIMEOUT: không nhận matching:found trong 60s';
       worker.recordAction('chat', MATCH_WAIT_MS, false, this, 'MATCH_TIMEOUT');
       this.cooldownUntil = now + 30_000; // tránh thundering herd retry 3s/user
@@ -236,14 +267,18 @@ export class VirtualUser {
     const clientMsgId = uuidV4();
     const content = genChatContent(this.index);
     this.outbox.set(clientMsgId, { clientMsgId, sentAt: Date.now() });
+    this.markActionStart('chat');
     this.socket.emit('chat:send', { roomId: this.roomId, content, clientMsgId });
+    this.messagesSent++;
     // AC3.3: chỉ tính "attempt" ngay lúc emit — success/fail quyết định bởi echo/không-echo
     worker.onChatSent(this);
   }
 
   sendTyping(worker: WorkerRuntime) {
     if (!this.socket?.connected || !this.roomId) return;
+    this.markActionStart('typing');
     this.socket.emit('chat:typing', { roomId: this.roomId });
+    this.markActionEnd('typing', 0);
     worker.recordAction('typing', 0, true, this, 'chat:typing');
   }
 
@@ -261,7 +296,9 @@ export class VirtualUser {
   async runRest(worker: WorkerRuntime) {
     if (this.profile === 'chat') {
       // chat profile ngoài phòng/cooldown: chỉ đọc nhẹ
+      this.markActionStart('read');
       await worker.rest.readPostDetail(this.account.accessToken).then((r) => {
+        this.markActionEnd('read', r.detail.latencyMs);
         worker.recordResult('read', r.detail, this);
       });
       return;
@@ -270,28 +307,38 @@ export class VirtualUser {
     let res: ActionResult;
     switch (this.profile) {
       case 'read': {
+        this.markActionStart('read');
         const r = await driver.readPostDetail(this.account.accessToken);
+        this.markActionEnd('read', r.detail.latencyMs);
         worker.recordResult('read', r.detail, this);
         if (r.view) worker.recordResult('view', r.view, this);
         return;
       }
       case 'comment': {
         if (Math.random() < 0.6) {
+          this.markActionStart('comment');
           res = await driver.createComment(this.account.accessToken, this.index);
+          this.markActionEnd('comment', res.latencyMs);
           worker.recordResult('comment', res, this);
         } else {
+          this.markActionStart('comment');
           res = await driver.readComments(this.account.accessToken);
+          this.markActionEnd('comment', res.latencyMs);
           worker.recordResult('comment', res, this);
         }
         return;
       }
       case 'like': {
+        this.markActionStart('like');
         res = await driver.likePost(this.account.accessToken);
+        this.markActionEnd('like', res.latencyMs);
         worker.recordResult('like', res, this);
         return;
       }
       case 'view': {
+        this.markActionStart('view');
         res = await driver.viewPost(this.account.accessToken);
+        this.markActionEnd('view', res.latencyMs);
         worker.recordResult('view', res, this);
         return;
       }
@@ -319,11 +366,13 @@ export class VirtualUser {
       } else {
         this.phase = 'idle';
       }
+      this.resetAction(); // FIX-2: enqueue fail → không còn chờ matching — bảng users không thấy "Đang chat"
       this.lastError = `enqueue: ${res.code}`;
       worker.recordResult('chat', res, this);
     } else {
       this.phase = 'queued';
       this.queuedAt = now;
+      this.markActionStart('chat'); // đang chờ matching — bảng users thấy đang "chat"
       worker.recordResult('chat', res, this);
     }
   }
@@ -357,6 +406,11 @@ export class VirtualUser {
       index: this.index,
       email: this.account.email,
       phase: this.phase,
+      currentAction: this.currentAction,
+      lastActionAt: this.lastActionAt,
+      lastActionMs: this.lastActionMs,
+      messagesSent: this.messagesSent,
+      messagesEchoed: this.messagesEchoed,
       roomId: this.roomId,
       socketConnected: this.socketConnected,
       reconnectCount: this.reconnectCount,
@@ -508,7 +562,9 @@ export class WorkerRuntime {
 
   private async doTopic(u: VirtualUser) {
     if (!u.roomId || !this.config) return;
+    u.markActionStart('topic');
     const res = await this.rest.setTopic(u.account.accessToken, u.roomId, genTopicTitle(u.index));
+    u.markActionEnd('topic', res.latencyMs);
     this.recordResult('topic', res, u);
   }
 
@@ -678,18 +734,36 @@ export class WorkerRuntime {
     return 'steady';
   }
 
-  queryUsers(offset: number, limit: number, filter?: string): { rows: VirtualUserRow[]; total: number } {
-    let rows = this.users;
+  /**
+   * Truy vấn user (bảng virtualized). Filter: `filter` OR-match email/phase/roomId,
+   * `phase` AND-match chính xác phase (dropdown). Sort theo whitelist (users-sort.ts).
+   * phaseCounts: đếm phase của TOÀN BỘ user worker (không theo filter) — donut dashboard.
+   */
+  queryUsers(
+    offset: number,
+    limit: number,
+    filter?: string,
+    phase?: string,
+    sortBy?: string,
+    sortDir?: string,
+  ): { rows: VirtualUserRow[]; total: number; phaseCounts: Partial<Record<UserPhase, number>> } {
+    let users = this.users;
     if (filter) {
       const f = filter.toLowerCase();
-      rows = rows.filter(
+      users = users.filter(
         (u) => u.account.email.toLowerCase().includes(f) || u.phase.includes(f) || (u.roomId ?? '').includes(f),
       );
     }
-    return {
-      rows: rows.slice(offset, offset + limit).map((u) => u.toRow()),
-      total: rows.length,
-    };
+    if (phase) {
+      const p = phase as UserPhase;
+      users = users.filter((u) => u.phase === p);
+    }
+    // phaseCounts của toàn bộ user (không theo filter)
+    const phaseCounts: Partial<Record<UserPhase, number>> = {};
+    for (const u of this.users) phaseCounts[u.phase] = (phaseCounts[u.phase] ?? 0) + 1;
+    const { sortBy: field, sortDir: dir } = normalizeSort(sortBy, sortDir);
+    const rows = sortUsers(users.map((u) => u.toRow()), field, dir).slice(offset, offset + limit);
+    return { rows, total: users.length, phaseCounts };
   }
 }
 

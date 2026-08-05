@@ -70,6 +70,14 @@ export default tseslint.config(
       'react-refresh/only-export-components': ['error', { allowConstantExport: true, allowExportNames: ['downsample', 'sliceRange', 'ACTION_SERIES', 'RANGE_OPTIONS'] }],
     },
   },
+  // UsersPage.tsx export USERS_COLUMNS (FIX-1 — danh sách cột DUY NHẤT cho header + cell,
+  // test import để khẳng định thứ tự; array object không phải "constant" theo react-refresh).
+  {
+    files: ['src/pages/loadtest/UsersPage.tsx'],
+    rules: {
+      'react-refresh/only-export-components': ['error', { allowConstantExport: true, allowExportNames: ['USERS_COLUMNS'] }],
+    },
+  },
   // Countdown cooldown dùng dep-boolean `[stopCooldown > 0]` có chủ đích (interval
   // chạy liên tục khi đang cooldown) — refactor dep-array là việc chạm hành vi, ngoài T-10.
   {

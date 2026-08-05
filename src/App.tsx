@@ -15,6 +15,7 @@ import LoadtestLoginPage from '@/pages/loadtest/LoginPage';
 import LoadtestRegisterPage from '@/pages/loadtest/RegisterPage';
 import ControlPanelPage from '@/pages/loadtest/ControlPanelPage';
 import LiveDashboardPage from '@/pages/loadtest/LiveDashboardPage';
+import UsersPage from '@/pages/loadtest/UsersPage';
 import ScenarioBuilderPage from '@/pages/loadtest/ScenarioBuilderPage';
 import ReportPage from '@/pages/loadtest/ReportPage';
 import SettingsPage from '@/pages/loadtest/SettingsPage';
@@ -63,6 +64,7 @@ export default function App() {
               <Route path={routes.loadtest} element={<AppShell />}>
                 <Route index element={<ControlPanelPage />} />
                 <Route path="live" element={<LiveDashboardPage />} />
+                <Route path="users" element={<UsersPage />} />
                 <Route path="scenario" element={<ScenarioBuilderPage />} />
                 <Route path="report" element={<ReportPage />} />
                 <Route path="settings" element={<SettingsPage />} />

@@ -36,6 +36,44 @@ export const ACTION_LABELS: Record<ActionType, string> = {
   vote_kick: 'vote_kick',
 };
 
+/** Trạng thái action hiện tại của 1 virtual user — khớp loadtest/types.ts (2-chiều contract). */
+export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing' | 'topic' | 'idle';
+
+/** Phase lifecycle 1 virtual user — khớp loadtest/types.ts (2-chiều contract). */
+export type UserPhase = 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';
+
+/** Row bảng virtual users — GET /api/loadtest/users — khớp loadtest/types.ts (2-chiều contract). */
+export interface VirtualUserRow {
+  index: number;
+  email: string;
+  phase: UserPhase;
+  currentAction: UserActionState | null;
+  lastActionAt: number | null;
+  lastActionMs: number | null;
+  messagesSent: number;
+  messagesEchoed: number;
+  roomId: string | null;
+  socketConnected: boolean;
+  reconnectCount: number;
+  outboxPending: number;
+  lastError: string | null;
+}
+
+/** Field sort hợp lệ của /users — whitelist khớp loadtest/users-sort.ts. */
+export type UserSortField = 'index' | 'email' | 'phase' | 'currentAction' | 'lastActionAt' | 'reconnectCount' | 'outboxPending';
+export type UserSortDir = 'asc' | 'desc';
+
+/** Response GET /api/loadtest/users. */
+export interface UsersResponse {
+  rows: VirtualUserRow[];
+  total: number;
+  offset: number;
+  limit: number;
+  sortBy: UserSortField;
+  sortDir: UserSortDir;
+  phaseCounts: Partial<Record<UserPhase, number>>;
+}
+
 /** Body POST /api/loadtest/start. */
 export interface StartRunRequest {
   targetUsers: number;

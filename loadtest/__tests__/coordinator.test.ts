@@ -191,7 +191,76 @@ describe('coordinator — FIX-2: heartbeat + E3 (không kẹt run vô hạn)', (
   });
 });
 
-// ─── FIX-5 (C-3): E1 double-finishRun sau manual stop ────────────────────────
+// ─── FIX-7: queryUsers TTL cache (không re-query worker mỗi poll dashboard) ─────
+
+describe('coordinator — FIX-7: users TTL cache (poll /users không re-query mọi worker)', () => {
+  function coordWithFakeWorker() {
+    const env = getEnv({ LOADTEST_DATA_DIR: tmpDir(), LOADTEST_REPORTS_DIR: tmpDir() });
+    const c = new LoadTestCoordinator(env, {}, mockDb());
+    const farm = (c as unknown as { farm: WorkerFarm }).farm;
+    // Giả 1 worker trong farm (không fork process thật).
+    (farm as unknown as { workers: Map<number, unknown> }).workers.set(0, {
+      id: 0, pid: 1, alive: true, crashed: false, lastTickAt: Date.now(),
+      accounts: [], restartCount: 0, runSent: true, child: {},
+    });
+    return { c, farm };
+  }
+
+  const ROW = {
+    index: 0, email: 'a@test.local', phase: 'idle', currentAction: null, lastActionAt: null,
+    lastActionMs: null, messagesSent: 0, messagesEchoed: 0, roomId: null, socketConnected: false,
+    reconnectCount: 0, outboxPending: 0, lastError: null,
+  };
+
+  it('2 queryUsers cùng filter/sort trong TTL → farm.queryUsers chỉ gọi 1 lần; offset khác slice từ cache', async () => {
+    const { c } = coordWithFakeWorker();
+    const spy = vi.spyOn(WorkerFarm.prototype, 'queryUsers').mockResolvedValue({ rows: [ROW], total: 1, phaseCounts: { idle: 1 } });
+    try {
+      const r1 = await c.queryUsers(0, 10, 'a', undefined, 'index', 'asc');
+      expect(r1.total).toBe(1);
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // Lần 2 trong TTL → cache hit, KHÔNG query lại worker.
+      const r2 = await c.queryUsers(0, 10, 'a', undefined, 'index', 'asc');
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(r2.rows[0].email).toBe('a@test.local');
+
+      // Offset/limit khác → slice từ merged+sorted cache, vẫn không query lại.
+      const r3 = await c.queryUsers(1, 1, 'a', undefined, 'index', 'asc');
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(r3.rows).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('filter/sort khác → miss cache (query lại worker)', async () => {
+    const { c } = coordWithFakeWorker();
+    const spy = vi.spyOn(WorkerFarm.prototype, 'queryUsers').mockResolvedValue({ rows: [ROW], total: 1, phaseCounts: { idle: 1 } });
+    try {
+      await c.queryUsers(0, 10, 'a', undefined, 'index', 'asc');
+      await c.queryUsers(0, 10, 'b', undefined, 'index', 'asc'); // filter khác
+      await c.queryUsers(0, 10, 'a', undefined, 'email', 'asc'); // sort khác
+      expect(spy).toHaveBeenCalledTimes(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('phase đổi (setPhase) → cache bị vô hiệu (query lại worker)', async () => {
+    const { c } = coordWithFakeWorker();
+    const spy = vi.spyOn(WorkerFarm.prototype, 'queryUsers').mockResolvedValue({ rows: [ROW], total: 1, phaseCounts: { idle: 1 } });
+    try {
+      await c.queryUsers(0, 10, 'a', undefined, 'index', 'asc');
+      expect(spy).toHaveBeenCalledTimes(1);
+      (priv(c) as unknown as { setPhase: (p: string) => void }).setPhase('ramping');
+      await c.queryUsers(0, 10, 'a', undefined, 'index', 'asc');
+      expect(spy).toHaveBeenCalledTimes(2); // cache cleared khi phase đổi
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
 
 describe('coordinator — FIX-5: E1 auto-stop sau manual stop không flip stopped → error', () => {
   it('manual stop (provisioning) → phase stopped; finishRun("auto", E1) sau đó bị bỏ qua', async () => {

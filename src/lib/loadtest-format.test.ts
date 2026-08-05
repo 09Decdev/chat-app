@@ -7,6 +7,7 @@ import {
   fmtTickTime,
   fmtDateTime,
   fmtRange,
+  fmtRelative,
   CONFIRM_PHRASE,
 } from '@/lib/loadtest-format';
 
@@ -122,6 +123,31 @@ describe('fmtRange', () => {
     const start = new Date(2026, 0, 1, 0, 5).getTime();
     const end = new Date(2026, 0, 1, 23, 59).getTime();
     expect(fmtRange(start, end)).toBe('00:05–23:59');
+  });
+});
+
+describe('fmtRelative (FIX-8 — tiếng Việt tự nhiên)', () => {
+  const now = new Date(2026, 0, 1, 12, 0, 0).getTime();
+  it('null/undefined/NaN → "—"', () => {
+    expect(fmtRelative(null)).toBe('—');
+    expect(fmtRelative(undefined)).toBe('—');
+    expect(fmtRelative(NaN)).toBe('—');
+  });
+  it('< 1s → "vừa xong"', () => {
+    expect(fmtRelative(now - 400, now)).toBe('vừa xong');
+    expect(fmtRelative(now, now)).toBe('vừa xong');
+  });
+  it('5 giây → "5 giây trước"', () => {
+    expect(fmtRelative(now - 5000, now)).toBe('5 giây trước');
+    expect(fmtRelative(now - 59000, now)).toBe('59 giây trước');
+  });
+  it('3 phút → "3 phút trước"', () => {
+    expect(fmtRelative(now - 180_000, now)).toBe('3 phút trước');
+    expect(fmtRelative(now - 3599_000, now)).toBe('59 phút trước');
+  });
+  it('1 giờ → "1 giờ trước"', () => {
+    expect(fmtRelative(now - 3600_000, now)).toBe('1 giờ trước');
+    expect(fmtRelative(now - 7200_000, now)).toBe('2 giờ trước');
   });
 });
 

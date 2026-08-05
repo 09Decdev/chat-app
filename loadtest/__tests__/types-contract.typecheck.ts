@@ -69,3 +69,21 @@ declare const srcReport: SRC.RunReport;
 export const reportBackend: LT.RunReport = srcReport;
 declare const ltReport: LT.RunReport;
 export const reportFrontend: SRC.RunReport = ltReport;
+
+// ─── UserPhase (bảng users virtualized — 8 phase phải khớp 2 chiều) ───
+declare const srcUserPhase: SRC.UserPhase;
+export const userPhaseBackend: LT.UserPhase = srcUserPhase;
+declare const ltUserPhase: LT.UserPhase;
+export const userPhaseFrontend: SRC.UserPhase = ltUserPhase;
+
+// ─── UserActionState (action đang chạy — union phải khớp 2 chiều) ───
+declare const srcActionState: SRC.UserActionState;
+export const actionStateBackend: LT.UserActionState = srcActionState;
+declare const ltActionState: LT.UserActionState;
+export const actionStateFrontend: SRC.UserActionState = ltActionState;
+
+// ─── VirtualUserRow (row GET /users — field bắt buộc 2 chiều, thêm field 1 bên → fail) ───
+declare const srcUserRow: SRC.VirtualUserRow;
+export const userRowBackend: LT.VirtualUserRow = srcUserRow;
+declare const ltUserRow: LT.VirtualUserRow;
+export const userRowFrontend: SRC.VirtualUserRow = ltUserRow;

@@ -22,6 +22,10 @@ import type {
   LoadtestRunSummary,
   LoadtestRunDetail,
   LoadtestLogEvent,
+  UserPhase,
+  UserSortDir,
+  UserSortField,
+  UsersResponse,
 } from '@/types/loadtest';
 
 const client = axios.create({ baseURL: '/api/loadtest', timeout: 20000 });
@@ -178,6 +182,18 @@ export const loadtestApi = {
   errors: async () => {
     const res = await client.get('/errors');
     return unwrap<{ top: ErrorBucket[]; samples: ErrorSample[] }>(res.data);
+  },
+  /** Bảng virtual users — sort server-side (whitelist backend) + filter email/phase/roomId + phase chính xác. */
+  users: async (params?: {
+    offset?: number;
+    limit?: number;
+    filter?: string;
+    phase?: UserPhase;
+    sortBy?: UserSortField;
+    sortDir?: UserSortDir;
+  }) => {
+    const res = await client.get('/users', { params });
+    return unwrap<UsersResponse>(res.data);
   },
   logs: async (limit = 200) => {
     const res = await client.get('/logs', { params: { limit } });

@@ -11,8 +11,11 @@ import { AlertBanner } from '@/components/ui/alert-banner';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { ChartCard } from '@/components/loadtest/chart-card';
+import { PhaseDonut } from '@/components/loadtest/phase-donut';
+import { slicesFromTick } from '@/components/loadtest/user-phases';
 import {
   ActionsStackedAreaChart,
+  ActionRateBarChart,
   ConnectionsLineChart,
   LatencyLineChart,
   LogToggle,
@@ -222,6 +225,16 @@ export default function LiveDashboardPage() {
         />
       </div>
 
+      {/* Hàng mới: phân bố phase (donut) + actions/s hiện tại theo loại */}
+      <div className="grid gap-4 lg:grid-cols-12">
+        <ChartCard title="USER THEO PHASE" frozen={frozen} className="lg:col-span-5" loading={!lastTick}>
+          <PhaseDonut slices={slicesFromTick(lastTick)} centerLabel="users" />
+        </ChartCard>
+        <ChartCard title="ACTIONS/S HIỆN TẠI THEO LOẠI" frozen={frozen} className="lg:col-span-7" loading={!lastTick}>
+          <ActionRateBarChart tick={lastTick} />
+        </ChartCard>
+      </div>
+
       {/* Hàng 2: connections + latency (trái 8) | gauge + queue (phải 4) */}
       <div className="grid gap-4 lg:grid-cols-12">
         <div className="space-y-4 lg:col-span-8">
@@ -238,7 +251,7 @@ export default function LiveDashboardPage() {
             </ChartCard>
           </div>
           <ChartCard
-            title="LATENCY P50/P95/P99"
+            title="LATENCY P50/P95/P99 (ms)"
             frozen={frozen}
             actions={<LogToggle value={logScale} onChange={setLogScale} />}
             loading={!lastTick}

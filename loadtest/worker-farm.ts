@@ -46,7 +46,13 @@ export interface FarmEvents {
 export class WorkerFarm {
   private workers = new Map<number, WorkerHandle>();
   private requestSeq = 0;
-  private pendingUsers: Map<number, { resolve: (v: { rows: unknown[]; total: number }) => void; timer: NodeJS.Timeout }> = new Map();
+  private pendingUsers: Map<
+    number,
+    {
+      resolve: (v: { rows: unknown[]; total: number; phaseCounts?: Record<string, number> }) => void;
+      timer: NodeJS.Timeout;
+    }
+  > = new Map();
   private runConfig: RunConfig | null = null;
 
   constructor(private events: FarmEvents) {}
@@ -190,7 +196,15 @@ export class WorkerFarm {
   }
 
   /** Hỏi 1 worker danh sách user (virtualized table). */
-  queryUsers(id: number, offset: number, limit: number, filter?: string): Promise<{ rows: unknown[]; total: number }> {
+  queryUsers(
+    id: number,
+    offset: number,
+    limit: number,
+    filter?: string,
+    phase?: string,
+    sortBy?: string,
+    sortDir?: string,
+  ): Promise<{ rows: unknown[]; total: number; phaseCounts?: Record<string, number> }> {
     const requestId = ++this.requestSeq;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -198,17 +212,17 @@ export class WorkerFarm {
         resolve({ rows: [], total: 0 });
       }, 3000);
       this.pendingUsers.set(requestId, { resolve, timer });
-      this.send(id, { type: 'query-users', requestId, offset, limit, filter });
+      this.send(id, { type: 'query-users', requestId, offset, limit, filter, phase, sortBy, sortDir });
     });
   }
 
   /** Gọi từ coordinator khi nhận users-response. */
-  resolveUsers(requestId: number, rows: unknown[], total: number) {
+  resolveUsers(requestId: number, rows: unknown[], total: number, phaseCounts?: Record<string, number>) {
     const p = this.pendingUsers.get(requestId);
     if (p) {
       clearTimeout(p.timer);
       this.pendingUsers.delete(requestId);
-      p.resolve({ rows, total });
+      p.resolve({ rows, total, phaseCounts });
     }
   }
 
