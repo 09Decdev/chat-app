@@ -183,7 +183,9 @@ export class LoadTestCoordinator {
     this.stopReason = '';
     this.stopRequested = null;
     this.startTimers(); // tick provisioning progress ngay từ đầu (dashboard)
-    void this.dbWriter?.writeRunStart(this.config); // DB: INSERT runs (status=running) — PRD A1/B3
+    // FK race fix: AWAIT insertRun TRƯỚC mọi log_events (runs row phải tồn tại
+    // trước khi provisioning/log ghi DB — nếu không sẽ 23503 log_events_run_id_fkey).
+    await this.dbWriter?.writeRunStart(this.config);
 
     ltLog.info(`=== run ${config.runId} start: target=${config.targetUsers} workers=${config.workerCount} duration=${config.durationMin}m gateway=${config.gatewayUrl} ===`, { runId: config.runId });
     void this.provisionAndLaunch();
