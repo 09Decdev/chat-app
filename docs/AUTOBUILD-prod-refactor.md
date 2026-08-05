@@ -962,3 +962,63 @@ Code Reviewer (lens: CROSS-MODULE CORRECTNESS — races, idempotency, inconsiste
 - **Idempotency DB giữ**: `insertPoolAccounts ON CONFLICT DO NOTHING` (store.ts:543), `upsertPool ON CONFLICT DO UPDATE` (store.ts:469-476), legacy import skip nếu pool tồn tại (writer.ts:289-291). `markRunsRunningAsError` crash-detect (store.ts:344-352) đúng machineId — nhưng chỉ cứu khi server restart (liên quan C-2).
 
 **Verdict**: KHÔNG Critical. **2 Major (C-1, C-2)** — cả hai là lỗ hổng state-machine thật, không được E2E/test hiện tại phủ (E2E chỉ happy path 12 users × 30s): C-1 start-race (fix: 409 khi cooldown/report + disable Start frontend + kill worker cũ trước khi đè handle), C-2 kẹt running (fix: wire checkHeartbeats + prune workerTicks + sửa E3 guard). 4 Minor (C-3..C-6). Contract drift, gateway auth, runId, double-stop, counter process, JSONL single-writer, shutdown barrier: TẤT CẢ giữ đúng claim. **SAFE TO COMMIT với C-1/C-2 ghi nhận fix follow-up bắt buộc trước khi dùng tool thật lâu (start back-to-back + worker treo là kịch bản thực tế).**
+
+---
+
+# AUTOBUILD KẾT LUẬN (2026-08-05)
+
+**Chứng nhận cuối**: Reality Checker + Agents Orchestrator — REVIEW ONLY, không sửa code, không commit. Mọi bằng chứng dưới đây được verify TRỰC TIẾP trên máy trong phiên này (không tin tưởng từ docs).
+
+## Tóm tắt phạm vi
+
+- **12 tasks / 5 waves + Phase 4 fixes**, commit chain trên `refactor/prod-readiness`:
+  `370f2f3` (W0: secret cleanup, gitleaks, gitignore) → `4f5e645` (W1: config fail-fast, migration runner, DB store correctness) → `7dbcaa1` (W2: API hardening + observability) → `cc4d0bb` (W3: frontend hardening + frontend tests) → `8468d5b` (W4: CI pipeline, contract/E2E/mutation tests, docs + Docker) → `82ff251` (Phase 4: cross-module fixes — races, stuck runs, log loop, CORS) → `80e212c`/`c71506d`/`44354c4` (chores: gitignore, reports/ ignore, xoá debug artifact `login1.json`).
+- **Phạm vi**: từ code đến DB — config fail-fast (validateEnv, credential checks), migration runner (advisory lock, per-migration transaction, DOWN block), DB store correctness (idempotent upsert, crash-detect), API hardening (rate-limit, guards, contract envelope, health chain), observability (JSONL sink + redaction, /metrics, Prometheus counters), frontend hardening (CSP build-time, ErrorBoundary, refresh-token flow, 429 UX), tests/CI/Docker/docs (contract 31, E2E mock-gateway, mutation, ci.yml 3-leg, Dockerfile.loadtest, CANARY/ASSURANCE).
+
+## Quy trình phản biện đã chạy
+
+- **Per-task**: 3 lens × 12 tasks = 36 review round (Code Review / Security / AppSec / Performance / SRE / DBRE / API Tester / Socket / Test Engineer / Docs), mỗi lens REVIEW ONLY với verify thật (chạy lệnh, đọc file:line).
+- **Phase 4 council**: 3 lens chéo (Perf/Reliability, Security, Correctness) + design council cross-refute trước đó.
+- **W0–W4 Reality Checks**: 4 vòng, mỗi vòng verify từng claim trong commit bằng lệnh thật. W4 RC từng RED (frontend collection + mutation runner) — 2 blocker đã fix và được re-verify độc lập 3 lần trong ASSURANCE.
+- **Số finding**: **7 HIGH (T-03 ×1 regex FP; T-07 ×2 health probe timeout + false-ok; T-08 ×2 CSP default gateway origin; T-10 ×2 gitleaks `strings` inert + `.env` gate đỏ) + 3 MAJOR (Phase-4 F-1 log loop, C-1 start race, C-2 run kẹt 'running') + 1 MEDIUM cốt lõi (SEC-1 CORS `*`)** — **TẤT CẢ đã fix và verify lại** (fix ở `8468d5b`/`82ff251`, kèm test mới: coordinator.test.ts 7, writer.test.ts 2, rest-actions.test.ts 4). Còn lại: 3 Minor actionable (SEC-2 gitleaks paths, SEC-3 hook ngủ, SEC-4 redactMsg Bearer) + 3 Minor ops/code (F-3 retention thủ công — chấp nhận, C-4 DELETE unguarded, C-5 double-fault shutdown) — đều ghi nhận follow-up, không chặn.
+
+## Gates (ASSURANCE-prod-refactor.md, auditor re-run độc lập + phiên này)
+
+| Gate | Status | Bằng chứng (phiên này) |
+|---|---|---|
+| G1 Tests | PASS | `npm run test` = **393 passed + 40 skipped (433, 33 files) exit 0** — chạy thật lại; coverage 99.47% stmts ≥ 70 |
+| G2 Mutation | PASS | **77.17% overall** (825/1069 detected: 821 killed + 4 timeout, 219 survived, 25 no-cov), `break: 70`; per-module ≥ 70 (report.ts thấp nhất 73.50) — tái tính từ HTML report tạo hôm nay |
+| G3 Contract | PASS | contract.test.ts 31 tests (24 route 401-envelope, health, /metrics, register 403, 404, CORS); types-contract typecheck exit 0; E2E mock-gateway 12 users × 30s green |
+| G4 Type/Lint/Build | PASS | lint 0 error (7 warning pre-existing từ `.stryker-tmp/`), typecheck 0, loadtest:typecheck 0, build 0 (chunk 1.2 MB warning pre-existing) — chạy thật lại |
+| G5 SAST + secret | PASS (gap: gitleaks chưa cài local) | `git ls-files` = 0 file `.env`/secret; lịch sử commit sạch (tree-scan `--all`); scan local inactive — CI gitleaks-action@v2 bù sau push đầu |
+| G6 Code Review | PASS | 0 Critical/Major/High sống; 10 HIGH/MAJOR phát hiện → fix + re-verify |
+| G7 Reality Check | PASS (W4 RC từng RED, đã fix + re-verify) | W0 PASS 8/8, W1 PASS 16/16, W2 PASS 11/11, W3 PASS 12/12 |
+| G8 Migration | PASS | migrate.ts: up/down/status, pg_advisory_lock, transaction per migration, DOWN block; rollback plan CANARY §3/§7 |
+| G9 Payment | N/A | không có code payment trong phạm vi |
+| G10 Auth/PII | PASS | THREAT-MODEL 14 threats (TH-1..TH-14) kèm control file:line; authz tests 24×401, rate-limit 429, HMAC session TTL 12h |
+
+## Token đã tiêu (ước lượng)
+
+~**45 agent runs** (36 review lens + 3 council + 4 Reality Checks + producers/orchestrator), mỗi run 40k–280k tokens → **tổng ước ~5–7M tokens** (ước lượng, không đo chính xác).
+
+## Verdict: SHIPPABLE
+
+Với điều kiện **pre-flight bắt buộc trước khi chạy thật** (đều là sync môi trường, không phải code blocker):
+1. **Cài gitleaks** (`winget install gitleaks` + `sh scripts/install-hooks.sh`) — kích hoạt gate secret duy nhất đang ngủ (G5 gap).
+2. **Sync OTP secret** `LOADTEST_OTP_SECRET` → `gateway-auth-service/.env OTP_SECRET`.
+3. **Apply rotated DB password** lên Postgres instance.
+4. **Deploy gateway `handshake.auth` change** (repo gateway-auth-service) TRƯỚC chat client — nếu không, browser websocket rơi xuống polling (W3 MEDIUM phụ thuộc deploy order).
+
+## TOP vấn đề còn lại (follow-ups)
+
+1. **CI chưa chạy thật** — chưa có GitHub remote; matrix/gitleaks-action/Postgres leg mới chỉ được repro local.
+2. **gitleaks chưa cài local** — pre-commit hook inert (SEC-3).
+3. **40 skips** nếu chạy không có DB — đúng thiết kế skip-if-no-DB (probe 3s → describe.skip); CI ubuntu có DB nên 40 test đó CHẠY ở CI.
+4. **Chunk-size warning** (1.2 MB) — pre-existing từ W2, không phải mới.
+5. **Gateway change phải commit riêng ở gateway-auth-service** — diff hiện nằm ngoài repo này (websocket.gateway.ts:148-150).
+6. **`log_events` / `metric_samples` unbounded** — retention thủ công (`loadtest:db:cleanup`), chưa có scheduled job (F-3).
+7. **Browser websocket fix phụ thuộc gateway deploy order** — deploy đúng thứ tự mới hết polling fallback.
+
+## Cổng hiện tại
+
+Hoàn thành CỔNG 1 (design → code) và CỔNG 2 (verify kỹ thuật: tests/lint/typecheck/build/mutation/contract/secret). **Đang chờ CỔNG 3 — user duyệt canary + merge** (CANARY-prod-refactor.md §1 pre-flight → §3 rollback drill → merge). Hai docs bằng chứng gate (`docs/ASSURANCE-prod-refactor.md`, `docs/CANARY-prod-refactor.md`) hiện UNTRACKED — cần commit kèm theo trước/ngay sau merge.
