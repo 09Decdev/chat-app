@@ -23,13 +23,16 @@ export interface MockRequestLog {
 /**
  * T7 (DESIGN-loadtest-e2-connect-fail §9) — option mô phỏng "token lỗi vĩnh viễn":
  * - `rejectInvalidTokens`: từ chối mọi token KHÔNG nằm trong validTokens (mock cấp ở register/complete).
- *   HAI chế độ (đã verify socket.io-client 4.8.1):
+ *   HAI chế độ (đã verify socket.io-client 4.8.3):
  *   - KHÔNG `rejectMessage`: chặn ở `upgrade` event (HTTP 403 theo Authorization header) → client nhận
- *     `connect_error: "websocket error"` MỖI LẦN RETRY (~1/s) — đúng vector PRD §1.2 "server từ chối
- *     handshake → retry Infinity → loop fail" (middleware next(new Error) chỉ bắn 1 lần — CONNECT_ERROR
- *     là terminal trong socket.io-client v4, KHÔNG retry — critique A2).
+ *     `connect_error: "websocket error"` MỖI LẦN RETRY (~1/s) — KÊNH C engine-level (client-side reject
+ *     trước khi CONNECT packet; KHÔNG phải hành vi gateway thật — gateway thật accept rồi disconnect,
+ *     xem acceptThenDrop). Dùng để test cap-5 (F-1) + classify 'reject' (upgrade 403).
  *   - CÓ `rejectMessage` (ST-12): middleware `next(new Error(rejectMessage))` — text độc (JWT + control
  *     chars + newline) lọt vào connect_error message — 1-shot (không retry), đúng vector critique A2.
+ * - `acceptThenDrop` (F-T7-2, KÊNH B): gateway THẬT chấp nhận connection rồi `client.disconnect()`
+ *   NGAY (websocket.gateway.ts:150-153,161-164,179-185) → client nhận `connect` TRƯỚC rồi
+ *   `disconnect` reason `'io server disconnect'` — KHÔNG connect_error, KHÔNG retry (terminal).
  * - `brokenTokenRatio`: tỉ lệ register trả token LỖI (không thêm vào validTokens).
  *   Dùng COUNTER (không Math.random — deterministic): cứ N=round(1/ratio) register/complete
  *   thì 1 token lỗi → với 100 users + ratio 0.05 → ĐÚNG 5 token lỗi (AC-1 số học 5%).
@@ -38,6 +41,8 @@ export interface MockGatewayOptions {
   rejectInvalidTokens?: boolean;
   brokenTokenRatio?: number;
   rejectMessage?: string;
+  /** F-T7-2 kênh B: accept connection rồi disconnect ngay (như gateway thật) — mọi user bị drop. */
+  acceptThenDrop?: boolean;
 }
 
 export interface MockGateway {
@@ -212,8 +217,9 @@ export async function startMockGateway(opts: MockGatewayOptions = {}): Promise<M
     }
     next();
   });
-  // T7: chế độ reject MẶC ĐỊNH (không rejectMessage) — chặn `upgrade` theo Authorization header
-  // → client nhận connect_error mỗi retry (~1/s, PRD §1.2 vector "server từ chối handshake").
+  // T7: chế độ reject KHÔNG rejectMessage — chặn `upgrade` theo Authorization header
+  // → client nhận connect_error "websocket error" mỗi retry (~1/s) — KÊNH C engine-level
+  // (test cap-5/classify; KHÔNG phải hành vi gateway thật — thật là acceptThenDrop kênh B).
   if (opts.rejectInvalidTokens && !opts.rejectMessage) {
     server.on('upgrade', (req, socket) => {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -226,6 +232,14 @@ export async function startMockGateway(opts: MockGatewayOptions = {}): Promise<M
     });
   }
   io.on('connection', (socket) => {
+    if (opts.acceptThenDrop) {
+      // F-T7-2 kênh B: gateway thật accept rồi client.disconnect() NGAY — client nhận
+      // 'connect' rồi 'disconnect' reason 'io server disconnect' (KHÔNG connect_error,
+      // KHÔNG retry — socket.io-client v4.8.3 terminal). close=false → disconnect packet,
+      // KHÔNG đóng transport (nếu close=true client thấy 'transport close' → auto-retry — sai).
+      socket.disconnect();
+      return;
+    }
     socket.on('chat:join', (p: { roomId?: string }) => {
       if (p?.roomId) socket.emit('chat:joined', { roomId: p.roomId, roomEndsAt: Date.now() + 900_000 });
     });

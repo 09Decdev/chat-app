@@ -8,11 +8,15 @@
  *   (b) 5% token lỗi      → E2 KHÔNG trigger (AC-1 + F4): window ≥ 50 attempts, rate ~20.8% < 30%,
  *                          5 user phase 'failed', usersFailed = 5, fail ≤ 25 (cap 5 × 5 user)
  *   (c) 100% token lỗi    → E2 trigger ≤ 60s, stopReason bắt đầu "E2:", log đủ 8 trường (AC-2/AC-4)
+ *   (d) KÊNH B (F-T7-2)   → gateway accept rồi disconnect NGAY (như gateway thật) — 100% user failed,
+ *                          E2 trigger ≤ 60s, stopReason "E2:", usersFailed == userCount (AC-2 trên
+ *                          kênh reject THẬT — 'io server disconnect' terminal, KHÔNG connect_error)
  *   ST-12                 → middleware next(new Error('độc')): errorSamples/lastError/log đã sanitize
  *
  * Mock-gateway extension (mock-gateway.ts): rejectInvalidTokens (2 chế độ — 403 upgrade → retry ~1/s
- * đúng vector PRD §1.2; rejectMessage → middleware next(new Error('độc')) 1-shot cho ST-12) +
- * brokenTokenRatio (deterministic counter — 5% với 100 users = ĐÚNG 5 token lỗi).
+ * kênh C engine-level; rejectMessage → middleware next(new Error('độc')) 1-shot cho ST-12) +
+ * brokenTokenRatio (deterministic counter — 5% với 100 users = ĐÚNG 5 token lỗi) +
+ * acceptThenDrop (F-T7-2 kênh B — hành vi gateway THẬT).
  */
 import { describe, it, expect, vi, afterAll } from 'vitest';
 import * as fs from 'node:fs';
@@ -423,6 +427,68 @@ describe('T7 — integration E2 với mock gateway (DESIGN §9, G7 evidence)', (
         await waitUntil(() => (TERMINAL as readonly string[]).includes(sc.coordinator.phase), 60_000, 'ST-12 dừng');
         expect(sc.coordinator.phase).toBe('stopped');
         expect(sc.coordinator.stopReason ?? '').not.toContain('E2');
+      } finally {
+        spy.restore();
+        await sc.stop();
+      }
+    },
+    150_000,
+  );
+
+  it(
+    '(d) F-T7-2 kênh B: 100% accept-then-drop (gateway THẬT client.disconnect()) → E2 stop ≤ 60s, stopReason "E2:", usersFailed == userCount',
+    async () => {
+      // Kênh B = 1-shot terminal (KHÔNG retry như kênh C) → pacing ramp phải đủ chậm để window
+      // 60s đạt ≥ 50 attempts SAU khi user cuối drop: 60 users @ 8/s → xong t≈7.5s; window (skip-first
+      // ~8 attempts) đạt 50 ở tick ~8s → fire với MỌI user đã failed (margin ~0.5s, đã calibrate).
+      const USER_COUNT = 60;
+      const sc = await startScenario({ acceptThenDrop: true });
+      const spy = installE2Spy();
+      try {
+        const startWall = Date.now();
+        const started = await sc.coordinator.start({
+          targetUsers: USER_COUNT,
+          rampRate: 8,
+          rampMode: 'rate',
+          durationMin: 2,
+          profile: PROFILE_READ,
+          gatewayUrl: sc.gateway.url,
+          freshAccounts: true,
+        });
+        expect(started.ok).toBe(true);
+
+        await waitUntil(() => (TERMINAL as readonly string[]).includes(sc.coordinator.phase), 120_000, '(d) auto-stop');
+
+        // AC-2 trên kênh THẬT: status 'error', stopReason "E2:", ≤ 60s kể từ start
+        expect(sc.coordinator.phase).toBe('error');
+        expect(sc.db.finishStatus).toBe('error');
+        expect(sc.coordinator.stopReason ?? '').toMatch(/^E2:/);
+        expect(Date.now() - startWall).toBeLessThan(60_000);
+        expect(sc.db.writeRunFinishCount).toBe(1);
+
+        // Kênh B: gateway accept MỌI connection rồi drop — socketConnections = đủ user
+        expect(sc.gateway.socketConnections).toBe(USER_COUNT);
+
+        // Window tại lúc E2: ≥ 50 attempts, 100% fail, mọi fail là 'reject' (io server disconnect)
+        const w = windowState(sc.coordinator);
+        expect(w.attempts).toBeGreaterThanOrEqual(50);
+        expect(w.fails).toBe(w.attempts);
+        expect(w.byType.timeout + w.byType.transport + w.byType.reject + w.byType.other).toBe(w.fails);
+        expect(w.byType.reject).toBe(w.fails); // kênh B = reject (không timeout/transport)
+
+        // F-T7-2 cốt lõi: MỌI user accept-then-drop → phase failed — không user kẹt 'connecting' giả,
+        // không "attempt thành công" trống; usersFailed == userCount tại tick bắn E2
+        const last = sc.coordinator.lastTick;
+        expect(last?.counters.usersFailed).toBe(USER_COUNT);
+        expect(last?.counters.connectFails).toBe(USER_COUNT);
+        expect(last?.counters.usersConnected).toBe(0); // không user nào "connected" giả
+        expect(last?.rates.connectFailRate).toBeGreaterThan(30);
+
+        // AC-4: log E2 đủ 8 trường + regex (ST-7) — byType toàn reject
+        const line = spy.e2ErrorLines().find((l) => l.startsWith('E2: auto-stop: connect fail'));
+        expect(line).toBeDefined();
+        expect(line).toMatch(E2_LOG_RE);
+        expect(line).toContain('byType=timeout:0,transport:0,reject:');
       } finally {
         spy.restore();
         await sc.stop();

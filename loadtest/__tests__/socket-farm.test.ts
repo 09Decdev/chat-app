@@ -435,6 +435,60 @@ describe('T4 — byType sum + recordError sanitize/cap + lastError sink (P2/F-4/
   });
 });
 
+describe('F-T7-2 — kênh B: io server disconnect (gateway reject thật)', () => {
+  it('accept-then-drop: connect rồi io server disconnect → 1 fail reject + phase failed NGAY + usersFailed=1', () => {
+    const { u, handlers, socket } = connectUser(0, 'kb@test.local');
+    handlers.get('connect')?.(); // gateway accept — attempt đếm ở đây
+    expect(u.runtimeStats.connectAttempts).toBe(1);
+    handlers.get('disconnect')?.('io server disconnect');
+    // cutover NGAY (kênh B terminal — KHÔNG cần chờ cap 5; socket.io v4.8.3 không retry reason này)
+    expect(u.phase).toBe('failed');
+    expect(u.runtimeStats.connectAttempts).toBe(1); // KHÔNG tăng attempt — đã đếm ở 'connect'
+    expect(u.runtimeStats.connectFails).toBe(1); // 1 reject-fail
+    expect(u.runtimeStats.connectFailsByType.reject).toBe(1);
+    expect(u.reconnectCount).toBe(0); // KHÔNG reconnectCount++
+    expect(u.socketConnected).toBe(false);
+    expect(u.lastError).toContain('io server disconnect');
+    expect(socket.io.reconnection).toHaveBeenCalledWith(false); // chặn mọi retry (an toàn kép)
+    // connect_error sau failed: không đếm (guard) — không fail thêm
+    handlers.get('connect_error')?.({ message: 'x' } as Error);
+    expect(u.runtimeStats.connectFails).toBe(1);
+    // usersFailed == 1 qua emitTick
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: 1 } as RunConfig;
+    rt.users = [u];
+    const msgs: unknown[] = [];
+    rt.onMessage = (m) => msgs.push(m);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const counters = (msgs[0] as { tick: WorkerTick }).tick.counters;
+    expect(counters.usersFailed).toBe(1);
+    expect(counters.connectFails).toBe(1);
+    expect(counters.connectFailsByType).toEqual({ timeout: 0, transport: 0, reject: 1, other: 0 });
+  });
+
+  it('các reason khác (transport close/error, ping timeout, parse error, io client disconnect) KHÔNG đếm fail', () => {
+    const { u, handlers } = connectUser(0, 'kbc@test.local');
+    handlers.get('connect')?.();
+    const reasons = ['transport close', 'transport error', 'ping timeout', 'parse error', 'io client disconnect'] as const;
+    for (const reason of reasons) {
+      handlers.get('disconnect')?.(reason);
+      expect(u.phase).not.toBe('failed');
+      expect(u.runtimeStats.connectFails).toBe(0); // không fail giả từ disconnect tự nhiên/drain
+    }
+    expect(u.reconnectCount).toBe(5); // retry kênh C bình thường (reconnectCount++)
+    expect(u.runtimeStats.connectFailsByType.reject).toBe(0);
+  });
+
+  it('io server disconnect không có connect trước (server drop ngay) vẫn đếm đúng 1 reject-fail', () => {
+    const { u, handlers } = connectUser(0, 'kbd@test.local');
+    handlers.get('disconnect')?.('io server disconnect');
+    expect(u.phase).toBe('failed');
+    expect(u.runtimeStats.connectAttempts).toBe(0); // chưa có connect — attempt 0
+    expect(u.runtimeStats.connectFails).toBe(1);
+    expect(u.runtimeStats.connectFailsByType.reject).toBe(1);
+  });
+});
+
 describe('VirtualUser — action state + toRow', () => {
   it('toRow() trả đủ field mới với giá trị mặc định (chưa hành động)', () => {
     const u = makeUser(3, 'user3@test.local');

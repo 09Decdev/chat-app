@@ -181,12 +181,26 @@ export class VirtualUser {
       }
     });
 
-    s.on('disconnect', () => {
+    s.on('disconnect', (reason: Socket.DisconnectReason) => {
       this.socketConnected = false;
-      if (this.phase !== 'failed') {
-        this.phase = 'connecting';
-        this.reconnectCount++;
+      if (this.phase === 'failed') return; // failed terminal — không đếm gì
+      if (reason === 'io server disconnect') {
+        // F-T7-2: kênh reject THẬT của gateway (websocket.gateway.ts client.disconnect()).
+        // Client đã nhận 'connect' (attempt đếm ở đó) rồi bị drop — socket.io-client v4.8.3
+        // KHÔNG retry reason này (destroy() chặn manager) → TERMINAL: 1 reject-fail + cutover NGAY
+        // (KHÔNG reconnectCount++, KHÔNG tăng connectAttempts — attempt đã đếm ở 'connect').
+        this.phase = 'failed';
+        this.lastError = sanitizeLogText('io server disconnect (gateway reject) — phase failed', 160);
+        this.runtimeStats.connectFails++;
+        this.runtimeStats.connectFailsByType.reject++;
+        this.onError?.('reject', 'io server disconnect', 'connect'); // M4: errorSamples action 'connect'
+        this.socket?.io?.reconnection(false); // chặn mọi retry — an toàn kép
+        return;
       }
+      // Các reason khác (transport close/error, ping timeout, parse error) KHÔNG đếm —
+      // socket.io tự retry (kênh C engine-level) — connect_error + cap-5 bao phủ (F-T7-2).
+      this.phase = 'connecting';
+      this.reconnectCount++;
     });
 
     s.on('connect_error', (err: Error) => {
