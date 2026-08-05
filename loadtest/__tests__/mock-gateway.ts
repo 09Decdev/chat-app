@@ -20,6 +20,26 @@ export interface MockRequestLog {
   hasAuth: boolean;
 }
 
+/**
+ * T7 (DESIGN-loadtest-e2-connect-fail §9) — option mô phỏng "token lỗi vĩnh viễn":
+ * - `rejectInvalidTokens`: từ chối mọi token KHÔNG nằm trong validTokens (mock cấp ở register/complete).
+ *   HAI chế độ (đã verify socket.io-client 4.8.1):
+ *   - KHÔNG `rejectMessage`: chặn ở `upgrade` event (HTTP 403 theo Authorization header) → client nhận
+ *     `connect_error: "websocket error"` MỖI LẦN RETRY (~1/s) — đúng vector PRD §1.2 "server từ chối
+ *     handshake → retry Infinity → loop fail" (middleware next(new Error) chỉ bắn 1 lần — CONNECT_ERROR
+ *     là terminal trong socket.io-client v4, KHÔNG retry — critique A2).
+ *   - CÓ `rejectMessage` (ST-12): middleware `next(new Error(rejectMessage))` — text độc (JWT + control
+ *     chars + newline) lọt vào connect_error message — 1-shot (không retry), đúng vector critique A2.
+ * - `brokenTokenRatio`: tỉ lệ register trả token LỖI (không thêm vào validTokens).
+ *   Dùng COUNTER (không Math.random — deterministic): cứ N=round(1/ratio) register/complete
+ *   thì 1 token lỗi → với 100 users + ratio 0.05 → ĐÚNG 5 token lỗi (AC-1 số học 5%).
+ */
+export interface MockGatewayOptions {
+  rejectInvalidTokens?: boolean;
+  brokenTokenRatio?: number;
+  rejectMessage?: string;
+}
+
 export interface MockGateway {
   /** Base URL http://127.0.0.1:{port} — đưa vào allowlist + config.gatewayUrl. */
   url: string;
@@ -30,6 +50,8 @@ export interface MockGateway {
   socketConnections: number;
   /** token (accessToken) → socket — mock matching engine emit qua đây. */
   tokenSockets: Map<string, Socket>;
+  /** Số token lỗi do mock cấp (register/complete — brokenTokenRatio) — assert ĐÚNG 5% (AC-1). */
+  brokenTokensIssued: number;
   stop(): Promise<void>;
 }
 
@@ -41,19 +63,25 @@ function fakeAccessToken(sub: string): string {
 
 const POSTS = Array.from({ length: 5 }, (_, i) => ({ id: `post-${i + 1}`, content: `[lt] mock post ${i + 1}` }));
 
-export async function startMockGateway(): Promise<MockGateway> {
+export async function startMockGateway(opts: MockGatewayOptions = {}): Promise<MockGateway> {
   const handle: MockGateway = {
     url: '',
     port: 0,
     requestLog: [],
     socketConnections: 0,
     tokenSockets: new Map(),
+    brokenTokensIssued: 0,
     stop: async () => {},
   };
   /** token → roomId — matching engine giả (enqueue tạo match, my-room đọc lại). */
   const matched = new Map<string, string>();
   /** token → roomId đã match nhưng socket chưa kết nối (emit khi connect — tránh race). */
   const pendingMatch = new Map<string, string>();
+  /** T7: token HỢP LỆ (register/complete + login cấp) — middleware allowlist khi rejectInvalidTokens. */
+  const validTokens = new Set<string>();
+  /** T7: đếm register/complete — deterministic 5% (counter, không random). */
+  let registerCompleteCount = 0;
+  const brokenEvery = opts.brokenTokenRatio && opts.brokenTokenRatio > 0 ? Math.max(1, Math.round(1 / opts.brokenTokenRatio)) : 0;
   let wsConnections = 0;
   let wsMessages = 0;
 
@@ -90,15 +118,23 @@ export async function startMockGateway(): Promise<MockGateway> {
             return 'user';
           }
         })();
+        // T7: deterministic broken-token ratio (counter — 5% với 100 users = ĐÚNG 5 token lỗi).
+        registerCompleteCount++;
+        const broken = brokenEvery > 0 && registerCompleteCount % brokenEvery === 0;
+        const accessToken = broken ? fakeAccessToken(`broken-${email}`) : fakeAccessToken(email);
+        if (broken) handle.brokenTokensIssued++;
+        else validTokens.add(accessToken); // token hợp lệ → middleware allowlist (rejectInvalidTokens)
         return sendJson(res, 200, {
           success: true,
-          data: { accessToken: fakeAccessToken(email), refreshToken: `rt-${email}` },
+          data: { accessToken, refreshToken: `rt-${email}` },
         });
       }
       if (method === 'POST' && url.pathname === '/auth/login') {
+        const accessToken = fakeAccessToken('login-user');
+        validTokens.add(accessToken);
         return sendJson(res, 200, {
           success: true,
-          data: { accessToken: fakeAccessToken('login-user'), refreshToken: 'rt-login' },
+          data: { accessToken, refreshToken: 'rt-login' },
         });
       }
 
@@ -161,6 +197,11 @@ export async function startMockGateway(): Promise<MockGateway> {
   io.use((socket, next) => {
     const token = String((socket.handshake.auth as { token?: unknown } | undefined)?.token ?? '');
     if (!token) return next(new Error('unauthorized'));
+    // T7 (ST-12 vector, critique A2): reject qua middleware next(new Error(text độc)) —
+    // client socket.io nhận connect_error CHỨA text (1-shot — v4 không retry CONNECT_ERROR).
+    if (opts.rejectInvalidTokens && opts.rejectMessage && !validTokens.has(token)) {
+      return next(new Error(opts.rejectMessage));
+    }
     handle.tokenSockets.set(token, socket);
     handle.socketConnections++;
     wsConnections++;
@@ -171,6 +212,19 @@ export async function startMockGateway(): Promise<MockGateway> {
     }
     next();
   });
+  // T7: chế độ reject MẶC ĐỊNH (không rejectMessage) — chặn `upgrade` theo Authorization header
+  // → client nhận connect_error mỗi retry (~1/s, PRD §1.2 vector "server từ chối handshake").
+  if (opts.rejectInvalidTokens && !opts.rejectMessage) {
+    server.on('upgrade', (req, socket) => {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      if (!url.pathname.startsWith('/socket.io/')) return; // để engine.io xử lý
+      const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+      if (!validTokens.has(token)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+        socket.destroy();
+      }
+    });
+  }
   io.on('connection', (socket) => {
     socket.on('chat:join', (p: { roomId?: string }) => {
       if (p?.roomId) socket.emit('chat:joined', { roomId: p.roomId, roomEndsAt: Date.now() + 900_000 });
