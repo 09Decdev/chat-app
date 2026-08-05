@@ -546,22 +546,30 @@ export class LoadtestStore {
       'pool_id', 'email', 'password', 'user_id', 'display_name', 'device_info_json', 'date_of_birth',
       'country', 'registered_at', 'status', 'last_error_code', 'last_used_run_id', 'last_login_at',
     ];
-    const values: unknown[] = [];
-    const placeholders: string[] = [];
-    accounts.forEach((a, i) => {
-      const base = i * cols.length;
-      placeholders.push(`(${cols.map((_, j) => `$${base + j + 1}`).join(', ')})`);
-      values.push(
-        a.poolId, a.email, a.password, a.userId, a.displayName, JSON.stringify(a.deviceInfo ?? {}),
-        a.dateOfBirth, a.country, a.registeredAt ?? null, a.status, a.lastErrorCode ?? null,
-        a.lastUsedRunId ?? null, a.lastLoginAt ?? null,
+    // CHUNK 500 — Postgres giới hạn 65.535 params/query (13 cols × 5k+ accounts = vượt limit;
+    // lỗi 08P01 "bind message has N parameter formats but 0 parameters" khi chạy run lớn).
+    const CHUNK = 500;
+    for (let start = 0; start < accounts.length; start += CHUNK) {
+      const chunk = accounts.slice(start, start + CHUNK);
+      const values: unknown[] = [];
+      const placeholders: string[] = [];
+      chunk.forEach((a, i) => {
+        const base = i * cols.length;
+        placeholders.push(`(${cols.map((_, j) => `$${base + j + 1}`).join(', ')})`);
+        values.push(
+          a.poolId, a.email, a.password, a.userId, a.displayName, JSON.stringify(a.deviceInfo ?? {}),
+          a.dateOfBirth, a.country, a.registeredAt ?? null, a.status, a.lastErrorCode ?? null,
+          a.lastUsedRunId ?? null, a.lastLoginAt ?? null,
+        );
+      });
+      const r = await this.query(
+        `INSERT INTO pool_accounts (${cols.join(', ')}) VALUES ${placeholders.join(', ')} ON CONFLICT (pool_id, email) DO NOTHING`,
+        values,
+        { write: true },
       );
-    });
-    return this.query(
-      `INSERT INTO pool_accounts (${cols.join(', ')}) VALUES ${placeholders.join(', ')} ON CONFLICT (pool_id, email) DO NOTHING`,
-      values,
-      { write: true },
-    );
+      if (!r.ok) return r;
+    }
+    return { ok: true, rows: [] };
   }
 
   async updatePoolAccount(

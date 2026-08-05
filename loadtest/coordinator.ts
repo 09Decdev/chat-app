@@ -26,8 +26,8 @@ import type { DbWriter } from './db/writer';
 const TICK_HISTORY_LIMIT = 3600; // 1h @1s (UI-SPEC §4.1)
 const COOLDOWN_WAIT_MS = 10_000; // chờ worker done tối đa
 const WORKER_RESTART_BACKOFF_MS = 2000;
-/** C-2: worker không tick trong N ms = chết im lặng (treo event loop) — 5 tick @1s, khớp farm.checkHeartbeats default. */
-const WORKER_HEARTBEAT_STALE_MS = 5000;
+/** C-2: worker không tick trong N ms = chết im lặng (treo event loop) — 8s (GC pause dài khi worker cáng nhiều socket). */
+const WORKER_HEARTBEAT_STALE_MS = 8000;
 /** FIX-7: TTL cache queryUsers — ngắn hơn poll dashboard 2.5s nên dữ liệu luôn tươi, nhưng
  *  N dashboard client × poll không re-query + re-sort ~3MB rows/10k user từ mọi worker mỗi lần. */
 const USERS_CACHE_TTL_MS = 1000;

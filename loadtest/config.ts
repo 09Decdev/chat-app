@@ -358,7 +358,8 @@ export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20,
 
 /** Ước lượng hạ tầng cho UI (Màn 1 "ƯỚC LƯỢNG"). */
 export function estimateInfra(targetUsers: number, _env: LoadTestEnv) {
-  const workers = Math.min(Math.max(1, Math.ceil(targetUsers / 10_000)), 32);
+  // ~2500 socket/worker cho stability (5k socket 1 process → GC pause > 5s → E3 kill)
+  const workers = Math.min(Math.max(1, Math.ceil(targetUsers / 2_500)), 32);
   const ramGB = Math.ceil((targetUsers * 60 * 1024) / (1024 ** 3)); // ~60KB/socket (PRD §5.1)
   const seatMin = Math.ceil(targetUsers / 100 / 60); // matching ~100 user/s
   return { workers, ramGB, seatMin };
@@ -368,7 +369,9 @@ export function estimateInfra(targetUsers: number, _env: LoadTestEnv) {
 export function resolveWorkerCount(targetUsers: number, env: LoadTestEnv): number {
   if (env.workerCount > 0) return env.workerCount;
   const cpus = os.availableParallelism?.() ?? 4;
-  const byTarget = Math.ceil(targetUsers / env.maxSocketsPerWorker);
+  // AUTO dùng ≤ 2500 users/worker (ổn định GC/heartbeat) — maxSocketsPerWorker chỉ là cap cứng.
+  const perWorker = Math.min(env.maxSocketsPerWorker, 2_500);
+  const byTarget = Math.ceil(targetUsers / perWorker);
   return Math.min(Math.max(1, Math.min(cpus - 1 || 1, byTarget)), 32);
 }
 

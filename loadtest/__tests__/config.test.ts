@@ -639,7 +639,7 @@ describe('config — resolveWorkerCount / estimateInfra (T-11)', () => {
   it('estimateInfra: workers/ramGB/seatMin', () => {
     const env = getEnv({});
     const e = estimateInfra(50_000, env);
-    expect(e.workers).toBe(5);
+    expect(e.workers).toBe(20); // 50k / 2500 per worker
     expect(e.ramGB).toBeGreaterThan(2);
     expect(e.seatMin).toBe(9); // 50000/100/60 → ceil(8.33)
   });
