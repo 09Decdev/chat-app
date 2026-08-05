@@ -190,6 +190,9 @@ function ConnectFailBreakdown({ tick, phase }: ConnectFailBreakdownProps) {
   const totalFails = breakdown.reduce((acc, r) => acc + r.count, 0);
   const danger =
     !!tick && tick.hasConnectData !== false && rate >= 30 && (phase === 'ramping' || phase === 'steady');
+  // X-2: toàn bộ worker restart (BE-2) → counter lũy kế về 0 NHƯNG window 60s vẫn đỏ —
+  // không hiện "Không có connect fail"/"đang chờ" gây hiểu lầm khi tile đang cảnh báo.
+  const cumulativeResetDanger = rate >= 30 && totalFails === 0;
 
   return (
     <Card className="p-4">
@@ -220,7 +223,7 @@ function ConnectFailBreakdown({ tick, phase }: ConnectFailBreakdownProps) {
                   attempts {fmtCompact(attempts)} · fails {fmtCompact(totalFails)}
                 </span>
               </TooltipTrigger>
-              <TooltipContent>(per worker từ đầu run — có thể giảm khi worker restart)</TooltipContent>
+              <TooltipContent>(per worker từ khi worker khởi động — có thể giảm khi E3-restart)</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -231,7 +234,11 @@ function ConnectFailBreakdown({ tick, phase }: ConnectFailBreakdownProps) {
               <TooltipContent>(lọc Phase = Lỗi tại Virtual Users)</TooltipContent>
             </Tooltip>
           </div>
-          {attempts === 0 ? (
+          {cumulativeResetDanger ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Số lũy kế về 0 sau worker restart — window 60s vẫn ghi nhận connect fail. Xem tile Connect fail.
+            </p>
+          ) : attempts === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Chưa có dữ liệu connect — đang chờ user connect đầu tiên...
             </p>
@@ -278,6 +285,7 @@ export default function LiveDashboardPage() {
   const ticks = useLoadtestStore((s) => s.ticks);
   const lastTick = useLoadtestStore((s) => s.lastTick);
   const phase = useLoadtestStore((s) => s.phase);
+  const stopReason = useLoadtestStore((s) => s.stopReason);
 
   const [range, setRange] = useState<RangeKey>('30m');
   const [logScale, setLogScale] = useState(false);
@@ -333,7 +341,11 @@ export default function LiveDashboardPage() {
       {phase === 'error' && (
         <AlertBanner
           variant="destructive"
-          title="Run tự dừng: register/connect fail vượt ngưỡng (E1/E2)"
+          title={
+            stopReason
+              ? `Run tự dừng: ${stopReason}`
+              : 'Run tự dừng: register/connect fail vượt ngưỡng (E1/E2)'
+          }
           description={
             c
               ? `User tạo ${fmtNum(c.usersCreated)} · connect ${fmtNum(c.usersConnected)} · thất bại ${fmtNum(c.failTotal)}`

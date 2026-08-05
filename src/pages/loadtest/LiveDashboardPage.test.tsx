@@ -25,6 +25,7 @@ const storeState = vi.hoisted(() => ({
   ticks: [] as LoadTestTick[],
   lastTick: null as LoadTestTick | null,
   phase: 'steady' as string,
+  stopReason: '',
 }));
 
 vi.mock('@/store/loadtest.store', () => ({
@@ -76,10 +77,11 @@ function makeTick(
   };
 }
 
-function setState(tick: LoadTestTick | null, phase: string) {
+function setState(tick: LoadTestTick | null, phase: string, stopReason = '') {
   storeState.lastTick = tick;
   storeState.ticks = tick ? [tick] : [];
   storeState.phase = phase;
+  storeState.stopReason = stopReason;
 }
 
 function renderPage() {
@@ -231,5 +233,46 @@ describe('LiveDashboardPage — connect metrics (T6)', () => {
     setState(null, 'provisioning');
     renderPage();
     expect(screen.getByText('Đang chờ tick đầu tiên...')).toBeInTheDocument();
+  });
+
+  // ─── Phase 4 council: X-2 (restart) + X-5 (stopReason) ─────────────────────
+  it('X-2: toàn bộ worker restart → lũy kế 0 nhưng window đỏ → text restart, KHÔNG "Không có connect fail"', () => {
+    setState(
+      makeTick({
+        counters: {
+          connectAttempts: 120, // worker restart — counter về nhỏ
+          connectFails: 0,
+          connectFailsByType: { timeout: 0, transport: 0, reject: 0, other: 0 },
+          usersFailed: 0,
+        },
+        rates: { connectFailRate: 32 }, // window 60s vẫn đỏ
+      }),
+      'steady',
+    );
+    renderPage();
+
+    expect(screen.getByText(/Số lũy kế về 0 sau worker restart/)).toBeInTheDocument();
+    expect(screen.queryByText('Không có connect fail trong run này')).not.toBeInTheDocument();
+    expect(screen.queryByText(/đang chờ user connect đầu tiên/)).not.toBeInTheDocument();
+    // Tile vẫn đỏ (window 32%) — không bị che
+    expect(screen.getByText('32.0')).toBeInTheDocument();
+  });
+
+  it('X-5: banner phase error hiển thị stopReason thật (E3-stop không còn text E1/E2)', () => {
+    setState(makeTick(), 'error', 'E3: toàn bộ worker chết');
+    renderPage();
+
+    // frozen banner cũng role="alert" — assert title của banner error trực tiếp
+    expect(screen.getByText('Run tự dừng: E3: toàn bộ worker chết')).toBeInTheDocument();
+    expect(screen.queryByText(/register\/connect fail vượt ngưỡng/)).not.toBeInTheDocument();
+  });
+
+  it('X-5: phase error không có stopReason → fallback text E1/E2 cũ', () => {
+    setState(makeTick(), 'error', '');
+    renderPage();
+
+    expect(
+      screen.getByText('Run tự dừng: register/connect fail vượt ngưỡng (E1/E2)'),
+    ).toBeInTheDocument();
   });
 });
