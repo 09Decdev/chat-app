@@ -24,6 +24,7 @@ import { RestDriver } from './rest-actions';
 import { buildReport } from './report';
 import { saveReportFiles } from './report';
 import { ltLog, normalizeUrl, setVerbose, redactUrl } from './util';
+import { sanitizeLogText } from './sanitize';
 import { toolMetrics } from './tool-metrics';
 import type { DbWriter } from './db/writer';
 
@@ -301,7 +302,10 @@ export class LoadTestCoordinator {
       this.broadcastRun();
     } catch (err) {
       ltLog.error(`provisioning exception: ${err instanceof Error ? err.message : String(err)}`);
-      return this.finishRun('auto', err instanceof Error ? err.message : String(err));
+      // R-1: err.message là text không tin cậy (exception text) → sanitize trước khi vào stopReason
+      // (DB/report/export — không đi qua logger redact).
+      const rawReason = err instanceof Error ? err.message : String(err);
+      return this.finishRun('auto', sanitizeLogText(rawReason, 200));
     }
   }
 
@@ -500,8 +504,9 @@ export class LoadTestCoordinator {
     this.actionsPerSecSeries.push(aps);
 
     // ── T5 (DESIGN §7.1): window connect WALL-CLOCK — diff per-worker + roll + rate TRƯỚC pushTick ──
-    // (rates.connectFailRate phải vào tick để dashboard/report có đúng rate — AC-6; E2 evaluate dưới)
-    if (this.phase === 'ramping' || this.phase === 'steady') {
+    // (rates.connectFailRate phải vào tick để dashboard/report có đúng rate — AC-6; E2 evaluate dưới.
+    //  X-1: roll ở CẢ cooldown — tick cooldown giữ rate thật thay vì 0 → report cuối run không sai.)
+    if (this.phase === 'ramping' || this.phase === 'steady' || this.phase === 'cooldown') {
       let dA = 0, dF = 0;
       const dByType = { ...EMPTY_CONNECT_FAILS };
       for (const t of ticks) {
@@ -598,11 +603,21 @@ export class LoadTestCoordinator {
     }
 
     // Phase advance (natural end) — SAU auto-stop (BE-4)
-    if (this.phase === 'ramping' && agg.tick.counters.usersConnected >= this.config.targetUsers) {
+    // F-T7-1: ramping phải thoát theo duration — nhóm user 'failed' (cap-5) làm connected plateau
+    // vĩnh viễn dưới target → trước đây không có path ra khỏi ramping → run không bao giờ finished (AC-1).
+    if (this.phase === 'ramping' && elapsedSec >= this.config.durationSec) {
+      this.setPhase(transition(this.phase, 'cooldown'));
+      this.stopReason = 'duration hết';
+      this.farm.broadcast({ type: 'stop', reason: 'duration ended', force: false });
+      ltLog.info(`run ${this.runId}: COOLDOWN (duration ${this.config.durationSec}s — ramping chưa đủ connected)`);
+      // timeout an toàn nếu worker không done
+      setTimeout(() => {
+        if (this.phase === 'cooldown') void this.finishRun('natural', this.stopReason || 'cooldown timeout', false);
+      }, COOLDOWN_WAIT_MS);
+    } else if (this.phase === 'ramping' && agg.tick.counters.usersConnected >= this.config.targetUsers) {
       this.setPhase(transition(this.phase, 'steady'));
       ltLog.info(`run ${this.runId}: STEADY — ${agg.tick.counters.usersConnected} connected`);
-    }
-    if (this.phase === 'steady' && elapsedSec >= this.config.durationSec) {
+    } else if (this.phase === 'steady' && elapsedSec >= this.config.durationSec) {
       this.setPhase(transition(this.phase, 'cooldown'));
       this.stopReason = 'duration hết';
       this.farm.broadcast({ type: 'stop', reason: 'duration ended', force: false });

@@ -226,9 +226,11 @@ describe('T7 — integration E2 với mock gateway (DESIGN §9, G7 evidence)', (
           // ramp 20/s: 100 users connect trong ~5s — healthy attempts tích lũy NHANH hơn fail-burst
           // (25 fails ≤ 25% window tại MỌI vị trí broken trong connect order — deterministic AC-1;
           // ramp quá chậm + broken cluster → transient > 30% → flaky, đã verify).
+          // durationMin 1 (60s): đủ cho 5 user cutover (~25-30s, backoff 1→10s) TRƯỚC khi run
+          // thoát ramping theo duration (F-T7-1) → kết thúc finished thật (AC-1).
           rampRate: 20,
           rampMode: 'rate',
-          durationMin: 0.25,
+          durationMin: 1,
           profile: PROFILE_READ,
           gatewayUrl: sc.gateway.url,
           freshAccounts: true,
@@ -245,7 +247,7 @@ describe('T7 — integration E2 với mock gateway (DESIGN §9, G7 evidence)', (
         // E2 KHÔNG trigger: chưa finish, không log E2, không writeRunFinish
         expect(sc.db.writeRunFinishCount).toBe(0);
         expect(spy.e2ErrorLines()).toEqual([]);
-        expect(sc.coordinator.phase).toBe('ramping'); // run còn sống (chưa steady — kẹt ramping pre-existing, xem report)
+        expect(sc.coordinator.phase).toBe('ramping'); // run còn sống — chưa đủ connected (user failed plateau)
 
         // AC-7: user failed không sinh fail thêm — chờ đủ 5 user cutover (cap 5) rồi assert
         await waitUntil(() => (sc.coordinator.lastTick?.counters.usersFailed ?? 0) >= 5, 90_000, '(b) 5 user failed');
@@ -275,12 +277,13 @@ describe('T7 — integration E2 với mock gateway (DESIGN §9, G7 evidence)', (
           expect(row.lastError).not.toContain('\n');
         }
 
-        // Run KHÔNG tự kết thúc (kẹt ramping — pre-existing, không phải lỗi E2) → stop thủ công
-        await sc.coordinator.stop(false);
-        await waitUntil(() => (TERMINAL as readonly string[]).includes(sc.coordinator.phase), 60_000, '(b) dừng');
-        expect(sc.coordinator.phase).toBe('stopped');
-        expect(sc.db.finishStatus).toBe('stopped');
-        expect(sc.coordinator.stopReason ?? '').not.toContain('E2'); // stop là MANUAL, không phải E2
+        // F-T7-1: run thoát ramping theo duration (user failed plateau < target) → cooldown → FINISHED
+        // (AC-1: run kết thúc THẬT — trước fix kẹt ramping vĩnh viễn; thay stop thủ công cũ)
+        await waitUntil(() => (TERMINAL as readonly string[]).includes(sc.coordinator.phase), 120_000, '(b) run kết thúc (F-T7-1)');
+        expect(sc.coordinator.phase).toBe('finished');
+        expect(sc.db.finishStatus).toBe('finished');
+        expect(sc.coordinator.stopReason).toBe('duration hết');
+        expect(sc.coordinator.stopReason ?? '').not.toContain('E2'); // kết thúc NATURAL — không phải auto-stop
       } finally {
         spy.restore();
         await sc.stop();

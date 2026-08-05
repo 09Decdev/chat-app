@@ -13,6 +13,7 @@ import { getEnv } from '../config';
 import { LoadTestCoordinator } from '../coordinator';
 import { WorkerFarm } from '../worker-farm';
 import { ltLog } from '../util';
+import * as authFactory from '../auth-factory';
 import type { DbWriter } from '../db/writer';
 import type { RunConfig, StartRunRequest, WorkerTick } from '../types';
 
@@ -54,6 +55,7 @@ type CoordinatorPriv = {
   runId: string;
   startAt: number;
   config: RunConfig | null;
+  stopReason: string;
   workerTicks: Map<number, unknown>;
   workerHistograms: Map<number, unknown>;
   workerDeathTimes: number[];
@@ -62,10 +64,12 @@ type CoordinatorPriv = {
   prevConnectCumulative: Map<number, { attempts: number; fails: number; byType: Record<string, number> }>;
   windowBuckets: Array<{ ts: number; attempts: number; fails: number; byType: Record<string, number> }>;
   lastWindow: { attempts: number; fails: number; byType: Record<string, number> };
+  redis: unknown;
   handleWorkerDied: (workerId: number) => void;
   finishRun: (kind: 'natural' | 'auto' | 'manual', reason: string, force?: boolean) => Promise<void>;
   aggregateTick: () => Promise<void>;
   resetRunState: () => void;
+  provisionAndLaunch: () => Promise<void>;
 };
 
 function priv(c: LoadTestCoordinator): CoordinatorPriv {
@@ -474,5 +478,41 @@ describe('coordinator — T5: wire window E2 (DESIGN §7)', () => {
     await runTick(10_000, 10_000); // delta 10000/10000 → 100% ≥ 50 attempts → stop
     expect(db.writeRunFinish).toHaveBeenCalledTimes(1);
     expect(db.writeRunFinish).toHaveBeenCalledWith('lt-c1-test', 'error', expect.stringMatching(/^E2:/), expect.anything(), expect.any(Number));
+  });
+
+  it('F-T7-1: ramping duration hết (connected < target — plateau user failed) → cooldown, không kẹt vĩnh viễn', async () => {
+    setup();
+    p.startAt = BASE - 61_000; // elapsedSec = 62 ≥ durationSec 60 ngay tick 1
+    await runTick(0, 0); // connected 100 < target 1000 → trước fix: không path ra khỏi ramping
+    expect(p.phase).toBe('cooldown'); // BLOCKER: trước fix kẹt ramping vĩnh viễn → không bao giờ finished (AC-1)
+    expect(p.stopReason).toBe('duration hết');
+    expect(db.writeRunFinish).not.toHaveBeenCalled(); // cooldown chờ worker done / timeout 10s → finish 'natural'
+  });
+
+  it('R-1: provisioning exception → stopReason sanitize (control chars + JWT không vào DB/report)', async () => {
+    setup();
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
+    const spy = vi.spyOn(authFactory, 'provisionAccounts').mockRejectedValue(new Error(`boom\n[lt][ERROR] forged\n${jwt}`));
+    p.redis = { connect: async () => {} }; // tránh createRedis thật (test không có Redis)
+    try {
+      await p.provisionAndLaunch();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(db.writeRunFinish).toHaveBeenCalledTimes(1);
+    const reason = (db.writeRunFinish as ReturnType<typeof vi.fn>).mock.calls[0][2] as string;
+    expect(reason).toContain('boom'); // message giữ nguyên phần sạch
+    expect(reason).not.toContain('\n'); // control chars strip (F-3)
+    expect(reason).not.toContain('eyJ'); // JWT bị redact (F-5)
+    expect(reason).toContain('[REDACTED]');
+  });
+
+  it('X-1: tick cooldown giữ rate window thật (không ghi 0 vào tick cuối run)', async () => {
+    setup();
+    await runTick(0, 0); // skip-first
+    await runTick(200, 40); // ramping: window 200/40 → 20%
+    p.phase = 'cooldown';
+    await runTick(400, 40); // cooldown: delta 200/0 → window 400/40 → 10% (trước fix: Step A skip → 0)
+    expect(c.lastTick?.rates.connectFailRate).toBe(10);
   });
 });
