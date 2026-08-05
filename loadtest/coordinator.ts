@@ -25,6 +25,8 @@ import type { DbWriter } from './db/writer';
 const TICK_HISTORY_LIMIT = 3600; // 1h @1s (UI-SPEC §4.1)
 const COOLDOWN_WAIT_MS = 10_000; // chờ worker done tối đa
 const WORKER_RESTART_BACKOFF_MS = 2000;
+/** C-2: worker không tick trong N ms = chết im lặng (treo event loop) — 5 tick @1s, khớp farm.checkHeartbeats default. */
+const WORKER_HEARTBEAT_STALE_MS = 5000;
 
 export interface CoordinatorEvents {
   onPhaseChange?: (phase: RunPhase) => void;
@@ -72,6 +74,8 @@ export class LoadTestCoordinator {
   private maxQueue = 0;
   private peakActionsPerSec = 0;
   private actionsPerSecSeries: number[] = [];
+  /** C-2: số restart đang chờ backoff — E3 "toàn bộ worker chết" phải trừ đi để không auto-stop nhầm khi restart đang bay. */
+  private pendingRestarts = 0;
 
   constructor(
     private env: LoadTestEnv,
@@ -80,24 +84,41 @@ export class LoadTestCoordinator {
   ) {
     this.farm = new WorkerFarm({
       onTick: (workerId, msg) => this.onWorkerMessage(workerId, msg),
-      onWorkerDied: (workerId) => {
-        this.workerDeathTimes.push(Date.now());
-        const cutoff = Date.now() - 60_000;
-        while (this.workerDeathTimes.length && this.workerDeathTimes[0] < cutoff) this.workerDeathTimes.shift();
-        ltLog.warn(`coordinator: worker#${workerId} died`);
-        // E3: tự restart worker crash (trừ khi đang stop/finish)
-        if (this.isRunning && !this.finishing && this.phase !== 'cooldown') {
-          void this.farm.restart(workerId, WORKER_RESTART_BACKOFF_MS).catch((err) => {
-            ltLog.error(`restart worker#${workerId} fail: ${String(err)}`);
-          });
-        }
-      },
+      onWorkerDied: (workerId) => this.handleWorkerDied(workerId),
       onWorkerRestarted: (workerId) => ltLog.info(`coordinator: worker#${workerId} restarted`),
     });
   }
 
+  /**
+   * C-1: worker chết — E3 restart worker crash + prune tick. Tách method để test được.
+   * C-2: prune workerTicks/workerHistograms NGAY khi worker chết (trước đây tick cũ cộng dồn mãi mãi).
+   */
+  private handleWorkerDied(workerId: number) {
+    this.workerDeathTimes.push(Date.now());
+    const cutoff = Date.now() - 60_000;
+    while (this.workerDeathTimes.length && this.workerDeathTimes[0] < cutoff) this.workerDeathTimes.shift();
+    this.workerTicks.delete(workerId);
+    this.workerHistograms.delete(workerId);
+    ltLog.warn(`coordinator: worker#${workerId} died`);
+    // E3: tự restart worker crash (trừ khi đang stop/finish)
+    if (this.isRunning && !this.finishing && this.phase !== 'cooldown') {
+      this.pendingRestarts++;
+      void this.farm.restart(workerId, WORKER_RESTART_BACKOFF_MS).catch((err) => {
+        ltLog.error(`restart worker#${workerId} fail: ${String(err)}`);
+      }).finally(() => {
+        this.pendingRestarts--;
+      });
+    }
+  }
+
+  /**
+   * C-1: cooldown/report cũng là "đang chạy" — worker cũ vẫn đang thoát + finalize DB.
+   * Trước đây isRunning=false khi cooldown/report → start() mới spawn đè handle worker cũ
+   * (orphan, không bao giờ bị killAll sau này) + `this.phase = phase` (finishRun cũ) clobber
+   * phase run mới → transition throw → run mới chết + DB row kẹt 'running'.
+   */
   get isRunning(): boolean {
-    return ['provisioning', 'ramping', 'steady'].includes(this.phase);
+    return ['provisioning', 'ramping', 'steady', 'cooldown', 'report'].includes(this.phase);
   }
 
   /** Số worker còn sống — health endpoint (T-07). */
@@ -462,6 +483,22 @@ export class LoadTestCoordinator {
 
     // Auto-stop E2: connect fail > 30%
     if (this.phase === 'ramping' || this.phase === 'steady') {
+      // C-2: heartbeat detect (wiring — trước đây checkHeartbeats là dead code).
+      // Worker im lặng > WORKER_HEARTBEAT_STALE_MS = treo (event loop đứng / IPC chết):
+      // kill → onWorkerDied → restart/E3 đúng như worker crash thật.
+      const stale = this.farm.checkHeartbeats(WORKER_HEARTBEAT_STALE_MS);
+      for (const id of stale) {
+        const w = this.farm.get(id);
+        if (w?.alive) {
+          ltLog.error(`E3: worker#${id} heartbeat timeout (${WORKER_HEARTBEAT_STALE_MS}ms không tick) — kill để restart`);
+          try {
+            w.child.kill('SIGKILL');
+          } catch {
+            // đã chết
+          }
+        }
+      }
+
       let attempts = 0, fails = 0;
       for (const t of ticks) {
         attempts += t.counters.connectAttempts;
@@ -483,6 +520,12 @@ export class LoadTestCoordinator {
       if (this.farm.total > 0 && this.workerDeathTimes.length > this.farm.total * 0.5) {
         ltLog.error(`E3: > 50% worker chết trong 60s (${this.workerDeathTimes.length}/${this.farm.total})`);
         return this.finishRun('auto', 'E3: quá nhiều worker chết', true);
+      }
+      // C-2: TOÀN BỘ worker chết (farm.total===0) + không restart nào đang chờ backoff
+      // → auto-stop NGAY (trước đây guard `total > 0` short-circuit → run kẹt 'ramping' vĩnh viễn, DB row 'running').
+      if (this.farm.total === 0 && this.pendingRestarts === 0 && this.workerDeathTimes.length > 0) {
+        ltLog.error(`E3: toàn bộ ${this.workerDeathTimes.length} worker chết — auto-stop`);
+        return this.finishRun('auto', 'E3: toàn bộ worker chết', true);
       }
     }
   }
@@ -538,6 +581,10 @@ export class LoadTestCoordinator {
    */
   private finishRun(kind: 'natural' | 'auto' | 'manual', reason: string, force = false): Promise<void> {
     if (this.finishing) return this.finishPromise ?? Promise.resolve();
+    // C-3: run đã kết thúc (stopped/finished/error) KHÔNG được finalize lại.
+    // Race: manual stop xong (phase='stopped') rồi E1 auto-stop của provisionAndLaunch vẫn chạy tiếp
+    // → trước đây finishRun lần 2 đổi 'stopped' → 'error' (writeRunFinish 2 lần).
+    if (this.phase === 'stopped' || this.phase === 'finished' || this.phase === 'error') return Promise.resolve();
     this.finishing = true;
     this.finishPromise = this.doFinishRun(kind, reason, force);
     return this.finishPromise;

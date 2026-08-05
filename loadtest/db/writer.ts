@@ -19,6 +19,8 @@ import { LoadtestStore, type MetricSampleRow, type PoolRow } from './store';
 
 const FLUSH_INTERVAL_MS = 30_000; // batch insert mỗi ~30s
 const MAX_PENDING_TICKS = 500; // hoặc flush khi đủ 500 tick
+/** F-1: khi DB log write fail, suppress mọi DB log write trong window này (chống loop tự khuếch đại). */
+const LOG_SUPPRESS_WINDOW_MS = 5000;
 
 export class DbWriter {
   private store: LoadtestStore;
@@ -28,9 +30,17 @@ export class DbWriter {
   private pendingTicks: MetricSampleRow[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushing = false;
+  /** FIX-8 (C-5): promise của flush đang in-flight — final flush AWAIT nó thay vì skip (pool.end() race). */
+  private flushPromise: Promise<void> | null = null;
   private unsubscribeLog: (() => void) | null = null;
   /** B-2 (T-06): finalize barrier — shutdown() await finalizePromise TRƯỚC pool.end(). */
   private finalizePromise: Promise<void> | null = null;
+  /** F-1: guard reentrancy — log write đang chạy thì bỏ qua log mới (lỗi DB → warn → subscriber → insert mới → loop). */
+  private isWritingLog = false;
+  /** F-1: hết hạn suppress DB log write (ms epoch) — sau 1 fail, chờ window rồi mới thử lại. */
+  private logSuppressUntil = 0;
+  /** F-1: số log bị bỏ qua trong window suppress (đếm 1 lần, không spam DB). */
+  private suppressedLogCount = 0;
 
   constructor(store: LoadtestStore, dataDir: string) {
     this.store = store;
@@ -128,8 +138,21 @@ export class DbWriter {
   }
 
   async flushTicks(): Promise<void> {
-    if (this.flushing || !this.pendingTicks.length) return;
+    // FIX-8 (C-5): timer flush đang in-flight → AWAIT nó trước, rồi flush phần còn lại.
+    // Trước đây `if (this.flushing) return` làm final flush bị SKIP → pool.end() (shutdown)
+    // đóng DB giữa chừng flush đang bay → mất ticks cuối cùng (double-fault).
+    if (this.flushing && this.flushPromise) await this.flushPromise;
+    if (!this.pendingTicks.length) return;
     this.flushing = true;
+    const p = this.doFlushTicks().finally(() => {
+      this.flushing = false;
+      this.flushPromise = null;
+    });
+    this.flushPromise = p;
+    await p;
+  }
+
+  private async doFlushTicks(): Promise<void> {
     const batch = this.pendingTicks;
     this.pendingTicks = [];
     try {
@@ -150,7 +173,7 @@ export class DbWriter {
         }
       }
     } finally {
-      this.flushing = false;
+      // flushing/finishPromise được reset ở flushTicks() (await in-flight xong mới reset)
     }
   }
 
@@ -170,8 +193,30 @@ export class DbWriter {
 
   async writeLog(level: string, msg: string): Promise<void> {
     if (!this.currentRunId) return;
-    const r = await this.store.insertLogEvent(this.currentRunId, level, msg);
-    if (!r.ok) ltLog.warn(`[lt][db] insertLogEvent fail (runId=${this.currentRunId}): ${r.error.message}`);
+    // F-1 (reentrancy guard TRÊN đường WRITE): insertLogEvent fail → store warn → subscriber
+    // → writeLog mới → insert mới → warn mới → ... loop vô hạn khi DB down.
+    // Guard này chặn ngay lần re-enter ĐẦU TIÊN (isWritingLog) + suppress window chặn spam sau đó.
+    if (this.isWritingLog) return;
+    if (Date.now() < this.logSuppressUntil) {
+      this.suppressedLogCount++;
+      return;
+    }
+    this.isWritingLog = true;
+    try {
+      const r = await this.store.insertLogEvent(this.currentRunId, level, msg);
+      if (!r.ok) {
+        // Suppress DB log write 5s — chỉ đếm dbWriteFail 1 lần cho chính fail này (store.query đã đếm).
+        this.logSuppressUntil = Date.now() + LOG_SUPPRESS_WINDOW_MS;
+        const suppressed = this.suppressedLogCount;
+        this.suppressedLogCount = 0;
+        ltLog.warn(
+          `[lt][db] insertLogEvent fail (runId=${this.currentRunId}): ${r.error.message}` +
+            ` — suppress DB log ${LOG_SUPPRESS_WINDOW_MS / 1000}s (${suppressed} log khác bị bỏ qua lần trước)`,
+        );
+      }
+    } finally {
+      this.isWritingLog = false;
+    }
   }
 
   // ─── Pool + PoolAccount ──────────────────────────────────────────────────

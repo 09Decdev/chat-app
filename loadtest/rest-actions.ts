@@ -2,7 +2,7 @@
  * MAYogu LoadTest Tool — REST Driver (RD-1..RD-4):
  * Action library: feed, post detail, view, comment create/list, like toggle, chat enqueue/cancel/my-room/queue-count.
  * - Mỗi action: payload factory + validate response + đo latency.
- * - Retry idempotent: tối đa 2 lần cho 5xx/timeout, KHÔNG retry 4xx (RD-2).
+ * - Retry idempotent: tối đa 2 lần cho 5xx/timeout/network (SERVER + NETWORK), KHÔNG retry 4xx (RD-2).
  * - Nội dung prefix `[lt]`, sạch profanity (RD-3).
  */
 
@@ -90,7 +90,9 @@ export class RestDriver {
         body: opts.body,
         timeoutMs: 15_000,
       });
-      if (res.ok || res.failClass !== 'SERVER') return res; // không retry 4xx (RD-2)
+      // F-2: retry CẢ SERVER (5xx) lẫn NETWORK (timeout/ECONNREFUSED/socket error) — 1 lần.
+      // KHÔNG retry 4xx/401/403/429 (client error — retry vô ích, RD-2).
+      if (res.ok || (res.failClass !== 'SERVER' && res.failClass !== 'NETWORK')) return res;
       if (attempt >= 2) return res;
       await new Promise((r) => setTimeout(r, 200 * attempt)); // backoff nhẹ
     }

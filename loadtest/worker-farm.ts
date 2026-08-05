@@ -62,6 +62,17 @@ export class WorkerFarm {
   }
 
   spawn(workerId: number, accounts: TestAccount[]): WorkerHandle {
+    // C-1: spawn đè worker id cũ (start mới khi run cũ chưa teardown xong) → kill handle cũ NGAY,
+    // không để orphan child tiếp tục chạy + không để exit event của nó trigger restart nhầm.
+    const prev = this.workers.get(workerId);
+    if (prev) {
+      try {
+        if (prev.alive) prev.child.kill('SIGKILL');
+      } catch {
+        // đã chết
+      }
+      prev.alive = false;
+    }
     // Parent chạy qua tsx (npm run loadtest:server) → execArgv đã có tsx loader, con kế thừa.
     // Nếu chạy node thuần → thêm --import tsx cho con.
     const hasTsxLoader = process.execArgv.some((a) => a.includes('tsx'));
@@ -92,6 +103,9 @@ export class WorkerFarm {
     });
 
     child.on('exit', (code, signal) => {
+      // C-1: exit của handle đã bị thay thế (spawnAll mới) → BỎ QUA — không trigger onWorkerDied
+      // (nếu không, exit worker CŨ sẽ restart nhầm worker MỚI của run sau — chaos).
+      if (this.workers.get(workerId) !== handle) return;
       handle.alive = false;
       handle.crashed = true;
       this.events.onWorkerDied(workerId, true);

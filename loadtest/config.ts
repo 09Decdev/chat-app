@@ -257,6 +257,16 @@ export function validateEnv(env: LoadTestEnv, opts: { production?: boolean } = {
     err('LOADTEST_REDIS_URL', `phải bắt đầu bằng redis:// hoặc rediss:// (hiện: ${redactUrl(env.redisUrl)}...)`);
   }
 
+  // LOADTEST_CORS_ORIGIN (SEC-1): chặn `*` (mở CORS cho mọi origin = ai cũng gọi API điều khiển
+  // từ browser của họ) + entry rỗng. Mặc định http://localhost:5173 khi KHÔNG set.
+  for (const origin of env.corsOrigins) {
+    if (origin === '*') {
+      err('LOADTEST_CORS_ORIGIN', 'CORS_ORIGIN không được phép là * — chỉ định origin cụ thể');
+    } else if (!origin.trim()) {
+      err('LOADTEST_CORS_ORIGIN', 'CORS_ORIGIN chứa origin rỗng — chỉ định origin cụ thể (ví dụ http://localhost:5173)');
+    }
+  }
+
   return problems;
 }
 

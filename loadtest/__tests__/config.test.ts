@@ -186,6 +186,42 @@ describe('config — validateEnv (T-03 fail-fast)', () => {
     expect(errs.some((p) => p.key === 'LOADTEST_REDIS_URL')).toBe(true);
   });
 
+  it('SEC-1: CORS_ORIGIN=* → validateEnv error (mở CORS mọi origin)', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'false',
+      LOADTEST_DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      LOADTEST_CORS_ORIGIN: '*',
+    });
+    const errs = validateEnv(env, { production: false }).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_CORS_ORIGIN')).toBe(true);
+    expect(errs.find((p) => p.key === 'LOADTEST_CORS_ORIGIN')?.message).toBe(
+      'CORS_ORIGIN không được phép là * — chỉ định origin cụ thể',
+    );
+  });
+
+  it('SEC-1: CORS_ORIGIN chứa origin rỗng → validateEnv error', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'false',
+      LOADTEST_DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      LOADTEST_CORS_ORIGIN: 'http://a.example,http://b.example',
+    });
+    // getEnv filter entry rỗng — ép entry rỗng qua env literal (defense-in-depth của validator)
+    const errs = validateEnv({ ...env, corsOrigins: ['http://a.example', ''] }, { production: false }).filter(
+      (p) => p.severity === 'error',
+    );
+    expect(errs.some((p) => p.key === 'LOADTEST_CORS_ORIGIN')).toBe(true);
+  });
+
+  it('SEC-1: CORS_ORIGIN hợp lệ (nhiều origin cụ thể) → KHÔNG error', () => {
+    const env = getEnv({
+      LOADTEST_DB_REQUIRED: 'false',
+      LOADTEST_DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
+      LOADTEST_CORS_ORIGIN: 'http://a.example,http://b.example',
+    });
+    const errs = validateEnv(env, { production: false }).filter((p) => p.severity === 'error');
+    expect(errs.some((p) => p.key === 'LOADTEST_CORS_ORIGIN')).toBe(false);
+  });
+
   it('OTP/AUTH quá ngắn (< 32) → error', () => {
     const env = getEnv({
       LOADTEST_DB_REQUIRED: 'false',
