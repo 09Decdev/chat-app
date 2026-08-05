@@ -130,6 +130,9 @@ export class LoadTestCoordinator {
 
   /** Chuyển phase + notify + vô hiệu users cache (FIX-7 — dữ liệu run mới không trả cache cũ). */
   private setPhase(next: RunPhase) {
+    if (this.phase !== next) {
+      ltLog.info(`[run] phase → ${next} (trước: ${this.phase})`, { runId: this.runId || undefined });
+    }
     this.phase = next;
     this.usersCache.clear();
     this.events.onPhaseChange?.(next);
@@ -274,10 +277,11 @@ export class LoadTestCoordinator {
       // Kill-switch giữa chừng provisioning → không spawn worker
       if (this.finishing || !['provisioning'].includes(this.phase)) return;
       this.accounts = summary.accounts;
-      ltLog.info(`provisioning done: registered=${summary.registered} loggedIn=${summary.loggedIn} failed=${summary.failed}`);
+      ltLog.info(`provisioning done: registered=${summary.registered} loggedIn=${summary.loggedIn} failed=${summary.failed} (${summary.accounts.length}/${this.config.targetUsers} accounts)`);
 
       this.farm.setRunConfig(this.config);
       this.farm.spawnAll(this.config.workerCount, summary.accounts);
+      ltLog.info(`[run] spawn ${this.config.workerCount} workers × ~${Math.ceil(summary.accounts.length / Math.max(1, this.config.workerCount))} users — bắt đầu ramping`, { runId: this.runId });
       this.setPhase(transition(this.phase, 'ramping'));
       this.broadcastRun();
     } catch (err) {
@@ -478,6 +482,17 @@ export class LoadTestCoordinator {
     this.actionsPerSecSeries.push(aps);
 
     this.pushTick(agg.tick);
+
+    // Periodic summary 15s — dễ theo dõi quy trình run trên terminal/log.
+    if (agg.tick.elapsedSec % 15 === 0 && (this.phase === 'ramping' || this.phase === 'steady')) {
+      const c = agg.tick.counters;
+      ltLog.info(
+        `[run] ${agg.tick.elapsedSec}s: connected=${c.usersConnected} inRoom=${c.usersInRoom} queued=${c.usersQueued} ` +
+          `actions/s=${aps} success=${((c.successTotal / Math.max(1, c.actionsTotal)) * 100).toFixed(0)}% ` +
+          `echo=${((c.echoOk / Math.max(1, c.echoSent)) * 100).toFixed(0)}% workersAlive=${this.farm.alive}/${this.farm.total} rss=${Math.round(process.memoryUsage().rss / 1048576)}MB`,
+        { runId: this.runId },
+      );
+    }
 
     // Phase advance
     if (this.phase === 'ramping' && agg.tick.counters.usersConnected >= this.config.targetUsers) {

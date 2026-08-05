@@ -451,6 +451,7 @@ export class WorkerRuntime {
   private lastCpuUsage = process.cpuUsage();
   private lastCpuAt = Date.now();
   private lastPruneAt = 0;
+  private lastSummaryAt = 0;
   /** F3 — paced connect theo rampRate (user/s chia đều cho worker). */
   private rampStartedAt = 0;
   private connectStarted = 0;
@@ -533,6 +534,9 @@ export class WorkerRuntime {
         const u = this.users[this.connectStarted];
         this.connectStarted++;
         u.connect();
+      }
+      if (this.connectStarted % 100 === 0 && this.connectStarted > 0 && this.connectStarted < this.users.length) {
+        ltLog.info(`worker#${this.workerId}: đã connect ${this.connectStarted}/${this.users.length} users`, { workerId: this.workerId });
       }
     }
 
@@ -677,6 +681,16 @@ export class WorkerRuntime {
     this.counters.usersQueued = queued;
     this.counters.usersInRoom = inRoom;
     this.counters.reconnectCount = reconnect;
+    // Periodic summary 10s/worker — dễ theo dõi worker đang làm gì.
+    if (!final && now - this.lastSummaryAt > 10_000) {
+      this.lastSummaryAt = now;
+      ltLog.info(
+        `worker#${this.workerId}: connected=${connected}/${this.users.length} inRoom=${inRoom} queued=${queued} ` +
+          `reconnect=${reconnect} actions=${this.counters.actionsTotal} success=${this.counters.successTotal} fail=${this.counters.failTotal} ` +
+          `echo=${this.counters.echoOk}/${this.counters.echoSent}`,
+        { workerId: this.workerId },
+      );
+    }
     let cAttempts = 0, cFails = 0;
     for (const u of this.users) {
       cAttempts += u.runtimeStats.connectAttempts;

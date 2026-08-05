@@ -181,6 +181,8 @@ export async function provisionAccounts(
           return summary;
         }
         ltLog.warn('Login DB pool toàn bộ fail — fallback disk pool rồi register mới.');
+      } else {
+        ltLog.info(`[provision] không có pool DB cho gateway=${gateway} target=${config.targetUsers} — thử pool disk`);
       }
     }
 
@@ -199,6 +201,8 @@ export async function provisionAccounts(
         persistPool(env, config.runId, config, summary.accounts);
         return summary;
       }
+    } else if (!config.useExistingAccounts || (config.useExistingAccounts && !existing)) {
+      ltLog.info(`[provision] không có pool disk (target=${config.targetUsers}) — register mới ${config.targetUsers} users`);
     }
   }
 
@@ -379,6 +383,13 @@ async function loginAccounts(
     }
     done++;
     onProgress?.(done, accounts.length);
+    if (done % 100 === 0 || done === accounts.length) {
+      ltLog.info(
+        `[provision] login ${done}/${accounts.length}: loggedIn=${summary.loggedIn} failed=${summary.failed} ` +
+          `errors=${JSON.stringify(Object.entries(summary.errors).slice(0, 3).map(([k, v]) => `${k}:${v}`).join(' '))}`,
+        { runId: config.runId },
+      );
+    }
   });
   summary.results = [...(summary.results ?? []), ...results];
 }
