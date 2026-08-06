@@ -413,6 +413,8 @@ describe('config — getEnv defaults đầy đủ (T-11)', () => {
       LOADTEST_DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
       // Cô lập khỏi file loadtest/.env của máy (có thể set gateway khác) — '' → fallback default.
       LOADTEST_GATEWAY_URL: '',
+      // dataDir máy trỏ ngoài repo (C:/MAYogu_VIASG/secrets — R-3) — '' → fallback default.
+      LOADTEST_DATA_DIR: '',
     });
     expect(env.port).toBe(3401);
     expect(env.host).toBe('127.0.0.1');
