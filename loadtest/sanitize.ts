@@ -8,6 +8,7 @@
  * THUẦN — không IO, không import gì (tránh cycle với logger) — test được đơn lẻ.
  */
 
+// eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 const NEWLINES = /\r?\n/g;
 /** URL credential: `user:pass@host` → `user:***@host` ở BẤT KỲ đâu trong text (F-5;

@@ -11,6 +11,7 @@ describe('sanitizeLogText — control chars (F-3)', () => {
   it('strip \n \r\n và control chars → space, KHÔNG còn dòng mới (chống log injection dòng giả)', () => {
     const out = sanitizeLogText('ok\n[lt][ERROR] forged\r\nnext\x00line\x1fend');
     expect(out).not.toMatch(/\n/);
+    // eslint-disable-next-line no-control-regex
     expect(out).not.toMatch(/[\x00-\x1f\x7f]/);
     expect(out).toBe('ok [lt][ERROR] forged next line end');
   });

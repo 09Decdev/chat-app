@@ -278,6 +278,7 @@ describe('T7 — integration E2 với mock gateway (DESIGN §9, G7 evidence)', (
         for (const row of failed.rows) {
           expect(row.phase).toBe('failed');
           expect(row.lastError).not.toBeNull();
+          // eslint-disable-next-line no-control-regex
           expect(row.lastError).not.toMatch(/[\x00-\x1f\x7f]/);
           expect(row.lastError).not.toContain('\n');
         }
@@ -382,6 +383,7 @@ describe('T7 — integration E2 với mock gateway (DESIGN §9, G7 evidence)', (
         const samples = sc.coordinator.errorSamples.filter((s) => s.action === 'connect');
         expect(samples.length).toBeGreaterThan(0);
         for (const s of samples) {
+          // eslint-disable-next-line no-control-regex
           expect(s.message).not.toMatch(/[\x00-\x1f\x7f]/);
           expect(s.message).not.toContain('\n');
           expect(s.message).not.toContain(JWT);
@@ -401,6 +403,7 @@ describe('T7 — integration E2 với mock gateway (DESIGN §9, G7 evidence)', (
         expect(users.total).toBe(100);
         for (const row of users.rows) {
           expect(row.lastError).not.toBeNull();
+          // eslint-disable-next-line no-control-regex
           expect(row.lastError).not.toMatch(/[\x00-\x1f\x7f]/);
           expect(row.lastError).not.toContain('\n');
           expect(row.lastError).not.toContain(JWT);
