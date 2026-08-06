@@ -51,6 +51,10 @@ describe('socket handshake — KHÔNG token trong query (SEC-3 / F-8)', () => {
     expect(opts.query).toBeUndefined(); // SEC-3: token KHÔNG trong query string
     expect(opts.extraHeaders.Authorization).toBe('Bearer tok-1');
     expect(opts.auth).toEqual({ token: 'tok-1' }); // W3 T-08: auth phủ ws package path
+    // G2: cấu hình kết nối cố định — path chuẩn, websocket-only, reconnect bật (kills 151/152/158)
+    expect(opts.path).toBe('/socket.io/');
+    expect(opts.transports).toEqual(['websocket']);
+    expect(opts.reconnection).toBe(true);
   });
 });
 
@@ -432,6 +436,10 @@ describe('T4 — byType sum + recordError sanitize/cap + lastError sink (P2/F-4/
     expect(tick.errorSamples[0].action).toBe('chat'); // default backward compat
     expect(tick.errorSamples[0].code.length).toBeLessThanOrEqual(64);
     expect(tick.errorSamples[0].message).not.toContain('token=xyz');
+    // G2 (kills 262/263): code/message KHÔNG được drop khỏi lastError/errorSamples
+    expect(u.lastError).toContain('X');
+    expect(u.lastError).toContain('token=[REDACTED]');
+    expect(tick.errorSamples[0].code).toContain('X');
   });
 });
 
@@ -477,6 +485,7 @@ describe('F-T7-2 — kênh B: io server disconnect (gateway reject thật)', () 
     }
     expect(u.reconnectCount).toBe(5); // retry kênh C bình thường (reconnectCount++)
     expect(u.runtimeStats.connectFailsByType.reject).toBe(0);
+    expect(u.phase).toBe('connecting'); // G2: non-terminal disconnect → phase 'connecting' (kills 202)
   });
 
   it('io server disconnect không có connect trước (server drop ngay) vẫn đếm đúng 1 reject-fail', () => {
@@ -555,6 +564,7 @@ describe('VirtualUser — action state + toRow', () => {
     expect(u.messagesEchoed).toBe(1);
     expect(u.currentAction).toBe('idle');
     expect(u.lastActionMs).toBeGreaterThanOrEqual(0);
+    expect(u.lastActionMs).toBeLessThan(60_000); // G2: latency = now - sentAt (kills 255)
   });
 
   it('toRow phản ánh action state + counters đang chạy', () => {
@@ -686,5 +696,270 @@ describe('WorkerRuntime.queryUsers — filter + sort + phaseCounts', () => {
     const res = rt.queryUsers(0, 10, 'b');
     expect(res.total).toBe(2); // filter trả 2
     expect(res.phaseCounts).toEqual({ in_room: 2, queued: 1, idle: 1 }); // nhưng counts = 4 user
+  });
+});
+
+// ─── G2 (hard-gate fix E2) — diệt mutant critical: connect handler state ────
+
+describe('G2 — connect handler: state sau connect + re-join (173/174/179)', () => {
+  it('connect thành công lần đầu: socketConnected true, phase connected, KHÔNG emit chat:join (chưa có room)', () => {
+    const { u, handlers, socket } = connectUser(0, 'g2a@test.local');
+    handlers.get('connect')?.();
+    expect(u.socketConnected).toBe(true); // mutant → false
+    expect(u.phase).toBe('connected'); // mutant → '' (174)
+    expect(socket.emit).not.toHaveBeenCalled(); // mutant 179 true → emit chat:join với roomId null
+  });
+
+  it('reconnect có roomId: phase in_room + emit chat:join (reconcile PRD §1.2)', () => {
+    const { u, handlers, socket } = connectUser(0, 'g2b@test.local');
+    u.roomId = 'room-1';
+    handlers.get('connect')?.();
+    expect(u.phase).toBe('in_room'); // mutant → '' (174)
+    expect(socket.emit).toHaveBeenCalledWith('chat:join', { roomId: 'room-1' }); // mutant 179 false → không emit
+  });
+});
+
+describe('G2 — disconnect sau cutover: phase failed là TERMINAL, không resurrect (186)', () => {
+  it('sau cap-5: disconnect ("io client disconnect") → phase giữ failed, reconnectCount không tăng', () => {
+    const { u, handlers } = connectUser(0, 'g2d@test.local');
+    fireConnectErrors(handlers, 5);
+    expect(u.phase).toBe('failed');
+    handlers.get('disconnect')?.('io client disconnect'); // socket.disconnect() sau cutover bắn reason này
+    expect(u.phase).toBe('failed'); // mutant → 'connecting' (resurrect)
+    expect(u.reconnectCount).toBe(0); // mutant → 1
+    expect(u.runtimeStats.connectFails).toBe(5);
+  });
+
+  it('sau kênh B: io server disconnect lần 2 → không đếm reject thêm (guard chặn)', () => {
+    const { u, handlers } = connectUser(0, 'g2e@test.local');
+    u.onError = vi.fn(); // mở sink errorSamples — 'reject'/'io server disconnect'/'connect' (kills 196 strings)
+    handlers.get('disconnect')?.('io server disconnect');
+    expect(u.phase).toBe('failed');
+    expect(u.runtimeStats.connectFails).toBe(1);
+    expect(u.onError).toHaveBeenCalledWith('reject', 'io server disconnect', 'connect');
+    handlers.get('disconnect')?.('io server disconnect'); // guard phase==='failed' phải chặn
+    expect(u.phase).toBe('failed');
+    expect(u.runtimeStats.connectFails).toBe(1); // mutant → 2
+    expect(u.runtimeStats.connectFailsByType.reject).toBe(1); // mutant → 2
+    expect(u.onError).toHaveBeenCalledTimes(1); // lần 2 bị guard chặn
+  });
+});
+
+describe('G2 — emitTick: byType sum + phase counting (780/785/754/756/757/758/759)', () => {
+  function rtWith(users: VirtualUser[]) {
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: users.length } as RunConfig;
+    rt.users = users;
+    const msgs: unknown[] = [];
+    rt.onMessage = (m) => msgs.push(m);
+    return { rt, msgs };
+  }
+
+  it('2 users mixed byType → connectAttempts/Fails đúng + sum(byType) == connectFails (780/785)', () => {
+    const a = connectUser(0, 'g2suma@test.local');
+    a.u.onError = vi.fn(); // mở sink errorSamples — action 'connect' (kills 215:38 string)
+    a.handlers.get('connect_error')?.({ type: 'TimeoutError', message: 'timeout' } as unknown as Error); // timeout
+    expect(a.u.onError).toHaveBeenCalledWith('timeout', 'timeout', 'connect');
+    a.handlers.get('connect_error')?.(new Error('xhr poll error')); // transport
+    a.handlers.get('connect_error')?.(new Error('connection refused')); // other
+    const b = connectUser(1, 'g2sumb@test.local');
+    b.handlers.get('connect_error')?.(new Error('invalid token: handshake rejected')); // reject
+    b.handlers.get('connect_error')?.(new Error('websocket error')); // reject
+    b.handlers.get('connect_error')?.(new Error('conn refused 1')); // other
+    b.handlers.get('connect_error')?.(new Error('conn refused 2')); // other
+    const { rt, msgs } = rtWith([a.u, b.u]);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const counters = (msgs[0] as { tick: WorkerTick }).tick.counters;
+    expect(counters.connectAttempts).toBe(7); // mutant -= → -1
+    expect(counters.connectFails).toBe(7);
+    expect(counters.connectFailsByType).toEqual({ timeout: 1, transport: 1, reject: 2, other: 3 });
+    const sum = Object.values(counters.connectFailsByType).reduce((x, y) => x + y, 0);
+    expect(sum).toBe(counters.connectFails); // SEC-1 invariant — mutant other -= → -1
+  });
+
+  it('emitTick đếm phase đúng cho mọi phase (754/757/758/759)', () => {
+    const users = [
+      makeUser(0, 'g2p0@test.local', 'in_room'),
+      makeUser(1, 'g2p1@test.local', 'queued'),
+      makeUser(2, 'g2p2@test.local', 'connected'),
+      makeUser(3, 'g2p3@test.local', 'idle'),
+      makeUser(4, 'g2p4@test.local', 'cooldown'),
+      makeUser(5, 'g2p5@test.local', 'failed'),
+      makeUser(6, 'g2p6@test.local', 'connecting'), // không thuộc nhóm active — mutant 759 true mới tính
+    ];
+    users[0].reconnectCount = 2; // sum reconnect chính xác
+    const { rt, msgs } = rtWith(users);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const counters = (msgs[0] as { tick: WorkerTick }).tick.counters;
+    expect(counters.usersInRoom).toBe(1);
+    expect(counters.usersQueued).toBe(1);
+    expect(counters.usersActive).toBe(4); // in_room + connected + idle + cooldown
+    expect(counters.usersFailed).toBe(1);
+    expect(counters.usersConnected).toBe(0); // chưa ai fire connect
+    expect(counters.reconnectCount).toBe(2); // mutant -= → -2
+  });
+
+  it('emitTick: user đã connect → usersConnected = 1 (756)', () => {
+    const { u, handlers } = connectUser(0, 'g2conn@test.local');
+    handlers.get('connect')?.();
+    expect(u.socketConnected).toBe(true);
+    const { rt, msgs } = rtWith([u]);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    expect((msgs[0] as { tick: WorkerTick }).tick.counters.usersConnected).toBe(1); // mutant false → 0
+  });
+
+  it('emitTick: user phase connecting (ngoài nhóm active) KHÔNG đếm active (kills 759 !== mutants)', () => {
+    // mutant `u.phase === 'idle'` → `!==`: connecting không thuộc {connected,idle,cooldown}
+    // lại được đếm qua !B — test chỉ có user connecting để lộ sự khác biệt (không có idle bù trừ).
+    const { rt, msgs } = rtWith([makeUser(0, 'g2connonly@test.local', 'connecting')]);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const counters = (msgs[0] as { tick: WorkerTick }).tick.counters;
+    expect(counters.usersActive).toBe(0); // mutant !== → 1
+    expect(counters.usersConnected).toBe(0);
+  });
+
+  it('emitTick chưa có config → không emit gì (kills 749 guard)', () => {
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.users = [makeUser(0, 'g2noconfig@test.local')];
+    const msgs: unknown[] = [];
+    rt.onMessage = (m) => msgs.push(m);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    expect(msgs).toHaveLength(0); // mutant `if (!this.config)` → false → emit tick nhầm
+  });
+});
+
+describe('G2 — recordError cap errorSamples (745)', () => {
+  it('30 mẫu qua recordError → errorSamples giữ 20, không phình', () => {
+    const u = makeUser(0, 'g2cap@test.local');
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: 1 } as RunConfig;
+    rt.users = [u];
+    const msgs: unknown[] = [];
+    rt.onMessage = (m) => msgs.push(m);
+    for (let i = 0; i < 30; i++) rt.recordError(`C${i}`, 'msg', u);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.errorSamples).toHaveLength(20); // mutant không shift → 30; mutant >= → 19
+    expect(tick.errorSamples[0].code).toBe('C10'); // FIFO shift đúng
+  });
+});
+
+describe('G2 — matching:found / chat:joined / room lifecycle handlers (231/240/266/267)', () => {
+  it('matching:found → phase in_room + roomId + emit chat:join', () => {
+    const { u, handlers, socket } = connectUser(0, 'g2mf@test.local');
+    handlers.get('matching:found')?.({ roomId: 'room-m', roomEndsAt: 1234 });
+    expect(u.phase).toBe('in_room');
+    expect(u.roomId).toBe('room-m');
+    expect(u.roomEndsAt).toBe(1234);
+    expect(socket.emit).toHaveBeenCalledWith('chat:join', { roomId: 'room-m' });
+  });
+
+  it('chat:joined → phase in_room + roomId + roomEndsAt 1234 (kills 243 ?? → &&)', () => {
+    const { u, handlers } = connectUser(0, 'g2cj@test.local');
+    handlers.get('chat:joined')?.({ roomId: 'room-j', roomEndsAt: 1234 });
+    expect(u.phase).toBe('in_room');
+    expect(u.roomId).toBe('room-j');
+    expect(u.roomEndsAt).toBe(1234); // mutant `p.roomEndsAt && null` → null ≠ 1234
+  });
+
+  it('matching:found thiếu roomId → KHÔNG đổi state, KHÔNG emit (kills 232 guard)', () => {
+    const { u, handlers, socket } = connectUser(0, 'g2mfguard@test.local');
+    handlers.get('matching:found')?.({ roomEndsAt: 1234 }); // mutant !p?.roomId → false → vẫn đổi state
+    expect(u.phase).toBe('connecting'); // giữ nguyên — mutant → 'in_room'
+    expect(u.roomId).toBeNull();
+    expect(socket.emit).not.toHaveBeenCalled();
+    // payload undefined → KHÔNG throw (mutant p?.roomId → p.roomId → TypeError)
+    expect(() => handlers.get('matching:found')?.()).not.toThrow();
+  });
+
+  it('chat:joined thiếu roomId → KHÔNG đổi state (kills 241 guard)', () => {
+    const { u, handlers } = connectUser(0, 'g2cjguard@test.local');
+    handlers.get('chat:joined')?.({ roomEndsAt: 1234 });
+    expect(u.phase).toBe('connecting'); // mutant → 'in_room'
+    expect(u.roomId).toBeNull();
+    // payload undefined → KHÔNG throw (mutant p?.roomId → p.roomId → TypeError)
+    expect(() => handlers.get('chat:joined')?.()).not.toThrow();
+  });
+
+  it('roomExpired → leaveRoom: cooldown + outbox sạch + roomId null', () => {
+    const { u, handlers } = connectUser(0, 'g2re@test.local');
+    u.roomId = 'room-x';
+    u.outbox.set('m1', { clientMsgId: 'm1', sentAt: Date.now() });
+    handlers.get('roomExpired')?.();
+    expect(u.phase).toBe('cooldown');
+    expect(u.roomId).toBeNull();
+    expect(u.outbox.size).toBe(0);
+    expect(u.cooldownUntil).toBeGreaterThan(0);
+    expect(u.lastError).toContain('ROOM_EXPIRED');
+  });
+
+  it('chat:room_closed → leaveRoom: cooldown', () => {
+    const { u, handlers } = connectUser(0, 'g2rc@test.local');
+    u.roomId = 'room-y';
+    handlers.get('chat:room_closed')?.();
+    expect(u.phase).toBe('cooldown');
+    expect(u.roomId).toBeNull();
+    expect(u.lastError).toContain('ROOM_CLOSED');
+  });
+});
+
+describe('G2 — echo: id lạ không crash + trim chat:error (251/262)', () => {
+  it('chat:message clientMsgId KHÔNG trong outbox → không throw, không đếm echo (251)', () => {
+    ioMock.mockReset();
+    const handlers = new Map<string, (p?: unknown) => void>();
+    const fakeSocket = {
+      on: vi.fn((evt: string, h: (p?: unknown) => void) => handlers.set(evt, h)),
+      emit: vi.fn(),
+      removeAllListeners: vi.fn(),
+      disconnect: vi.fn(),
+      connected: true,
+    };
+    ioMock.mockReturnValue(fakeSocket);
+    const u = makeUser(0, 'g2echo@test.local');
+    u.connect();
+    handlers.get('chat:message')?.({ clientMsgId: 'khong-ton-tai' }); // mutant if(pending)=true → pending.sentAt throw
+    expect(u.messagesEchoed).toBe(0);
+    // payload undefined → KHÔNG throw (mutant p?.clientMsgId → p.clientMsgId → TypeError)
+    expect(() => handlers.get('chat:message')?.()).not.toThrow();
+    expect(u.messagesEchoed).toBe(0);
+  });
+
+  it('chat:error payload undefined → không throw, fallback code ERROR + message rỗng (kills 262/263 chaining + fallback)', () => {
+    const { u, handlers } = connectUser(0, 'g2ctnone@test.local');
+    u.onError = vi.fn(); // mở sink — template `chat:${p?.code ?? 'ERROR'}` phải evaluate
+    expect(() => handlers.get('chat:error')?.()).not.toThrow(); // mutant p?.code/p?.message → TypeError
+    expect(u.lastError).toBe('chat:error'); // mutant `p?.message ?? ''` → 'Stryker was here!' → khác
+    expect(u.onError).toHaveBeenCalledWith('chat:ERROR', 'chat:error'); // mutant 'ERROR' → '' → khác
+  });
+
+  it('echo thành công → onEchoOk nhận latency thật < 60s (kills 256 +)', () => {
+    const { u, handlers } = connectUser(0, 'g2echo2@test.local');
+    const onEchoOk = vi.fn();
+    u.onEchoOk = onEchoOk;
+    u.outbox.set('m1', { clientMsgId: 'm1', sentAt: Date.now() - 1000 });
+    handlers.get('chat:message')?.({ clientMsgId: 'm1' });
+    expect(u.messagesEchoed).toBe(1);
+    expect(onEchoOk).toHaveBeenCalledTimes(1);
+    expect(onEchoOk.mock.calls[0][0] as number).toBeLessThan(60_000); // mutant + → ~1.7e12 ms
+  });
+
+  it('chat:error message có trailing space → trim đúng (262 MethodExpression trim)', () => {
+    const { u, handlers } = connectUser(0, 'g2ct@test.local');
+    handlers.get('chat:error')?.({ message: 'boom ' });
+    expect(u.lastError).toBe('chat:error  boom'); // mutant bỏ trim → 'chat:error  boom ' (giữ trailing space)
+  });
+});
+
+describe('G2 — classifyConnectError corner inputs (76/78/80)', () => {
+  it('type TimeoutError nhưng message không chứa "timeout" → vẫn timeout (nhánh type-only)', () => {
+    expect(classifyConnectError({ type: 'TimeoutError', message: 'connection refused' })).toBe('timeout');
+  });
+
+  it('message non-string coerce khớp heuristic → KHÔNG classify (other) (78)', () => {
+    expect(classifyConnectError({ message: { toString: () => 'handshake rejected' } })).toBe('other');
+  });
+
+  it('err non-string non-object (Symbol) → KHÔNG throw, trả other (80)', () => {
+    expect(classifyConnectError(Symbol('timeout'))).toBe('other');
   });
 });

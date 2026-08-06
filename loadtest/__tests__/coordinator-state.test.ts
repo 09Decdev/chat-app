@@ -4,7 +4,7 @@ import {
   rollWindow, sumWindow, windowSpanSecs, connectFailRateFromWindow, diffConnectWindowEntry, formatE2Log,
   E2_MIN_ATTEMPTS, E2_WINDOW_MS, E2_MAX_BUCKETS,
 } from '../coordinator-state';
-import type { WorkerTick } from '../types';
+import type { RunPhase, WorkerTick } from '../types';
 
 function fakeTick(workerId: number, over: Partial<WorkerTick['counters']> = {}): WorkerTick {
   return {
@@ -46,6 +46,10 @@ describe('coordinator-state — state machine', () => {
     expect(canTransition('idle', 'steady')).toBe(false);
     expect(canTransition('finished', 'ramping')).toBe(false);
     expect(() => transition('idle', 'steady')).toThrow();
+  });
+
+  it('transition bất hợp lệ throw message đầy đủ (G2 — kills 37)', () => {
+    expect(() => transition('idle', 'steady')).toThrow('Bất hợp lệ: phase idle → steady');
   });
 
   it('endPhaseFromStop: natural → finished, auto → error, manual → stopped', () => {
@@ -381,6 +385,7 @@ describe('coordinator-state — aggregateTicks nhánh sâu (T-11)', () => {
     } as unknown as WorkerTick;
     const agg = aggregateTicks('run1', 1_700_000_001_000, 1, 'steady', [t]);
     expect(agg.actionOk.chat).toBeUndefined();
+    expect(agg.actionFail.chat).toBeUndefined(); // G2: mutant if(fail)=true → NaN (kills 270)
     expect(agg.tick.counters.actionsTotal).toBe(1000);
     expect(agg.tick.latency.p50).toBe(0);
   });
@@ -441,5 +446,102 @@ describe('coordinator-state — aggregateTicks nhánh sâu (T-11)', () => {
   it('peakThroughput: rỗng → 0; chuỗi → max', () => {
     expect(peakThroughput([])).toBe(0);
     expect(peakThroughput([1, 5, 3, 9, 2])).toBe(9);
+  });
+});
+
+// ─── G2 (hard-gate fix E2) — diệt mutant critical còn sống ─────────────────
+
+describe('G2 — TRANSITIONS toàn bộ cạnh + transition happy path (21-25/36)', () => {
+  // Bảng 20 cạnh — khớp source TRANSITIONS; mutant StringLiteral/ArrayDecl ở 21-25
+  // bị diệt vì từng cạnh được assert cụ thể (stop/error path — đường auto-stop E2).
+  const EXPECTED: Record<string, string[]> = {
+    idle: ['provisioning'],
+    provisioning: ['ramping', 'cooldown', 'error', 'stopped'],
+    ramping: ['steady', 'cooldown', 'error', 'stopped'],
+    steady: ['cooldown', 'error', 'stopped'],
+    cooldown: ['report', 'error', 'stopped'],
+    report: ['finished', 'stopped'],
+    finished: [],
+    stopped: [],
+    error: [],
+  };
+
+  it('mọi cạnh hợp lệ đều canTransition true (kills 21-25)', () => {
+    for (const [from, tos] of Object.entries(EXPECTED)) {
+      for (const to of tos) {
+        expect(canTransition(from as RunPhase, to as RunPhase)).toBe(true);
+      }
+    }
+  });
+
+  it('rows rỗng (finished/stopped/error) chặn MỌI phase — kể cả placeholder ArrayDecl của Stryker (kills 26-28)', () => {
+    // Stryker ArrayDeclarationMutator biến `[]` → `['Stryker was here']` (KHÔNG có '!') —
+    // chặn cả placeholder lẫn mọi RunPhase hợp lệ để diệt mutant, không chỉ test cạnh positive.
+    const placeholders = ['provisioning', 'ramping', 'steady', 'cooldown', 'report', 'finished', 'Stryker was here', 'Stryker was here!'] as const;
+    for (const from of ['finished', 'stopped', 'error'] as const) {
+      for (const to of placeholders) {
+        expect(canTransition(from, to as RunPhase)).toBe(false);
+      }
+    }
+  });
+
+  it('transition() happy path trả đúng phase đích, không throw (kills 36)', () => {
+    expect(transition('idle', 'provisioning')).toBe('provisioning');
+    expect(transition('provisioning', 'ramping')).toBe('ramping');
+    expect(transition('provisioning', 'cooldown')).toBe('cooldown');
+    expect(transition('provisioning', 'error')).toBe('error');
+    expect(transition('ramping', 'steady')).toBe('steady');
+    expect(transition('steady', 'cooldown')).toBe('cooldown');
+    expect(transition('cooldown', 'report')).toBe('report');
+    expect(transition('cooldown', 'stopped')).toBe('stopped');
+    expect(transition('report', 'finished')).toBe('finished');
+  });
+});
+
+describe('G2 — aggregateTicks mutant còn sống (240-252/264/270/297/303/331/338/339/237)', () => {
+  it('gộp đủ counter (kills 240/242/243/248/249/250/251/252 -= mutants)', () => {
+    const ticks = [fakeTick(0), fakeTick(1, { actionsTotal: 2000, successTotal: 1950, failTotal: 50, usersConnected: 50, droppedOutbox: 3 })];
+    const agg = aggregateTicks('run1', 1_700_000_001_000, 10, 'steady', ticks);
+    expect(agg.tick.counters.usersCreated).toBe(200);
+    expect(agg.tick.counters.usersActive).toBe(200);
+    expect(agg.tick.counters.usersQueued).toBe(10);
+    expect(agg.tick.counters.echoOk).toBe(180);
+    expect(agg.tick.counters.echoSent).toBe(200);
+    expect(agg.tick.counters.droppedOutbox).toBe(3); // mutant -= → -3
+    expect(agg.tick.counters.reconnectCount).toBe(4);
+    expect(agg.tick.counters.rateLimitedNoEcho).toBe(20);
+    // Histogram gộp 2 tick [5,10,0] → [10,20,0] (giữ giá trị merge; mutant 278 Math.max→Math.min
+    // là dead local — histBucketCount không được đọc sau vòng lặp → equivalent, không kill được)
+    expect(agg.perActionHistograms.chat).toEqual([10, 20, 0]);
+  });
+
+  it('rates/type/server/actionsPerSec đúng (kills 264/303/331/338)', () => {
+    const ticks = [fakeTick(0), fakeTick(1, {})];
+    const agg = aggregateTicks('run1', 1_700_000_001_000, 10, 'steady', ticks);
+    expect(agg.tick.rates.echoRate).toBe(90); // mutant *10 → 9000, /1000 → 0.1, * → 36e6
+    expect(agg.tick.type).toBe('tick'); // mutant → ''
+    expect(agg.tick.server.wsConnections).toBe(0); // mutant server={} → undefined
+    expect(agg.tick.actionsPerSec.comment).toBeUndefined(); // mutant if(v)=true → NaN
+  });
+
+  it('> 10 error codes → topErrors slice 10 (kills 297)', () => {
+    const t = fakeTick(0, {});
+    const errs: Record<string, number> = {};
+    for (let i = 0; i < 12; i++) errs[`E${i}`] = i;
+    t.errors = errs;
+    const agg = aggregateTicks('run1', 1_700_000_001_000, 1, 'steady', [t]);
+    expect(agg.tick.errors).toHaveLength(10); // mutant bỏ slice → 12
+  });
+
+  it('cpuAvg: round(sum/n) với 2 worker + rỗng → 0 (kills 339)', () => {
+    const agg2 = aggregateTicks('run1', 1_700_000_001_000, 1, 'steady', [fakeTick(0, {}), { ...fakeTick(1, {}), cpuPct: 20 }]);
+    expect(agg2.tick.workers.cpuAvg).toBe(30); // mutant cpuSum*cpuN → 120
+    const agg0 = aggregateTicks('run1', 1_700_000_001_000, 1, 'steady', []);
+    expect(agg0.tick.workers.cpuAvg).toBe(0); // mutant cpuN>=0 → NaN
+  });
+
+  it('không tick → errorSamples rỗng (kills 237)', () => {
+    const agg = aggregateTicks('run1', 1_700_000_001_000, 1, 'steady', []);
+    expect(agg.errorSamples).toEqual([]); // mutant → ['Stryker was here']
   });
 });
