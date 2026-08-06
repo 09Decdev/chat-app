@@ -81,7 +81,7 @@ export default function ControlPanelPage() {
   const [preset, setPreset] = useState('10k');
   const [targetUsers, setTargetUsers] = useState(10_000);
   const [rampRate, setRampRate] = useState(200);
-  const [rampMode, setRampMode] = useState<'rate' | 'minutes'>('rate');
+  const [rampMode, setRampMode] = useState<'rate' | 'minutes' | 'burst'>('rate');
   const [durationMin, setDurationMin] = useState(30);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
@@ -277,7 +277,7 @@ export default function ControlPanelPage() {
                   </Select>
                   <Select
                     value={rampMode}
-                    onValueChange={(v) => setRampMode(v as 'rate' | 'minutes')}
+                    onValueChange={(v) => setRampMode(v as 'rate' | 'minutes' | 'burst')}
                   >
                     <SelectTrigger aria-label="Chế độ ramp">
                       <SelectValue />
@@ -285,6 +285,7 @@ export default function ControlPanelPage() {
                     <SelectContent>
                       <SelectItem value="rate">theo tốc độ</SelectItem>
                       <SelectItem value="minutes">trong X phút</SelectItem>
+                      <SelectItem value="burst">toàn bộ cùng lúc</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

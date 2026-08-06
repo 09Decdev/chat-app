@@ -83,7 +83,7 @@ export interface UsersResponse {
 export interface StartRunRequest {
   targetUsers: number;
   rampRate: number;
-  rampMode: 'rate' | 'minutes';
+  rampMode: 'rate' | 'minutes' | 'burst';
   durationMin: number;
   profile: ActionProfile;
   gatewayUrl: string;
@@ -94,7 +94,7 @@ export interface RunConfig {
   runId: string;
   targetUsers: number;
   rampRate: number;
-  rampMode: 'rate' | 'minutes';
+  rampMode: 'rate' | 'minutes' | 'burst';
   durationMin: number;
   durationSec: number;
   profile: ActionProfile;

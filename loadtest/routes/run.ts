@@ -39,7 +39,7 @@ export const runHandlers = {
     const startReq: StartRunRequest = {
       targetUsers: Number(body.targetUsers),
       rampRate: Number(body.rampRate ?? 200),
-      rampMode: (body.rampMode as 'rate' | 'minutes') ?? 'rate',
+      rampMode: (body.rampMode as 'rate' | 'minutes' | 'burst') ?? 'rate',
       durationMin: Number(body.durationMin),
       profile: body.profile as StartRunRequest['profile'],
       gatewayUrl: String(body.gatewayUrl ?? ctx.env.gatewayUrl),

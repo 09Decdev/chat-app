@@ -42,7 +42,9 @@ export interface RunConfig {
   runId: string;
   targetUsers: number; // 10k-100k MVP
   rampRate: number; // user/s connect + action start
-  rampMode: 'rate' | 'minutes';
+  /** 'rate' = connect theo rampRate/s · 'minutes' = rampRate là target/phút (chưa dùng — parse/lưu)
+   *  'burst' (F2) = connect TOÀN BỘ user ngay tick đầu (không pacing). */
+  rampMode: 'rate' | 'minutes' | 'burst';
   durationMin: number; // ≤ 60 (access token 1h)
   durationSec: number; // = durationMin * 60 (đã resolve)
   profile: ActionProfile; // tổng 100
@@ -60,7 +62,7 @@ export interface RunConfig {
 export interface StartRunRequest {
   targetUsers: number;
   rampRate: number;
-  rampMode: 'rate' | 'minutes';
+  rampMode: 'rate' | 'minutes' | 'burst';
   durationMin: number;
   profile: ActionProfile;
   gatewayUrl: string;

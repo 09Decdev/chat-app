@@ -602,13 +602,17 @@ export class WorkerRuntime {
     if (this.stopping) return;
     const now = Date.now();
 
-    // F3: paced connect theo rampRate — mỗi worker nhận rampRate/workerCount user/s
+    // F3: paced connect theo rampRate — mỗi worker nhận rampRate/workerCount user/s.
+    // F2: rampMode='burst' → connect TOÀN BỘ user ngay tick đầu (vòng while sẵn cạn user trong ~1 tick).
     if (this.config && !this.paused) {
       const ratePerWorker = Math.max(
         1,
         this.config.rampRate / Math.max(1, this.config.workerCount),
       );
-      const budget = Math.floor(((now - this.rampStartedAt) / 1000) * ratePerWorker);
+      const budget =
+        this.config.rampMode === 'burst'
+          ? this.users.length
+          : Math.floor(((now - this.rampStartedAt) / 1000) * ratePerWorker);
       while (this.connectStarted < Math.min(budget, this.users.length)) {
         const u = this.users[this.connectStarted];
         this.connectStarted++;
