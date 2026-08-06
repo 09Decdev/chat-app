@@ -9,6 +9,7 @@ import {
   fmtRange,
   fmtRelative,
   CONFIRM_PHRASE,
+  isProductionLikeGateway,
 } from '@/lib/loadtest-format';
 
 describe('fmtNum', () => {
@@ -154,5 +155,26 @@ describe('fmtRelative (FIX-8 — tiếng Việt tự nhiên)', () => {
 describe('CONFIRM_PHRASE', () => {
   it('chuỗi xác nhận chặn cứng (SD-1)', () => {
     expect(CONFIRM_PHRASE).toBe('TÔI XÁC NHẬN');
+  });
+});
+
+describe('isProductionLikeGateway (guard UI production)', () => {
+  it('production mayogu.com → true', () => {
+    expect(isProductionLikeGateway('https://api.mayogu.com')).toBe(true);
+    expect(isProductionLikeGateway('https://mayogu.com')).toBe(true);
+    expect(isProductionLikeGateway('ws://api.mayogu.com')).toBe(true);
+  });
+  it('localhost / 127.0.0.1 / .test → false', () => {
+    expect(isProductionLikeGateway('http://localhost:3000')).toBe(false);
+    expect(isProductionLikeGateway('http://127.0.0.1:3401')).toBe(false);
+    expect(isProductionLikeGateway('ws://test-01.mayogu.test')).toBe(false);
+  });
+  it('hostname lạ không phải local → true (an toàn thái quá)', () => {
+    expect(isProductionLikeGateway('http://192.168.1.10:3000')).toBe(true);
+    expect(isProductionLikeGateway('https://example.com')).toBe(true);
+  });
+  it('URL không parse được → false (không cảnh báo giả — server vẫn gác)', () => {
+    expect(isProductionLikeGateway('')).toBe(false);
+    expect(isProductionLikeGateway('not a url')).toBe(false);
   });
 });

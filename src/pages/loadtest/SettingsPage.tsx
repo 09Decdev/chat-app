@@ -13,6 +13,7 @@ import { loadtestApi, toApiError } from '@/lib/loadtest-api';
 import { useLoadtestStore } from '@/store/loadtest.store';
 import { routes } from '@/lib/env';
 import { cn } from '@/lib/utils';
+import { isProductionLikeGateway } from '@/lib/loadtest-format';
 
 export default function SettingsPage() {
   const navigate = useNavigate();
@@ -119,6 +120,14 @@ export default function SettingsPage() {
                 Thêm
               </Button>
             </div>
+            {isProductionLikeGateway(newUrl) && (
+              <AlertBanner
+                variant="destructive"
+                title="Đây có vẻ là PRODUCTION"
+                description="Thêm gateway thật vào allowlist = cho phép chạy tải lớn lên hệ thống thật. Chạy test gateway trước, hoặc chỉ thêm nếu thực sự cần test production."
+                className="mt-2"
+              />
+            )}
             <p className="mt-2 text-xs text-muted-foreground">URL ngoài danh sách sẽ bị chặn ở Màn 1</p>
           </Card>
 

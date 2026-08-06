@@ -75,3 +75,20 @@ export function fmtRange(startAt: number, endAt: number): string {
 
 /** "TÔI XÁC NHẬN" — chuỗi xác nhận chặn cứng (SD-1). */
 export const CONFIRM_PHRASE = 'TÔI XÁC NHẬN';
+
+/**
+ * Detect gateway target giống PRODUCTION cho UI cảnh báo (guard — KHÔNG chặn
+ * input; chặn cứng vẫn ở server allowlist SD-1). Hostname local
+ * (localhost/127.0.0.1) và TLD .test = test env; MỌI hostname khác
+ * (api.mayogu.com, mayogu.com, IP public, ...) = production-like.
+ * URL không parse được → false (không cảnh báo giả — server vẫn gác).
+ */
+export function isProductionLikeGateway(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    if (host === 'localhost' || host === '127.0.0.1' || host === 'test' || host.endsWith('.test')) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}

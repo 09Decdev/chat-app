@@ -59,6 +59,12 @@ describe('config — env', () => {
     const env = getEnv({ LOADTEST_ALLOWLIST: 'ws://test-01.mayogu.test, http://test-02.mayogu.test/' });
     expect(env.allowlist).toEqual(['http://test-01.mayogu.test', 'http://test-02.mayogu.test']);
   });
+
+  it('default allowlist (rỗng) KHÔNG chứa production api.mayogu.com (guard mặc định)', () => {
+    const env = getEnv({ LOADTEST_ALLOWLIST: '' });
+    expect(env.allowlist).toEqual(['http://localhost:3000']);
+    expect(env.allowlist.some((u) => u.includes('mayogu.com'))).toBe(false);
+  });
 });
 
 describe('config — validateRunRequest (SD-1 + giới hạn an toàn)', () => {
@@ -67,6 +73,16 @@ describe('config — validateRunRequest (SD-1 + giới hạn an toàn)', () => {
     const v = validateRunRequest(baseReq({ gatewayUrl: 'http://production.example.com' }), env);
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toContain('allowlist');
+  });
+
+  it('chặn production api.mayogu.com khi không trong allowlist + message hướng dẫn tường minh', () => {
+    const env = getEnv({ LOADTEST_ALLOWLIST: 'http://localhost:3000' });
+    const v = validateRunRequest(baseReq({ gatewayUrl: 'https://api.mayogu.com' }), env);
+    expect(v.ok).toBe(false);
+    const msg = v.errors.join(' ');
+    expect(msg).toContain('ngoài allowlist');
+    expect(msg).toContain('LOADTEST_ALLOWLIST');
+    expect(msg).toContain('một cách tường minh');
   });
 
   it('chấp nhận gateway trong allowlist', () => {

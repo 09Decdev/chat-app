@@ -293,7 +293,8 @@ export function validateRunRequest(req: StartRunRequest, env: LoadTestEnv): Vali
   if (!gateway) errors.push('gatewayUrl bắt buộc');
   else if (!env.allowlist.includes(gateway)) {
     errors.push(
-      `Gateway ${gateway} KHÔNG nằm trong allowlist test. Chỉ được chạy: ${env.allowlist.join(', ')}`,
+      `gatewayUrl ${gateway} ngoài allowlist — chạy production phải thêm vào LOADTEST_ALLOWLIST một cách tường minh. ` +
+        `Chỉ được chạy: ${env.allowlist.join(', ')}`,
     );
   }
 

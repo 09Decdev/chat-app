@@ -21,7 +21,7 @@ import {
 import { StartRunConfirmDialog, StopRunConfirmDialog } from '@/components/loadtest/confirm-dialogs';
 import { useLoadtestStore } from '@/store/loadtest.store';
 import { routes } from '@/lib/env';
-import { fmtClock, fmtNum } from '@/lib/loadtest-format';
+import { fmtClock, fmtNum, isProductionLikeGateway } from '@/lib/loadtest-format';
 import { TERMINAL_PHASES } from '@/types/loadtest';
 import type { StartRunRequest } from '@/types/loadtest';
 import { cn } from '@/lib/utils';
@@ -108,6 +108,7 @@ export default function ControlPanelPage() {
   const formLocked = phase !== 'idle';
 
   const gatewayUrl = config?.gatewayUrl ?? 'ws://test-01.mayogu.test';
+  const productionTarget = isProductionLikeGateway(gatewayUrl);
   const allowlistFail = !!config && !config.allowlist.includes(gatewayUrl.replace(/^ws:\/\//, 'http://'));
   const hugePreset = preset === '1M' || preset === '10M';
   const targetInvalid = !Number.isInteger(targetUsers) || targetUsers < 1000;
@@ -329,6 +330,14 @@ export default function ControlPanelPage() {
 
         {/* Cột phải: cảnh báo + ước lượng + tổng quan */}
         <div className="space-y-4 lg:col-span-8">
+          {productionTarget && (
+            <AlertBanner
+              variant="destructive"
+              title="Đây có vẻ là PRODUCTION"
+              description="Tải lớn sẽ làm sập gateway thật. Chạy test gateway trước, hoặc thêm tường minh vào LOADTEST_ALLOWLIST."
+              action={{ label: 'Mở Settings >', onClick: () => navigate(routes.loadtestSettings) }}
+            />
+          )}
           {allowlistFail && (
             <AlertBanner
               variant="destructive"
