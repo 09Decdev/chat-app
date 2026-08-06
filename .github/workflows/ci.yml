@@ -1,0 +1,136 @@
+# CI — T-10 (DevSecOps). Gate G-4 / G-5 (type/lint/build + secret-scan) per
+# PLAN-prod-refactor (Q-5): matrix ubuntu-latest + windows-latest, gitleaks.
+#
+# NOTE — repo hiện CHƯA có GitHub remote (Q-1). Khi push lên GitHub lần đầu:
+#   - CI chạy tự động trên push + pull_request (mọi branch).
+#   - Nếu matrix Windows fail ở step gitleaks (install path — action tự tải
+#     binary theo platform), ghi nhận tại README "CI & quality".
+#   - Nếu repo thuộc GitHub **Organization**: thêm secret `GITLEAKS_LICENSE`
+#     (gitleaks-action bắt buộc cho org, không cần cho user account).
+#
+# Vì sao Postgres dùng `docker run` thay vì block `services:`:
+#   GitHub Actions service containers CHỈ hỗ trợ Linux runner — đặt `services:`
+#   ở job matrix có windows-latest làm job Windows fail ngay khi khởi tạo
+#   (verified: docs GitHub + community discussion #25049). `docker run` trên
+#   runner ubuntu chạy đúng postgres:16 tương đương service container, và giữ
+#   được matrix 2 OS. Windows leg không có Postgres → integration tests skip
+#   (pattern skip-if-no-DB, probe 3s).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  ci:
+    name: CI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Integration-test DB URLs (loadtest/__tests__/store.test.ts +
+      # migrate.test.ts + api-server.test.ts đọc 3 env này — xem skip logic
+      # đầu mỗi file).
+      # Ubuntu leg: Postgres 16 container ở localhost:5432 (step bên dưới).
+      # Windows leg: không có Postgres → probe connect fail nhanh (ECONNREFUSED
+      # localhost) → suite tự skip, không red.
+      LOADTEST_TEST_DATABASE_URL: postgresql://appuser:secret@localhost:5432/loadtest_test
+      LOADTEST_TEST_MIGRATE_DATABASE_URL: postgresql://appuser:secret@localhost:5432/loadtest_test_migrate
+      LOADTEST_TEST_API_DATABASE_URL: postgresql://appuser:secret@localhost:5432/loadtest_test_api
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks-action scan theo commit range (--log-opts) — cần full history.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Secret scan (G-5) — gitleaks/gitleaks-action@v2 tự tải binary gitleaks
+      # (không dùng npm wrapper — không ổn định trên Windows) và tự đọc
+      # `.gitleaks.toml` ở repo root (allowlist test fixtures).
+      # Lưu ý: action này KHÔNG có input `fail-on-any` (verified action.yml v2 —
+      # không có inputs); nó hard-fail job trên MỌI event type khi phát hiện
+      # leak (exit code 2 → process.exit(1)) — đúng ý định gate.
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Chỉ bắt buộc cho GitHub Organization — user account không cần.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      # ── Postgres 16 (ubuntu leg) — integration tests chạy THẬT ────────────
+      - name: Start Postgres 16 (ubuntu leg only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker run -d --name postgres-ci \
+            -e POSTGRES_USER=appuser \
+            -e POSTGRES_PASSWORD=secret \
+            -e POSTGRES_DB=postgres \
+            -p 5432:5432 \
+            postgres:16
+          for i in $(seq 1 30); do
+            if docker exec postgres-ci pg_isready -U appuser -d postgres >/dev/null 2>&1; then
+              echo "postgres ready (after $((i * 2))s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres not ready in time" >&2
+          docker logs postgres-ci
+          exit 1
+
+      # postgres image chỉ tự tạo 1 DB (POSTGRES_DB) — tạo 3 DB test riêng
+      # (store.test.ts → loadtest_test, migrate.test.ts → loadtest_test_migrate,
+      # api-server.test.ts → loadtest_test_api).
+      - name: Create test databases
+        if: runner.os == 'Linux'
+        run: node .github/ci/init-test-dbs.mjs
+
+      # ── Quality gates (G-4) ───────────────────────────────────────────────
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Typecheck (root)
+        run: npm run typecheck
+
+      - name: Typecheck (loadtest)
+        run: npm run loadtest:typecheck
+
+      - name: Build
+        run: npm run build
+
+      # G-1 — integration tests chạy thật trên ubuntu (service Postgres);
+      # windows skip-if-no-DB (không red).
+      - name: Test loadtest
+        run: npm run loadtest:test
+
+      # Workspace vitest (loadtest + frontend — T-09). Không có `--project`
+      # filter vì vitest.workspace.ts không đặt tên project (chỉ path config).
+      - name: "Test (workspace: loadtest + frontend)"
+        run: npm run test
+
+      # Coverage frontend (--config vitest.config.ts → chỉ project frontend;
+      # thresholds 70% cho format helpers + store selectors — G-1 W3).
+      - name: Coverage (frontend)
+        run: npm run test:coverage
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage/
+          if-no-files-found: ignore

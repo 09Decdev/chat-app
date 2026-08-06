@@ -1,0 +1,136 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`reportToMarkdown — snapshot toàn bộ output (diệt string mutant) > markdown với status error + stopReason + bottleneck + NO_POST_FIXTURE (snapshot) 1`] = `
+"# MAYogu LoadTest Report — lt-test1
+
+**Status**: error — E1: register fail 60% > 50%
+**Thời gian**: 2023-11-14T22:13:20.000Z → 2023-11-14T22:13:22.000Z (thực tế 0m 2s)
+
+## Summary
+
+| Metric | Giá trị |
+|---|---|
+| User đã tạo | 10,000 |
+| Connect max | 10,000 |
+| Active max | 9,500 |
+| Actions | 100,000 |
+| Success rate | 99% |
+| Throughput avg / peak | 50000/s · 900/s |
+| Chat echo rate | 95% (950/1000) |
+| Queue peak | 300 |
+
+## Không có post fixture — bỏ qua bước đọc feed
+
+- \`NO_POST_FIXTURE\`: 5 lần — feed trống/chưa có post, các action \`read\`/\`view\`/\`comment\`/\`like\` bị bỏ qua. Seed nội dung trước khi chạy run.
+
+## Latency theo action
+
+| action | p50 | p95 | p99 | count |
+|---|---|---|---|---|
+| chat | 98ms | 98ms | 98ms | 100 |
+
+## Bottleneck candidates
+
+Không phát hiện bottleneck vượt ngưỡng.
+
+## Top errors
+
+- \`NO_POST_FIXTURE\`: 5
+
+## Cấu hình run
+
+\`\`\`json
+{
+  "runId": "lt-test1",
+  "targetUsers": 10000,
+  "rampRate": 200,
+  "rampMode": "rate",
+  "durationMin": 10,
+  "durationSec": 600,
+  "profile": {
+    "chat": 40,
+    "read": 30,
+    "comment": 20,
+    "like": 10,
+    "view": 0
+  },
+  "gatewayUrl": "http://localhost:3000",
+  "workerCount": 4,
+  "socketsPerWorker": 2500,
+  "registerRamp": 100,
+  "useExistingAccounts": false,
+  "freshAccounts": false,
+  "seed": 42,
+  "createdAt": 1700000000000
+}
+\`\`\`
+"
+`;
+
+exports[`reportToMarkdown — snapshot toàn bộ output (diệt string mutant) > markdown đầy đủ ổn định (snapshot) 1`] = `
+"# MAYogu LoadTest Report — lt-test1
+
+**Status**: finished
+**Thời gian**: 2023-11-14T22:13:20.000Z → 2023-11-14T22:13:22.000Z (thực tế 0m 2s)
+
+## Summary
+
+| Metric | Giá trị |
+|---|---|
+| User đã tạo | 10,000 |
+| Connect max | 10,000 |
+| Active max | 9,500 |
+| Actions | 100,000 |
+| Success rate | 99% |
+| Throughput avg / peak | 50000/s · 900/s |
+| Chat echo rate | 95% (950/1000) |
+| Queue peak | 300 |
+
+## Latency theo action
+
+| action | p50 | p95 | p99 | count |
+|---|---|---|---|---|
+| chat | 98ms | 98ms | 98ms | 100 |
+
+## Bottleneck candidates
+
+Không phát hiện bottleneck vượt ngưỡng.
+
+## Top errors
+
+- \`HTTP_429\`: 20
+
+## Cấu hình run
+
+\`\`\`json
+{
+  "runId": "lt-test1",
+  "targetUsers": 10000,
+  "rampRate": 200,
+  "rampMode": "rate",
+  "durationMin": 10,
+  "durationSec": 600,
+  "profile": {
+    "chat": 40,
+    "read": 30,
+    "comment": 20,
+    "like": 10,
+    "view": 0
+  },
+  "gatewayUrl": "http://localhost:3000",
+  "workerCount": 4,
+  "socketsPerWorker": 2500,
+  "registerRamp": 100,
+  "useExistingAccounts": false,
+  "freshAccounts": false,
+  "seed": 42,
+  "createdAt": 1700000000000
+}
+\`\`\`
+"
+`;
+
+exports[`ticksToCsv — snapshot (T-11) > CSV đầy đủ header + row ổn định (snapshot) 1`] = `
+"ts,phase,elapsedSec,usersCreated,usersConnected,usersActive,usersQueued,usersInRoom,actionsTotal,successTotal,failTotal,echoOk,echoSent,queueCount,roomCount,successRate,echoRate,p50Ms,p95Ms,p99Ms,aliveWorkers,cpuAvg,wsConnections
+1700000000000,steady,0,10000,10000,9500,100,8000,100000,99000,1000,950,1000,200,1333,99,95,40,100,300,4,50,10000"
+`;
