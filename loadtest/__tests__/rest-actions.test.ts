@@ -135,3 +135,69 @@ describe('rest-actions — community scoping (LOADTEST_COMMUNITY_ID)', () => {
     expect(r.ok).toBe(true);
   });
 });
+
+describe('rest-actions — post action (F3: join community PUBLIC trước, rồi POST)', () => {
+  it('createPost: join 1 lần + POST /content-service/post đúng payload ([lt] content, CLASSIC)', async () => {
+    const spy = vi.spyOn(httpModule, 'requestJson')
+      .mockResolvedValueOnce(result({ ok: true, status: 200, failClass: 'OK', data: { id: 'member-1' } }))
+      .mockResolvedValueOnce(result({ ok: true, status: 201, failClass: 'OK', data: { id: 'post-1' } }));
+    const driver = new RestDriver('http://localhost:3000', getEnv({ LOADTEST_COMMUNITY_ID: 'c-1' }));
+
+    const r = await driver.createPost('tok', 7);
+    expect(r.ok).toBe(true);
+    expect(r.code).toBe('');
+    // 1) join community-public với đúng communityId
+    expect(spy).toHaveBeenNthCalledWith(
+      1,
+      'http://localhost:3000',
+      '/user-community/join-request/community-public',
+      expect.objectContaining({ method: 'POST', body: { communityId: 'c-1' } }),
+    );
+    // 2) POST post đúng payload
+    const postCall = spy.mock.calls[1];
+    expect(postCall[1]).toBe('/content-service/post');
+    const opts = postCall[2] as { method: string; body: { communityId: string; content: string; layoutType: string } };
+    expect(opts.method).toBe('POST');
+    expect(opts.body.communityId).toBe('c-1');
+    expect(opts.body.content.startsWith('[lt]')).toBe(true);
+    expect(opts.body.content.length).toBeLessThanOrEqual(100_000); // CreatePostDto
+    expect(opts.body.layoutType).toBe('CLASSIC');
+  });
+
+  it('join chỉ 1 lần/user: đã member (400 "already a member") → coi như OK, không join lại', async () => {
+    const spy = vi.spyOn(httpModule, 'requestJson')
+      .mockResolvedValueOnce(result({ status: 400, failClass: 'CLIENT', code: '2001', message: 'You are already a member of this group' }))
+      .mockResolvedValue(result({ ok: true, status: 201, failClass: 'OK' }));
+    const driver = new RestDriver('http://localhost:3000', getEnv({ LOADTEST_COMMUNITY_ID: 'c-1' }));
+
+    const r1 = await driver.createPost('tok', 1);
+    const r2 = await driver.createPost('tok', 2);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    const joinCalls = spy.mock.calls.filter(([, p]) => String(p).includes('join-request'));
+    expect(joinCalls).toHaveLength(1); // token đã trong joinedCommunity — lần 2 không join lại
+    expect(spy.mock.calls.filter(([, p]) => String(p).includes('/content-service/post')).length).toBe(2);
+  });
+
+  it('join fail (community không PUBLIC) → vẫn thử post; 403 → fail đếm được, không crash', async () => {
+    vi.spyOn(httpModule, 'requestJson')
+      .mockResolvedValueOnce(result({ status: 400, failClass: 'CLIENT', code: 'BAD_REQUEST', message: 'community accessType is not PUBLIC' }))
+      .mockResolvedValue(result({ status: 403, failClass: 'FORBIDDEN', code: 'PERMISSION_ERROR', message: 'You do not have permission!' }));
+    const driver = new RestDriver('http://localhost:3000', getEnv({ LOADTEST_COMMUNITY_ID: 'c-1' }));
+
+    const r = await driver.createPost('tok', 1);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('PERMISSION_ERROR');
+    expect(r.failClass).toBe('FORBIDDEN');
+  });
+
+  it('chưa set LOADTEST_COMMUNITY_ID → NO_COMMUNITY_ID, KHÔNG gọi join/post', async () => {
+    const spy = vi.spyOn(httpModule, 'requestJson');
+    const driver = new RestDriver('http://localhost:3000', getEnv({ LOADTEST_COMMUNITY_ID: '' }));
+
+    const r = await driver.createPost('tok', 1);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('NO_COMMUNITY_ID');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});

@@ -8,7 +8,7 @@
 
 import type { LoadTestEnv } from './config';
 import { requestJson, type HttpResult } from './http';
-import { genCommentContent, ltLog, normalizeUrl } from './util';
+import { genCommentContent, genPostContent, ltLog, normalizeUrl } from './util';
 
 export interface ActionResult {
   ok: boolean;
@@ -114,13 +114,19 @@ export class RestDriver {
   private postIdCache: PostIdCache;
   private lastLikeAt = new Map<string, number>(); // key `${action}:${id}` — like toggle ≥30s/cặp (AC4.4)
   private noFixtureLogged = false;
+  private readonly communityId: string;
+  /** Token đã join community PUBLIC (F3) — join 1 lần/user, nhớ state (bỏ qua MEMBER_IN_GROUP). */
+  private joinedCommunity = new Set<string>();
+  private joinWarned = false;
+  private noCommunityLogged = false;
 
   constructor(
     private gateway: string,
-    _env: LoadTestEnv,
+    env: LoadTestEnv,
   ) {
     this.gateway = normalizeUrl(gateway);
-    this.postIdCache = new PostIdCache(_env.communityId);
+    this.communityId = env.communityId;
+    this.postIdCache = new PostIdCache(env.communityId);
   }
 
   /** T-07/S-12: NO_POST_FIXTURE — log 1 lần để không lặp spam; khách hàng đọc rõ. */
@@ -215,6 +221,48 @@ export class RestDriver {
     const res = await this.exec(token, `/content-service/like/post/${postId}`, { method: 'POST', body: {} });
     if (res.ok || res.failClass !== 'SERVER') this.lastLikeAt.set(key, Date.now());
     return this.action(res, 'like');
+  }
+
+  // ─── Post action (F3) — join community PUBLIC trước, rồi POST /content-service/post ───
+
+  /** Join community 1 lần/user (auto-accept — joinRequest.service.ts joinCommunityPublic).
+   *  Đã là member (MEMBER_IN_GROUP 400) coi như OK — idempotent. Join fail → post sẽ 403 (đếm fail, không crash). */
+  private async ensureJoined(token: string): Promise<boolean> {
+    if (this.joinedCommunity.has(token)) return true;
+    if (!this.communityId) return false;
+    const res = await this.exec(token, '/user-community/join-request/community-public', {
+      method: 'POST',
+      body: { communityId: this.communityId },
+    });
+    if (res.ok || /already a member/i.test(res.message)) {
+      this.joinedCommunity.add(token);
+      return true;
+    }
+    return false;
+  }
+
+  /** POST bài viết test — pacing chậm ~20s/user ở worker (tránh write storm). */
+  async createPost(token: string, userIndex: number): Promise<ActionResult> {
+    if (!this.communityId) {
+      if (!this.noCommunityLogged) {
+        this.noCommunityLogged = true;
+        ltLog.warn('Chưa set LOADTEST_COMMUNITY_ID — post action sẽ fail (NO_COMMUNITY_ID). Set env trước khi bật post.');
+      }
+      return { ok: false, latencyMs: 0, code: 'NO_COMMUNITY_ID', failClass: 'CLIENT' };
+    }
+    const joined = await this.ensureJoined(token);
+    if (!joined && !this.joinWarned) {
+      this.joinWarned = true;
+      ltLog.warn(
+        `Không join được community ${this.communityId} (kiểm tra accessType PUBLIC / maxMembers / token) — ` +
+          'post có thể 403. Fail sẽ được đếm, run không dừng.',
+      );
+    }
+    const res = await this.exec(token, '/content-service/post', {
+      method: 'POST',
+      body: { communityId: this.communityId, content: genPostContent(userIndex), layoutType: 'CLASSIC' },
+    });
+    return this.action(res, 'post');
   }
 
   // ─── Chat REST (aux — đa số chat qua socket farm) ─────────────────────

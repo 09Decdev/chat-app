@@ -72,7 +72,7 @@ describe('loadtest.store — constants + selectors', () => {
   });
 
   it('DEFAULT_PROFILE đúng shape + tổng 100', () => {
-    expect(DEFAULT_PROFILE).toEqual({ chat: 40, read: 30, comment: 20, like: 10, view: 0 });
+    expect(DEFAULT_PROFILE).toEqual({ chat: 40, read: 30, comment: 20, like: 10, view: 0, post: 0 });
     const total = Object.values(DEFAULT_PROFILE).reduce((a, b) => a + b, 0);
     expect(total).toBe(100);
   });

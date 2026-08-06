@@ -13,6 +13,7 @@ export const CHART_COLORS = {
   6: 'hsl(var(--chart-6))',
   7: 'hsl(var(--chart-7))',
   8: 'hsl(var(--chart-8))',
+  9: 'hsl(var(--chart-9))',
 } as const;
 
 /**
@@ -39,6 +40,7 @@ export const ACTION_COLORS: Record<ActionType, string> = {
   comment: CHART_COLORS[3],
   like: CHART_COLORS[4],
   view: CHART_COLORS[5],
+  post: CHART_COLORS[9],
   topic: CHART_COLORS[6],
   typing: CHART_COLORS[7],
   vote_kick: CHART_COLORS[8],

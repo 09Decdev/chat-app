@@ -19,7 +19,7 @@ import type {
 import { TERMINAL_PHASES } from '@/types/loadtest';
 
 export const RING_CAPACITY = 3600; // 1 giờ @1s — UI-SPEC 4.1
-export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0 };
+export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0, post: 0 };
 
 interface LoadtestState {
   // config (server)

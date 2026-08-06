@@ -3,7 +3,7 @@
  * KHÔNG tự đặt tên field khác — dùng đúng field/tên backend trả về.
  */
 
-export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing' | 'topic' | 'vote_kick';
+export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick';
 
 /** Loại lỗi connect — khớp loadtest/types.ts ConnectFailType (DESIGN §2.1, T1). */
 export type ConnectFailType = 'timeout' | 'transport' | 'reject' | 'other';
@@ -36,13 +36,14 @@ export const ACTION_LABELS: Record<ActionType, string> = {
   comment: 'comment',
   like: 'like',
   view: 'view',
+  post: 'post',
   typing: 'typing',
   topic: 'topic',
   vote_kick: 'vote_kick',
 };
 
 /** Trạng thái action hiện tại của 1 virtual user — khớp loadtest/types.ts (2-chiều contract). */
-export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing' | 'topic' | 'idle';
+export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'idle';
 
 /** Phase lifecycle 1 virtual user — khớp loadtest/types.ts (2-chiều contract). */
 export type UserPhase = 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';

@@ -37,6 +37,8 @@ const REST_READ_INTERVAL_MS = 3000;
 const REST_COMMENT_INTERVAL_MS = 10_000;
 const REST_LIKE_INTERVAL_MS = 15_000;
 const REST_VIEW_INTERVAL_MS = 5000;
+/** F3: post chậm ~20s/user — tránh write storm vào content-service (research: post là write thật). */
+const REST_POST_INTERVAL_MS = 20_000;
 /** Cap số loại error code riêng biệt (S-4 R2): gateway bơm N code lạ → bucket 'OTHER' (chống map vô hạn). */
 const MAX_ERROR_CODES = 20;
 
@@ -332,6 +334,7 @@ export class VirtualUser {
       case 'comment': return jitter(REST_COMMENT_INTERVAL_MS);
       case 'like': return jitter(REST_LIKE_INTERVAL_MS);
       case 'view': return jitter(REST_VIEW_INTERVAL_MS);
+      case 'post': return jitter(REST_POST_INTERVAL_MS);
       default: return jitter(REST_READ_INTERVAL_MS * 2); // chat user khi cooldown đọc nhẹ
     }
   }
@@ -416,6 +419,14 @@ export class VirtualUser {
         res = await driver.viewPost(this.account.accessToken);
         this.markActionEnd('view', res.latencyMs);
         worker.recordResult('view', res, this);
+        return;
+      }
+      case 'post': {
+        // F3: join community PUBLIC 1 lần (RestDriver nhớ state) rồi đăng bài — pacing 20s/user.
+        this.markActionStart('post');
+        res = await driver.createPost(this.account.accessToken, this.index);
+        this.markActionEnd('post', res.latencyMs);
+        worker.recordResult('post', res, this);
         return;
       }
     }

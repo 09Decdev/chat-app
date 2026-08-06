@@ -606,7 +606,7 @@ describe('config — buildRunConfig nhánh (T-11)', () => {
   it('profile merge với DEFAULT_PROFILE (field thiếu → default)', () => {
     const env = getEnv({});
     const cfg = buildRunConfig(baseReq({ profile: { chat: 100, read: 0, comment: 0, like: 0, view: 0 } }), env);
-    expect(cfg.profile).toEqual({ chat: 100, read: 0, comment: 0, like: 0, view: 0 });
+    expect(cfg.profile).toEqual({ chat: 100, read: 0, comment: 0, like: 0, view: 0, post: 0 });
   });
 
   it('seed + createdAt là số', () => {
@@ -691,6 +691,6 @@ describe('config — misc (T-11)', () => {
     expect(PRESETS.find((p) => p.id === '1M')?.requiresCluster).toBe(true);
     expect(PRESETS.find((p) => p.id === '10M')?.requiresCluster).toBe(true);
     expect(PRESETS.find((p) => p.id === '10k')?.targetUsers).toBe(10_000);
-    expect(DEFAULT_PROFILE).toEqual({ chat: 40, read: 30, comment: 20, like: 10, view: 0 });
+    expect(DEFAULT_PROFILE).toEqual({ chat: 40, read: 30, comment: 20, like: 10, view: 0, post: 0 });
   });
 });

@@ -104,6 +104,13 @@ const COMMENT_LINES = [
   'Cảm ơn đã chia sẻ, đọc rất vui.',
   'Mình học được nhiều điều từ bài này.',
 ];
+const POST_LINES = [
+  'Chia sẻ bài viết loadtest — nội dung sạch, không nhạy cảm. #loadtest',
+  'Bài viết kiểm thử hiệu năng, vui lòng bỏ qua. #loadtest',
+  'Cập nhật trạng thái từ tài khoản test. #loadtest',
+  'Ghi chú ngắn từ kịch bản tải. #loadtest',
+  'Bài viết đo hiệu năng hệ thống. #loadtest',
+];
 
 export function genChatContent(index: number): string {
   const line = CHAT_LINES[index % CHAT_LINES.length];
@@ -112,6 +119,12 @@ export function genChatContent(index: number): string {
 
 export function genCommentContent(index: number): string {
   const line = COMMENT_LINES[index % COMMENT_LINES.length];
+  return `[lt] ${line} #${index}`;
+}
+
+/** Nội dung post test (F3): prefix [lt], sạch profanity, ≤ 100k (CreatePostDto). */
+export function genPostContent(index: number): string {
+  const line = POST_LINES[index % POST_LINES.length];
   return `[lt] ${line} #${index}`;
 }
 

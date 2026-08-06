@@ -4,12 +4,12 @@
  */
 
 /** Action types đo trong kịch bản (ActionType trong UI-SPEC tick). */
-export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing' | 'topic' | 'vote_kick';
+export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick';
 
-export const ACTION_TYPES: ActionType[] = ['chat', 'read', 'comment', 'like', 'view', 'typing', 'topic', 'vote_kick'];
+export const ACTION_TYPES: ActionType[] = ['chat', 'read', 'comment', 'like', 'view', 'post', 'typing', 'topic', 'vote_kick'];
 
 /** Trạng thái action hiện tại của 1 virtual user ('idle' = không làm gì, null = chưa hành động). */
-export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'typing' | 'topic' | 'idle';
+export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'idle';
 
 /** Phase lifecycle 1 virtual user (bảng users virtualized). */
 export type UserPhase = 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';

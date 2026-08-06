@@ -323,7 +323,7 @@ export function validateRunRequest(req: StartRunRequest, env: LoadTestEnv): Vali
   const profile = req.profile;
   if (!profile) errors.push('profile bắt buộc');
   else {
-    const sum = profile.chat + profile.read + profile.comment + profile.like + profile.view;
+    const sum = profile.chat + profile.read + profile.comment + profile.like + profile.view + (profile.post ?? 0);
     if (Math.abs(sum - 100) > 0.001) {
       errors.push(`Tổng profile = ${sum}% — phải đúng 100%`);
     }
@@ -336,8 +336,9 @@ export function validateRunRequest(req: StartRunRequest, env: LoadTestEnv): Vali
         );
       }
     }
-    for (const k of ['chat', 'read', 'comment', 'like', 'view'] as const) {
-      if (!Number.isFinite(profile[k]) || profile[k] < 0) errors.push(`profile.${k} không hợp lệ`);
+    for (const k of ['chat', 'read', 'comment', 'like', 'view', 'post'] as const) {
+      const v = profile[k] ?? 0;
+      if (!Number.isFinite(v) || v < 0) errors.push(`profile.${k} không hợp lệ`);
     }
   }
 
@@ -360,7 +361,7 @@ export const PRESETS: Preset[] = [
   { id: '10M', label: '10M', targetUsers: 10_000_000, requiresCluster: true },
 ];
 
-export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0 };
+export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0, post: 0 };
 
 /** Ước lượng hạ tầng cho UI (Màn 1 "ƯỚC LƯỢNG"). */
 export function estimateInfra(targetUsers: number, _env: LoadTestEnv) {

@@ -34,6 +34,7 @@ export const ACTION_STATE_LABELS: Record<UserActionState, string> = {
   comment: 'Bình luận',
   like: 'Thích',
   view: 'Xem bài',
+  post: 'Đăng bài',
   typing: 'Đang gõ',
   topic: 'Đổi chủ đề',
   idle: 'Rảnh',
