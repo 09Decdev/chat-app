@@ -54,6 +54,8 @@ export interface LoadTestEnv {
   registerRamp: number;
   /** Nội dung tĩnh cho REST driver: postId fixtures (rỗng → driver tự bỏ qua POST create). */
   fixturePostIds: string[];
+  /** Giới hạn action like/comment/view/read vào đúng 1 community (rỗng = toàn app). */
+  communityId: string;
   /** Tên phòng chat test (matching không cần — server tự tạo). */
   debug: boolean;
   /** Bắt buộc DB kết nối để server start (Q-2) — mặc định true. */
@@ -187,6 +189,7 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
+    communityId: env.LOADTEST_COMMUNITY_ID || '',
     debug,
     dbRequired,
     corsOrigins,

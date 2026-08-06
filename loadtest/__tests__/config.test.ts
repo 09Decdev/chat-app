@@ -472,6 +472,12 @@ describe('config — getEnv defaults đầy đủ (T-11)', () => {
     expect(env.corsOrigins).toEqual(['http://a.example', 'http://b.example']);
   });
 
+  it('LOADTEST_COMMUNITY_ID: rỗng → \'\' (toàn app), set → giá trị', () => {
+    // Cô lập khỏi file loadtest/.env máy: override '' thắng .env file.
+    expect(getEnv({ LOADTEST_COMMUNITY_ID: '' }).communityId).toBe('');
+    expect(getEnv({ LOADTEST_COMMUNITY_ID: 'c-123' }).communityId).toBe('c-123');
+  });
+
   it('giá trị number hỏng → fallback default (không NaN)', () => {
     const env = getEnv({ LOADTEST_PORT: 'not-a-number', LOADTEST_MAX_TARGET: 'abc' });
     expect(env.port).toBe(3401);

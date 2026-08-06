@@ -21,10 +21,14 @@ export interface ActionResult {
 class PostIdCache {
   private ids: string[] = [];
   private lastFetch = 0;
+  private communityWarned = false;
+  constructor(private communityId: string) {}
   async get(gateway: string, token: string): Promise<string | null> {
     const now = Date.now();
     if (this.ids.length === 0 || now - this.lastFetch > 30_000) {
-      const res = await this.fetchFeed(gateway, token);
+      const res = this.communityId
+        ? await this.fetchCommunity(gateway, token)
+        : await this.fetchFeed(gateway, token);
       if (res.ok) {
         this.ids = res.ids;
         this.lastFetch = now;
@@ -33,6 +37,7 @@ class PostIdCache {
     if (this.ids.length === 0) return null;
     return this.ids[Math.floor(Math.random() * this.ids.length)];
   }
+  /** Feed toàn app — hành vi cũ (không set LOADTEST_COMMUNITY_ID). */
   private async fetchFeed(gateway: string, token: string): Promise<{ ok: boolean; ids: string[] }> {
     const res = await requestJson<unknown>(gateway, '/content-service/post/getAll', {
       token,
@@ -44,14 +49,60 @@ class PostIdCache {
     const ids = extractPostIds(res.data);
     return { ok: ids.length > 0, ids };
   }
+  /** Post theo community; 403 hoặc items rỗng → fallback getAll + lọc local. */
+  private async fetchCommunity(gateway: string, token: string): Promise<{ ok: boolean; ids: string[] }> {
+    const res = await requestJson<unknown>(
+      gateway,
+      `/content-service/post/communityId/${this.communityId}?page=1&limit=20`,
+      { token, timeoutMs: 10_000, body: undefined, method: 'GET' },
+    );
+    if (!res.ok && res.failClass !== 'FORBIDDEN') return { ok: false, ids: [] };
+    const ids = extractPostIds(res.data);
+    if (ids.length > 0) return { ok: true, ids };
+    return this.fetchCommunityLocalFallback(gateway, token);
+  }
+  /** findByCommunityId đòi user là member (403 COMMUNITY_NOT_MEMBER) — getAll rồi lọc local (≤3 trang). */
+  private async fetchCommunityLocalFallback(gateway: string, token: string): Promise<{ ok: boolean; ids: string[] }> {
+    if (!this.communityWarned) {
+      this.communityWarned = true;
+      ltLog.warn(
+        `community ${this.communityId} không có post/403 — dùng local filter (kiểm tra membership user pool)`,
+      );
+    }
+    const out: string[] = [];
+    for (let page = 1; page <= 3 && out.length < 20; page++) {
+      const res = await requestJson<unknown>(gateway, `/content-service/post/getAll?page=${page}&limit=20`, {
+        token,
+        timeoutMs: 10_000,
+        body: undefined,
+        method: 'GET',
+      });
+      if (!res.ok) break;
+      for (const item of extractItems(res.data)) {
+        if (out.length >= 20) break;
+        if ((item as { communityId?: unknown } | null)?.communityId === this.communityId) {
+          const id = (item as { id?: unknown } | null)?.id;
+          if (typeof id === 'string') out.push(id);
+        }
+      }
+    }
+    return { ok: out.length > 0, ids: out };
+  }
 }
 
-/** Envelope defensive: lấy mảng từ `data` có thể bọc `{ data, metadata }`. */
+/** Envelope defensive: lấy mảng từ `data` (getAll) hoặc `items` (community endpoint). */
+function extractItems(body: unknown): unknown[] {
+  if (Array.isArray(body)) return body;
+  const data = (body as { data?: unknown } | null)?.data;
+  if (Array.isArray(data)) return data;
+  const items = (body as { items?: unknown } | null)?.items;
+  return Array.isArray(items) ? items : [];
+}
+
+/** Envelope defensive: tối đa 50 item đầu, 20 id. */
 function extractPostIds(body: unknown): string[] {
-  const arr = Array.isArray(body) ? body : (body as { data?: unknown } | null)?.data;
-  if (!Array.isArray(arr)) return [];
   const out: string[] = [];
-  for (const item of arr.slice(0, 50)) {
+  for (const item of extractItems(body).slice(0, 50)) {
     const id = (item as { id?: unknown } | null)?.id;
     if (typeof id === 'string') out.push(id);
     if (out.length >= 20) break;
@@ -60,7 +111,7 @@ function extractPostIds(body: unknown): string[] {
 }
 
 export class RestDriver {
-  private postIdCache = new PostIdCache();
+  private postIdCache: PostIdCache;
   private lastLikeAt = new Map<string, number>(); // key `${action}:${id}` — like toggle ≥30s/cặp (AC4.4)
   private noFixtureLogged = false;
 
@@ -69,6 +120,7 @@ export class RestDriver {
     _env: LoadTestEnv,
   ) {
     this.gateway = normalizeUrl(gateway);
+    this.postIdCache = new PostIdCache(_env.communityId);
   }
 
   /** T-07/S-12: NO_POST_FIXTURE — log 1 lần để không lặp spam; khách hàng đọc rõ. */
