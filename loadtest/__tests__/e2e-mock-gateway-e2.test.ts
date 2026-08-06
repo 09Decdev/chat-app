@@ -158,6 +158,7 @@ async function startScenario(opts: MockGatewayOptions): Promise<Scenario> {
     LOADTEST_REPORTS_DIR: reportsDir,
     LOADTEST_REGISTER_RAMP: '200',
     LOADTEST_RATE_LIMIT_DISABLED: 'true',
+    LOADTEST_POOL_FILE: '', // cô lập khỏi loadtest/.env máy (có thể set pool-file) — E2E chạy register thật qua mock
   });
   const db = new RecordingDbWriter();
   const coordinator = new LoadTestCoordinator(env, {}, db as unknown as DbWriter);

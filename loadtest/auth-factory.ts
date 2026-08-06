@@ -150,7 +150,50 @@ export class SimpleRateLimiter {
 }
 
 /**
+ * Nạp account từ pool file (LOADTEST_POOL_FILE): mảng `[{ email, password, ... }]`
+ * (users_accounts.json — chỉ email/password) hoặc `{ accounts: [...] }` (dạng pool disk AF-2).
+ * Entry thiếu deviceInfo → tự sinh (login cần email/password/deviceInfo).
+ */
+export function loadPoolFile(filePath: string, runId: string): TestAccount[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (e) {
+    throw new Error(`Không đọc được pool file ${filePath}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const raw = Array.isArray(parsed) ? parsed : (parsed as { accounts?: unknown })?.accounts;
+  if (!Array.isArray(raw)) {
+    throw new Error(`Pool file ${filePath} không đúng cấu trúc — cần mảng account hoặc { accounts: [...] }`);
+  }
+  return raw.map((a, i) => normalizePoolAccount(a, runId, i));
+}
+
+function normalizePoolAccount(raw: unknown, runId: string, index: number): TestAccount {
+  if (typeof raw !== 'object' || raw === null) throw new Error(`Account #${index + 1} trong pool file không phải object`);
+  const a = raw as Record<string, unknown>;
+  if (typeof a.email !== 'string' || a.email.trim() === '') throw new Error(`Account #${index + 1}: email bắt buộc`);
+  if (typeof a.password !== 'string' || a.password === '') throw new Error(`Account #${index + 1}: password bắt buộc`);
+  const di = a.deviceInfo as Partial<TestAccount['deviceInfo']> | undefined;
+  const validDi =
+    !!di && typeof di === 'object' && typeof di.installationId === 'string' &&
+    typeof di.deviceFingerprint === 'string' && di.platform === 'web' && typeof di.deviceName === 'string';
+  return {
+    email: a.email, // không trim — password có thể chứa space (seed-accounts cùng quy tắc)
+    password: a.password,
+    userId: typeof a.userId === 'string' ? a.userId : '',
+    accessToken: typeof a.accessToken === 'string' ? a.accessToken : '',
+    refreshToken: typeof a.refreshToken === 'string' ? a.refreshToken : '',
+    displayName: typeof a.displayName === 'string' ? a.displayName : '',
+    deviceInfo: validDi ? (di as TestAccount['deviceInfo']) : genDeviceInfo(runId, index),
+    dateOfBirth: typeof a.dateOfBirth === 'string' ? a.dateOfBirth : '',
+    country: typeof a.country === 'string' ? a.country : 'VN',
+    registeredAt: typeof a.registeredAt === 'number' ? a.registeredAt : Date.now(),
+  };
+}
+
+/**
  * Provision toàn bộ account cho 1 run:
+ * - pool-file (env.poolFile): NẠP account từ file JSON, KHÔNG BAO GIỜ register; pool cạn → throw (run fail sớm).
  * - useExisting: tái sử dụng pool đã có — thứ tự: (1) pool seed trong DB
  *   (loadPoolFromDb — seed-accounts.ts), (2) pool file trên disk (AF-4, backward compat) → login lại.
  * - fresh (hoặc không có pool): register OTP-Seed theo ramp.
@@ -168,6 +211,22 @@ export async function provisionAccounts(
   const gateway = normalizeUrl(config.gatewayUrl);
   const summary: ProvisionSummary = { accounts: [], registered: 0, loggedIn: 0, failed: 0, registerFailed: 0, errors: {} };
   const loginLimiter = new SimpleRateLimiter(config.registerRamp); // dùng chung ramp cho login (AF-3)
+
+  // Chế độ pool-file (LOADTEST_POOL_FILE): chỉ dùng account có sẵn trong file — KHÔNG bao giờ register.
+  if (env.poolFile) {
+    const pool = loadPoolFile(env.poolFile, config.runId);
+    if (pool.length < config.targetUsers) {
+      throw new Error(
+        `pool file "${env.poolFile}" chỉ có ${pool.length} account, cần ${config.targetUsers} — KHÔNG tự register (LOADTEST_POOL_FILE)`,
+      );
+    }
+    ltLog.info(
+      `Auth Factory: pool file "${env.poolFile}" (${pool.length} accounts, dùng ${config.targetUsers}) — login lại, KHÔNG register...`,
+    );
+    await loginAccounts(gateway, pool.slice(0, config.targetUsers), config, summary, loginLimiter, onProgress, shouldStop);
+    persistPool(env, config.runId, config, summary.accounts);
+    return summary;
+  }
 
   if (config.useExistingAccounts) {
     // 1. Pool seed trong DB (seed-accounts.ts) — khớp gateway + targetUsers, mới nhất.

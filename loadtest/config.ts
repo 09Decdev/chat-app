@@ -49,6 +49,8 @@ export interface LoadTestEnv {
   maxPendingOutbox: number;
   dataDir: string;
   reportsDir: string;
+  /** Chế độ "chỉ dùng pool file": path JSON account có sẵn (rỗng = hành vi cũ). Set → KHÔNG bao giờ register. */
+  poolFile: string;
   databaseUrl: string;
   scrapeIntervalMs: number;
   registerRamp: number;
@@ -182,6 +184,7 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
     maxPendingOutbox: num('LOADTEST_MAX_PENDING_OUTBOX', 1000),
     dataDir: env.LOADTEST_DATA_DIR || './loadtest/data',
     reportsDir: env.LOADTEST_REPORTS_DIR || './docs/loadtest-reports',
+    poolFile: env.LOADTEST_POOL_FILE || '',
     databaseUrl: env.LOADTEST_DATABASE_URL || PLACEHOLDER_DB_URL,
     scrapeIntervalMs: num('LOADTEST_SCRAPE_METRICS_INTERVAL_MS', 5000),
     registerRamp: num('LOADTEST_REGISTER_RAMP', 100),

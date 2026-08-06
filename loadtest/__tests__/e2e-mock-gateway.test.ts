@@ -114,6 +114,7 @@ describe('E2E — coordinator.start + provisionAccounts với mock gateway (T-11
       LOADTEST_REPORTS_DIR: reportsDir,
       LOADTEST_REGISTER_RAMP: '200',
       LOADTEST_RATE_LIMIT_DISABLED: 'true', // R-6: E2E không dính 429 của chính tool
+      LOADTEST_POOL_FILE: '', // cô lập khỏi loadtest/.env máy (có thể set pool-file) — E2E chạy register thật qua mock
     });
     db = new RecordingDbWriter();
     coordinator = new LoadTestCoordinator(env, {}, db as unknown as DbWriter);

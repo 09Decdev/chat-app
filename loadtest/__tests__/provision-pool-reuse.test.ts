@@ -48,6 +48,7 @@ function buildEnv(gatewayUrl: string, dataDir: string) {
     LOADTEST_AUTH_SECRET: 'seed-auth-secret-0123456789abcdef0123456789abcdef',
     LOADTEST_DATA_DIR: dataDir,
     LOADTEST_RATE_LIMIT_DISABLED: 'true',
+    LOADTEST_POOL_FILE: '', // cô lập khỏi loadtest/.env máy (có thể set pool-file) — test path reuse DB/disk
   });
 }
 
