@@ -636,6 +636,88 @@ describe('VirtualUser — action state + toRow', () => {
   });
 });
 
+// ─── MATCH_TIMEOUT phantom (run 10k: tick đầu ramping MATCH_TIMEOUT=3598=usersActive) ─────
+
+describe('MATCH_TIMEOUT — chỉ đếm user thật sự chờ matching > 60s (queuedAt guard)', () => {
+  function rtWith(u: VirtualUser) {
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: 1 } as RunConfig;
+    rt.users = [u];
+    const msgs: unknown[] = [];
+    rt.onMessage = (m) => msgs.push(m);
+    return { rt, msgs };
+  }
+
+  it('(i) run mới (WorkerRuntime mới như fork mới) → tick đầu MATCH_TIMEOUT = 0, không rò từ run cũ', () => {
+    // run cũ: 1 user thật sự quá hạn → MATCH_TIMEOUT đã đếm trong errorCounters
+    const oldU = makeUser(0, 'oldrun@test.local');
+    oldU.phase = 'queued';
+    (oldU as unknown as { queuedAt: number }).queuedAt = Date.now() - 61_000;
+    const { rt: oldRt, msgs: oldMsgs } = rtWith(oldU);
+    oldU.tick(Date.now(), oldRt);
+    (oldRt as unknown as { emitTick: () => void }).emitTick();
+    expect((oldMsgs[0] as { tick: WorkerTick }).tick.errors.MATCH_TIMEOUT).toBe(1);
+    // run mới: coordinator spawnAll fork process MỚI → counters từ 0 (KHÔNG reuse worker — worker-farm.ts:70)
+    const fresh = rtWith(makeUser(0, 'newrun@test.local', 'queued'));
+    (fresh.rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (fresh.msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.errors.MATCH_TIMEOUT).toBeUndefined(); // không tích lũy từ run cũ
+    expect(tick.counters.failTotal).toBe(0);
+  });
+
+  it('(ii) enqueue in-flight (phase queued trước await, queuedAt=0) → tick KHÔNG đếm MATCH_TIMEOUT', async () => {
+    const u = makeUser(0, 'inflight@test.local');
+    u.profile = 'chat';
+    u.phase = 'idle';
+    u.cooldownUntil = 0;
+    (u as unknown as { lastEnqueueAt: number }).lastEnqueueAt = 0;
+    const { rt, msgs } = rtWith(u);
+    // enqueue treo 2s (gateway chậm) — trong lúc này schedulerTick quét user nhiều lần
+    let resolveEnqueue!: (v: ActionResult) => void;
+    vi.spyOn(rt.rest, 'chatEnqueue').mockReturnValue(
+      new Promise<ActionResult>((r) => { resolveEnqueue = r; }),
+    );
+    const cycle = u.ensureChatCycle(rt, Date.now());
+    expect(u.phase).toBe('queued'); // phase set trước await — window từng đếm phantom
+    (rt as unknown as { schedulerTick: () => void }).schedulerTick(); // sweep trong lúc chờ API
+    resolveEnqueue({ ok: true, latencyMs: 2000, code: '', failClass: 'OK' } as ActionResult);
+    await cycle;
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.errors.MATCH_TIMEOUT).toBeUndefined(); // phantom — trước fix = 1
+    expect(tick.actionFail.chat).toBeUndefined();
+    expect(tick.counters.failTotal).toBe(0);
+    expect(u.phase).toBe('queued'); // đang chờ matching thật (queuedAt đã set)
+  });
+
+  it('(ii) user mới enqueue thành công < 60s → KHÔNG đếm MATCH_TIMEOUT', () => {
+    const u = makeUser(0, 'fresh@test.local');
+    u.phase = 'queued';
+    (u as unknown as { queuedAt: number }).queuedAt = Date.now() - 5_000; // mới chờ 5s
+    const { rt, msgs } = rtWith(u);
+    u.tick(Date.now(), rt);
+    expect(u.phase).toBe('queued'); // chưa quá hạn — không cut
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.errors.MATCH_TIMEOUT).toBeUndefined();
+    expect(tick.counters.failTotal).toBe(0);
+  });
+
+  it('(ii) user quá hạn > 60s sau enqueue thành công → đếm đúng 1 MATCH_TIMEOUT', () => {
+    const u = makeUser(0, 'overdue@test.local');
+    u.phase = 'queued';
+    (u as unknown as { queuedAt: number }).queuedAt = Date.now() - 61_000; // > MATCH_WAIT_MS 60s
+    const { rt, msgs } = rtWith(u);
+    u.tick(Date.now(), rt);
+    expect(u.phase).toBe('idle'); // bỏ matching vì chờ quá lâu
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.errors.MATCH_TIMEOUT).toBe(1);
+    expect(tick.actionFail.chat).toBe(1);
+    expect(tick.counters.failTotal).toBe(1);
+  });
+});
+
 describe('WorkerRuntime.queryUsers — filter + sort + phaseCounts', () => {
   function rtWithUsers() {
     const rt = new WorkerRuntime(0, getEnv());

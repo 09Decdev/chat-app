@@ -292,8 +292,12 @@ export class VirtualUser {
 
   /** Scheduler 100ms — trả về 1 action cần chạy (null = chưa đến lúc). */
   tick(now: number, worker: WorkerRuntime): { action: 'send' | 'typing' | 'topic' | 'rest' } | null {
-    // Timeout chờ matching (AC3.2): 60s không thấy matching:found → backoff 30s rồi thử lại
-    if (this.phase === 'queued' && now - this.queuedAt > MATCH_WAIT_MS) {
+    // Timeout chờ matching (AC3.2): 60s không thấy matching:found → backoff 30s rồi thử lại.
+    // queuedAt > 0 bắt buộc: queuedAt=0 = enqueue ĐANG in-flight (phase 'queued' set trước await
+    // ở ensureChatCycle, queuedAt chỉ gán sau khi enqueue thành công). Nếu không guard, `now - 0`
+    // (~epoch ms) luôn > MATCH_WAIT_MS → MATCH_TIMEOUT phantom cho MỌI user đang chờ response
+    // enqueue (tick đầu ramping run 10k: MATCH_TIMEOUT=3598 = usersActive — vật lý không thể).
+    if (this.phase === 'queued' && this.queuedAt > 0 && now - this.queuedAt > MATCH_WAIT_MS) {
       this.phase = 'idle';
       this.resetAction(); // FIX-2: không còn chờ matching → bảng users không thấy "Đang chat"
       this.lastError = sanitizeLogText('MATCH_TIMEOUT: không nhận matching:found trong 60s', 160);
