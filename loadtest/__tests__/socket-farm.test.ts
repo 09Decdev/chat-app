@@ -12,7 +12,7 @@ import type { ActionResult, RestDriver } from '../rest-actions';
 const ioMock = vi.hoisted(() => vi.fn());
 vi.mock('socket.io-client', () => ({ io: ioMock }));
 
-const PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0 };
+const PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0, post: 0 };
 
 const TEST_ACCOUNT: TestAccount = {
   email: 'user1@test.local',
@@ -60,7 +60,7 @@ describe('socket handshake — KHÔNG token trong query (SEC-3 / F-8)', () => {
 
 describe('pickProfile (AC4.1)', () => {
   it('phân phối đúng theo % (sai số ~1%)', () => {
-    const counts: Record<string, number> = { chat: 0, read: 0, comment: 0, like: 0, view: 0 };
+    const counts: Record<string, number> = { chat: 0, read: 0, comment: 0, like: 0, view: 0, post: 0 };
     const N = 100_000;
     for (let i = 0; i < N; i++) {
       const p = pickProfile(PROFILE);
@@ -77,9 +77,9 @@ describe('pickProfile (AC4.1)', () => {
     for (let i = 0; i < 100; i++) expect(pickProfile(p)).toBe('chat');
   });
 
-  it('profile 0% → fallback read (không crash)', () => {
+  it('profile 0% (không action nào bật) → fallback chat (F1 — trước đây read)', () => {
     const p: ActionProfile = { chat: 0, read: 0, comment: 0, like: 0, view: 0 };
-    expect(pickProfile(p)).toBe('read');
+    for (let i = 0; i < 100; i++) expect(pickProfile(p)).toBe('chat');
   });
 });
 
@@ -961,5 +961,34 @@ describe('G2 — classifyConnectError corner inputs (76/78/80)', () => {
 
   it('err non-string non-object (Symbol) → KHÔNG throw, trả other (80)', () => {
     expect(classifyConnectError(Symbol('timeout'))).toBe('other');
+  });
+});
+
+// ─── F1 — action checkboxes worker-side: chat-only không tự read + pickProfile ───
+
+describe('F1 — chat-user KHÔNG tự read khi read 0% (socket-farm runRest)', () => {
+  it('profile chat 100% (read 0%) → runRest KHÔNG gọi readPostDetail, KHÔNG markActionStart', async () => {
+    const u = makeUser(0, 'chatonly@test.local');
+    u.profile = 'chat';
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: 1, profile: { chat: 100, read: 0, comment: 0, like: 0, view: 0 } } as unknown as RunConfig;
+    const readSpy = vi.spyOn(rt.rest, 'readPostDetail');
+    await u.runRest(rt);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(u.currentAction).toBeNull(); // không markActionStart('read')
+  });
+
+  it('chat user với read > 0% → vẫn tự read khi cooldown (hành vi cũ giữ nguyên)', async () => {
+    const u = makeUser(0, 'chatread@test.local');
+    u.profile = 'chat';
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: 1, profile: { chat: 60, read: 40, comment: 0, like: 0, view: 0 } } as unknown as RunConfig;
+    const readSpy = vi.spyOn(rt.rest, 'readPostDetail').mockResolvedValue({
+      detail: { ok: true, latencyMs: 5, code: '', failClass: 'OK' },
+      view: null,
+    } as unknown as Awaited<ReturnType<RestDriver['readPostDetail']>>);
+    await u.runRest(rt);
+    expect(readSpy).toHaveBeenCalledTimes(1);
+    expect(u.currentAction).toBe('idle'); // đã markActionEnd('read')
   });
 });

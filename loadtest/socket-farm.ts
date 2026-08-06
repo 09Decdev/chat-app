@@ -45,9 +45,9 @@ interface PendingMsg {
   sentAt: number;
 }
 
-export type Profile = 'chat' | 'read' | 'comment' | 'like' | 'view';
+export type Profile = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post';
 
-/** Chọn profile lúc sinh theo % (AC4.1). */
+/** Chọn profile lúc sinh theo % (AC4.1). Tổng 0 (không action nào bật) → chat 100% (F1). */
 export function pickProfile(profile: RunConfig['profile']): Profile {
   const r = Math.random() * 100;
   let acc = 0;
@@ -57,12 +57,13 @@ export function pickProfile(profile: RunConfig['profile']): Profile {
     ['comment', profile.comment],
     ['like', profile.like],
     ['view', profile.view],
+    ['post', profile.post ?? 0],
   ];
   for (const [name, pct] of entries) {
     acc += pct;
     if (r < acc) return name;
   }
-  return 'read';
+  return 'chat';
 }
 
 /** Phân loại connect_error (DESIGN-loadtest-e2-connect-fail §6 heuristic — PLAN T4):
@@ -368,6 +369,8 @@ export class VirtualUser {
 
   async runRest(worker: WorkerRuntime) {
     if (this.profile === 'chat') {
+      // F1: 'read' không được chọn (0%) → user chat KHÔNG tự read khi cooldown — chỉ giữ chat.
+      if ((worker.config?.profile?.read ?? 0) === 0) return;
       // chat profile ngoài phòng/cooldown: chỉ đọc nhẹ
       this.markActionStart('read');
       await worker.rest.readPostDetail(this.account.accessToken).then((r) => {

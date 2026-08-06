@@ -20,13 +20,14 @@ export type RunPhase =
   | 'stopped'
   | 'error';
 
-/** Profile action (% user theo hành vi) — tổng = 100. */
+/** Profile action (% user theo hành vi) — tổng = 100. post optional (0/undefined = tắt). */
 export interface ActionProfile {
   chat: number;
   read: number;
   comment: number;
   like: number;
   view: number;
+  post?: number;
 }
 
 export const ACTION_LABELS: Record<ActionType, string> = {

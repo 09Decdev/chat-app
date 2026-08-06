@@ -8,12 +8,12 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { useLoadtestStore } from '@/store/loadtest.store';
+import { PROFILE_KEYS, initEnabled, renormalizeProfile, type ProfileKey } from './scenario-profile';
 import type { ActionProfile } from '@/types/loadtest';
-
-const PROFILE_KEYS = ['chat', 'read', 'comment', 'like', 'view'] as const;
 
 const DEFAULT_YAML = `# phases:
 duration: 1800
@@ -24,6 +24,7 @@ profiles:
   comment: 20
   like: 10
   view: 0
+  post: 0
 `;
 
 function buildYaml(profile: ActionProfile): string {
@@ -36,6 +37,7 @@ profiles:
   comment: ${profile.comment}
   like: ${profile.like}
   view: ${profile.view}
+  post: ${profile.post ?? 0}
 `;
 }
 
@@ -51,6 +53,7 @@ export default function ScenarioBuilderPage() {
 
   const [fileName, setFileName] = useState('default-scenario.yaml');
   const [profiles, setProfiles] = useState<ActionProfile>({ ...profile });
+  const [enabled, setEnabled] = useState<Record<ProfileKey, boolean>>(() => initEnabled(profile));
   const [yaml, setYaml] = useState(() => buildYaml(profile));
   const [loading, setLoading] = useState(true);
 
@@ -83,6 +86,14 @@ export default function ScenarioBuilderPage() {
 
   const setProfileField = (k: keyof ActionProfile, v: number) => {
     setProfiles((prev) => ({ ...prev, [k]: v }));
+  };
+
+  /** Bật/tắt action (F1): renormalize % đều cho các action được chọn; 0 action chọn → mặc định chat 100%. */
+  const toggleAction = (k: ProfileKey) => {
+    const next = { ...enabled, [k]: !enabled[k] };
+    if (!PROFILE_KEYS.some((kk) => next[kk])) next.chat = true;
+    setEnabled(next);
+    setProfiles((prev) => renormalizeProfile(next, prev));
   };
 
   const saveAndApply = () => {
@@ -174,7 +185,13 @@ export default function ScenarioBuilderPage() {
             <div className="space-y-3">
               {PROFILE_KEYS.map((k) => (
                 <div key={k} className="flex items-center gap-3">
-                  <Label htmlFor={`profile-${k}`} className="w-24">
+                  <Switch
+                    id={`enable-${k}`}
+                    checked={enabled[k]}
+                    onCheckedChange={() => toggleAction(k)}
+                    aria-label={`Bật action ${k}`}
+                  />
+                  <Label htmlFor={`enable-${k}`} className="w-20">
                     {k}
                   </Label>
                   <Input
@@ -183,6 +200,7 @@ export default function ScenarioBuilderPage() {
                     min={0}
                     max={100}
                     value={profiles[k]}
+                    disabled={!enabled[k]}
                     onChange={(e) => setProfileField(k, Number(e.target.value))}
                     aria-describedby={sum !== 100 ? 'profile-sum-error' : undefined}
                   />
@@ -190,6 +208,9 @@ export default function ScenarioBuilderPage() {
                 </div>
               ))}
             </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Bật/tắt action cần chạy — % được chia đều (tổng 100). Bỏ chọn hết → mặc định chat 100%.
+            </p>
             {sum !== 100 && (
               <AlertBanner variant="warning" title={`Tổng profile = ${sum}% — cần đủ 100%`} className="mt-3" />
             )}

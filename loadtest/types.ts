@@ -33,6 +33,8 @@ export interface ActionProfile {
   comment: number;
   like: number;
   view: number;
+  /** % user đăng bài (F3) — optional để không phá config cũ; 0/undefined = tắt. Cần LOADTEST_COMMUNITY_ID. */
+  post?: number;
 }
 
 /** Cấu hình 1 run — đúng form Control Panel (Màn 1). */
