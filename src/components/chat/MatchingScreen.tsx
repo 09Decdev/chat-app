@@ -45,8 +45,14 @@ export function MatchingScreen() {
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   // Simulation khi đang tìm (phase 'matching'): lấp slot + đếm ngược (cosmetic).
+  // Deps gồm phase (không chỉ matched) — cancel rồi match lại lần 2 phải reset
+  // countdown/slot animate lại từ đầu.
   useEffect(() => {
     if (matched) return;
+    setFilled(0);
+    setCountdown(COUNTDOWN_FROM);
+    setShowCard(false);
+    setSearch(<><span className="spin" />Đang tìm người quanh bạn…</>);
     DEMO_PEOPLE.forEach((p, i) => {
       const t = setTimeout(() => {
         setFilled(i + 1);
@@ -65,7 +71,7 @@ export function MatchingScreen() {
       timersRef.current.forEach((t) => clearTimeout(t));
       timersRef.current = [];
     };
-  }, [matched]);
+  }, [matched, phase]);
 
   // Khi matched: burst + hiện thẻ + tự vào phòng sau ~2.4s (hoặc bấm nút).
   useEffect(() => {

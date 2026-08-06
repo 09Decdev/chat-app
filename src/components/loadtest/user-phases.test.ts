@@ -34,14 +34,19 @@ function makeTick(counters?: Partial<LoadTestTick['counters']>): LoadTestTick {
       connectFails: 1107,
       connectFailsByType: { timeout: 750, transport: 340, reject: 12, other: 5 },
       usersFailed: 42,
+      reconcileCount: 0,
+      reconnectTotalMs: 0,
+      reconnectMaxMs: 0,
+      usersLost: 0,
       ...counters,
     },
     rates: { successRate: 95, echoRate: 90, connectFailRate: 12.4 },
     actionsPerSec: {},
     latency: { p50: 1, p95: 2, p99: 3 },
     errors: [],
+    errorsByStage: {},
     server: { wsConnections: 1, wsMessagesEmitted: 1, wsMessagesPerSec: 1 },
-    workers: { alive: 1, total: 1, cpuAvg: 0 },
+    workers: { alive: 1, total: 1, cpuAvg: 0, rssAvgMb: 0 },
   };
 }
 

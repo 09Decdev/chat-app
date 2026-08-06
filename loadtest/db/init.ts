@@ -3,7 +3,7 @@
  *
  * Chạy từ repo root (chat-app/):
  *   npx tsx loadtest/db/init.ts                # mở DB + tạo schema + in danh sách bảng
- *   npx tsx loadtest/db/init.ts --seed-admin   # + seed admin mặc định (password phát sinh, in 1 lần)
+ *   npx tsx loadtest/db/init.ts --seed-admin   # + seed admin mặc định (BẮT BUỘC LOADTEST_ADMIN_PASSWORD)
  *   npx tsx loadtest/db/init.ts --verify       # chỉ mở DB + in bảng + số hàng (không tạo schema)
  *
  * Driver: pg (Postgres). Cần instance postgres-loadtest (port 5439, db `loadtest`).
@@ -12,11 +12,11 @@
  *   LOADTEST_DATABASE_URL     — connection string (bắt buộc — placeholder mặc định không kết nối được)
  *   LOADTEST_ADMIN_USERNAME   — username admin seed (mặc định admin)
  *   LOADTEST_ADMIN_EMAIL      — email admin seed (mặc định admin@loadtest.local)
- *   LOADTEST_ADMIN_PASSWORD   — password admin seed (mặc định: phát sinh ngẫu nhiên, in ra console)
+ *   LOADTEST_ADMIN_PASSWORD   — password admin seed (BẮT BUỘC khi --seed-admin — không phát sinh ngẫu nhiên
+ *                               nữa: password tự sinh không in ra → admin seed tự khóa, không có recovery)
  *   LOADTEST_SEED_ADMIN=1     — tương đương --seed-admin
  */
 
-import * as crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { hashPassword } from './password';
@@ -55,12 +55,6 @@ async function openDb(connectionString: string): Promise<Db> {
       await client.end();
     },
   };
-}
-
-/** Password admin seed: env LOADTEST_ADMIN_PASSWORD hoặc phát sinh ngẫu nhiên (~16 ký tự). */
-function genAdminPassword(): string {
-  if (process.env.LOADTEST_ADMIN_PASSWORD) return process.env.LOADTEST_ADMIN_PASSWORD;
-  return crypto.randomBytes(12).toString('base64url');
 }
 
 async function listTables(db: Db): Promise<{ name: string }[]> {
@@ -122,17 +116,23 @@ async function main(): Promise<void> {
         [username, email],
       );
       if (existing.length === 0) {
-        const password = genAdminPassword();
+        // Fail-fast (không phát sinh ngẫu nhiên): password tự sinh không bao giờ được in ra
+        // → admin seed tự khóa, không có recovery. Bắt buộc env LOADTEST_ADMIN_PASSWORD.
+        const password = process.env.LOADTEST_ADMIN_PASSWORD || fromFile.LOADTEST_ADMIN_PASSWORD;
+        if (!password) {
+          console.error(
+            '[lt][db] --seed-admin cần LOADTEST_ADMIN_PASSWORD (set trong loadtest/.env hoặc env shell) — ' +
+              'password phát sinh ngẫu nhiên không in ra, admin seed sẽ tự khóa (không có recovery).',
+          );
+          process.exit(1);
+        }
         const now = Date.now();
         await db.query(
           `INSERT INTO admin_users (username, email, password_hash, display_name, role, is_active, created_at, updated_at)
            VALUES ($1, $2, $3, $4, 'admin', TRUE, $5, $5)`,
           [username, email, hashPassword(password), 'LoadTest Admin', now],
         );
-        console.log(`[lt][db] Seeded admin: username=${username} email=${email}`);
-        console.log(
-          '[lt][db] Admin password KHÔNG in ra — set LOADTEST_ADMIN_PASSWORD trong loadtest/.env trước khi chạy --seed-admin để dùng lại (không bao giờ log plaintext).',
-        );
+        console.log(`[lt][db] Seeded admin: username=${username} email=${email} (password từ LOADTEST_ADMIN_PASSWORD)`);
       } else {
         console.log(`[lt][db] Admin ${username} hoặc email ${email} đã tồn tại — bỏ qua seed.`);
       }

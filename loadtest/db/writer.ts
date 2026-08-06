@@ -228,8 +228,10 @@ export class DbWriter {
    * Tìm pool seed trong DB khớp gateway + targetUsers (seed-accounts.ts) → map sang
    * TestAccount cho reuse login (provisionAccounts — DB path). Không có pool / DB fail
    * → null (provisionAccounts fallback disk → register). Đánh dấu pool đã reuse (best-effort).
+   * Trả kèm poolRunId để provisionAccounts set summary.poolSourceRunId → writePool cập nhật
+   * per-account outcome của pool nguồn SAU khi login thật (status logged_in/failed).
    */
-  async findPoolForRun(gatewayUrl: string, targetUsers: number): Promise<TestAccount[] | null> {
+  async findPoolForRun(gatewayUrl: string, targetUsers: number): Promise<{ poolRunId: string; accounts: TestAccount[] } | null> {
     if (!this.store.enabled || !this.currentRunId) return null;
     const gw = normalizeUrl(gatewayUrl);
     const found = await this.store.findPool(gw, targetUsers);
@@ -249,7 +251,7 @@ export class DbWriter {
     const mark = await this.store.markPoolReused(pool.poolId, this.currentRunId);
     if (!mark.ok) ltLog.warn(`[lt][db] markPoolReused fail (${pool.poolId}): ${mark.error.message}`);
     ltLog.info(`[lt][db] reuse pool ${pool.poolId}: ${accounts.length} accounts (DB seed pool)`);
-    return accounts;
+    return { poolRunId: pool.poolId, accounts };
   }
 
   /**
@@ -308,11 +310,14 @@ export class DbWriter {
       } else if (src.rows[0]) {
         const reused = safeParseArray(src.rows[0].reusedByRunIdsJson);
         if (!reused.includes(poolId)) reused.push(poolId);
+        // Counter pool nguồn ACCUMULATE (registered là lifetime — giữ nguyên; logged_in/failed
+        // cộng delta của run này). Đè bằng snapshot run hiện tại làm counter sai ngữ nghĩa
+        // sau nhiều lần reuse (registered lifetime vs logged_in chỉ của run cuối).
         const up2 = await this.store.upsertPool({
           ...fromPoolRow(src.rows[0]),
-          loggedIn: summary.loggedIn,
-          failed: summary.failed,
-          errorsJson: JSON.stringify(summary.errors),
+          loggedIn: src.rows[0].loggedIn + summary.loggedIn,
+          failed: src.rows[0].failed + summary.failed,
+          errorsJson: JSON.stringify(mergeErrorCounts(safeParseErrorCounts(src.rows[0].errorsJson), summary.errors)),
           reusedByRunIdsJson: JSON.stringify(reused),
         });
         if (!up2.ok) ltLog.warn(`[lt][db] upsertPool fail (source=${sourceRunId}): ${up2.error.message}`);
@@ -447,6 +452,30 @@ function safeParseArray(json: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** Parse errorsJson (map errorCode → count) — hỏng → {}. */
+function safeParseErrorCounts(json: string): Record<string, number> {
+  try {
+    const v = JSON.parse(json) as unknown;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const out: Record<string, number> = {};
+      for (const [k, n] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof n === 'number' && Number.isFinite(n)) out[k] = n;
+      }
+      return out;
+    }
+  } catch {
+    // ignore — trả {}
+  }
+  return {};
+}
+
+/** Cộng dồn 2 map error count (reuse pool — không đè mất lịch sử lỗi cũ). */
+function mergeErrorCounts(base: Record<string, number>, extra: Record<string, number>): Record<string, number> {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(extra)) out[k] = (out[k] ?? 0) + v;
+  return out;
 }
 
 function fromPoolRow(row: PoolRow): {

@@ -328,8 +328,9 @@ function connectTick(workerId: number, attempts: number, fails: number, usersFai
       connectAttempts: attempts, connectFails: fails,
       connectFailsByType: { timeout: fails, transport: 0, reject: 0, other: 0 },
       usersFailed,
+      reconcileCount: 0, reconnectTotalMs: 0, reconnectMaxMs: 0, usersLost: 0,
     },
-    actionsPerSec: {}, actionOk: {}, actionFail: {}, errors: {},
+    actionsPerSec: {}, actionOk: {}, actionFail: {}, errors: {}, errorsByStage: {},
     errorSamples: [], histograms: {}, histogramBucketCount: 0, cpuPct: 0, rssMb: 10,
   };
 }

@@ -20,7 +20,9 @@ useDefault = true
 #
 # These are FAKE secrets that test code legitimately contains:
 #   - test DB connection strings for the test-only databases
-#     (postgresql://appuser:secret@localhost:5439/loadtest_test / loadtest_test_api)
+#     (postgresql://appuser:secret@localhost:5439/loadtest_test / loadtest_test_api —
+#      local dev; CI dùng Postgres container ở 5432: loadtest_test / loadtest_test_migrate /
+#      loadtest_test_api — .github/workflows/ci.yml)
 #   - fake auth secrets ("test-secret-...")
 #
 # The runtime default `postgresql://appuser:secret@localhost:5439/loadtest`
@@ -35,6 +37,9 @@ regexes = [
   # cannot match lookalike names such as `loadtest_testing`. Scoped to the test
   # fixtures in loadtest/__tests__ ONLY — never add runtime config defaults here.
   '''postgresql://appuser:secret@localhost:5439/loadtest_test(_api)?$''',
+  # CI test DBs (Postgres container 5432 — ci.yml env LOADTEST_TEST_*_DATABASE_URL).
+  # Anchored $ — không khớp tên lookalike (vd `loadtest` runtime không nằm đây).
+  '''postgresql://appuser:secret@localhost:5432/loadtest_test(_migrate|_api)?$''',
   # Logger redaction fixture (logger.test.ts:92) — fake password + JWT header
   # written verbatim so the test can assert redaction. Anchored to the EXACT
   # fixture line so a real token elsewhere is never suppressed.

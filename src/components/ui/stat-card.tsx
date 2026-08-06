@@ -57,6 +57,9 @@ const StatCard = memo(function StatCard({
     () => (sparkline?.length ? sparkline.map((v, i) => ({ i, v })) : null),
     [sparkline],
   );
+  // useId — id gradient duy nhất per card (trùng "sparkfill" giữa các card → card
+  // đầu unmount thì url(#sparkfill) của card khác trỏ ID không tồn tại).
+  const gradientId = React.useId();
   return (
     <Card className={cn('min-h-24 p-4', className)}>
       <div className="flex items-center justify-between gap-1">
@@ -90,7 +93,7 @@ const StatCard = memo(function StatCard({
         <div className="pointer-events-none mt-2 h-6 w-full" aria-hidden>
           <AreaChart width={240} height={24} data={sparkData} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
             <defs>
-              <linearGradient id="sparkfill" x1="0" y1="0" x2="0" y2="1">
+              <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity={0.15} />
                 <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity={0} />
               </linearGradient>
@@ -100,7 +103,7 @@ const StatCard = memo(function StatCard({
               dataKey="v"
               stroke="hsl(var(--primary))"
               strokeWidth={1.5}
-              fill="url(#sparkfill)"
+              fill={`url(#${gradientId})`}
               isAnimationActive={false}
               dot={false}
             />

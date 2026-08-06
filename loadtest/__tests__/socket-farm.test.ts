@@ -538,7 +538,7 @@ describe('VirtualUser — action state + toRow', () => {
     expect(u.lastActionMs).toBe(500);
   });
 
-  it('sendChat: currentAction=chat + messagesSent++, echo → messagesEchoed++ + idle (AC3.3)', () => {
+  it('sendChat: currentAction=chat + messagesSent++, echo → messagesEchoed++ + idle (AC3.3)', async () => {
     ioMock.mockReset();
     const handlers = new Map<string, (p: unknown) => void>();
     const fakeSocket = {
@@ -553,7 +553,7 @@ describe('VirtualUser — action state + toRow', () => {
     u.connect();
     u.roomId = 'room-1';
     const rt = new WorkerRuntime(0, getEnv());
-    u.sendChat(rt);
+    await u.sendChat(rt); // async (network impairment — await netDelay bên trong)
     expect(u.messagesSent).toBe(1);
     expect(u.currentAction).toBe('chat');
     expect(u.lastActionAt).not.toBeNull();

@@ -15,7 +15,10 @@ interface LogRow {
 export function LogsDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const [logs, setLogs] = useState<LogRow[]>([]);
   const [connected, setConnected] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  // Radix ScrollArea — element cuộn thật là Viewport (content div không scroll được).
+  const viewportRef = useRef<HTMLDivElement>(null);
+  // User đang ở bottom → mới auto-scroll theo log mới; đang đọc log cũ → không nhảy.
+  const stickRef = useRef(true);
 
   useEffect(() => {
     if (!open) return;
@@ -24,6 +27,8 @@ export function LogsDialog({ open, onOpenChange }: { open: boolean; onOpenChange
       try {
         const res = await loadtestApi.logs(300);
         if (!alive) return;
+        const el = viewportRef.current;
+        if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         setLogs(res.logs);
         setConnected(true);
       } catch {
@@ -38,9 +43,20 @@ export function LogsDialog({ open, onOpenChange }: { open: boolean; onOpenChange
     };
   }, [open]);
 
+  // User cuộn lên (rời bottom) → ngừng bám; cuộn về bottom → bám lại.
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    const el = viewportRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    };
+    el.addEventListener('scroll', onScroll);
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [open]);
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
   }, [logs, open]);
 
   return (
@@ -59,8 +75,8 @@ export function LogsDialog({ open, onOpenChange }: { open: boolean; onOpenChange
             {connected ? 'live' : 'mất kết nối'}
           </DialogTitle>
         </DialogHeader>
-        <ScrollArea className="max-h-[60vh]">
-          <div ref={scrollRef} className="space-y-0.5 pr-3 font-mono text-xs leading-5" role="log" aria-label="Log của loadtest server">
+        <ScrollArea className="max-h-[60vh]" viewportRef={viewportRef}>
+          <div className="space-y-0.5 pr-3 font-mono text-xs leading-5" role="log" aria-label="Log của loadtest server">
             {logs.length === 0 ? (
               <p className="py-8 text-center text-sm text-muted-foreground">Chưa có log.</p>
             ) : (

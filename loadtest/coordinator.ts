@@ -49,6 +49,8 @@ export class LoadTestCoordinator {
   lastTick: LoadTestTick | null = null;
   tickHistory: LoadTestTick[] = [];
   latestReport: ReturnType<typeof buildReport> | null = null;
+  /** F2: điểm gãy — set khi breakpoint mode dừng do success rate tụt. */
+  private breakpointResult: { usersConnected: number; atSec: number; reason: string } | null = null;
   stopReason = '';
 
   private farm: WorkerFarm;
@@ -59,6 +61,10 @@ export class LoadTestCoordinator {
   private cumulativeHistograms = new ActionHistograms();
   private cumulativeActionOk: Record<string, number> = {};
   private cumulativeActionFail: Record<string, number> = {};
+  /** Error totals KHÔNG cắt top-10 (tick.errors chỉ giữ 10) — report dùng để tổng đúng. */
+  private cumulativeErrorTotals: Record<string, number> = {};
+  /** Error tách theo giai đoạn (connect/matching/chat/rest/...) — report tách tầng. */
+  private cumulativeErrorTotalsByStage: Record<string, Record<string, number>> = {};
   private aggregateTimer: NodeJS.Timeout | null = null;
   private scrapeTimer: NodeJS.Timeout | null = null;
   private queueTimer: NodeJS.Timeout | null = null;
@@ -79,6 +85,10 @@ export class LoadTestCoordinator {
   private lastWindow: ConnectCountersSnapshot = { attempts: 0, fails: 0, byType: EMPTY_CONNECT_FAILS };
   private serverMetrics = { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0, lastScrapeAt: 0 };
   private queueCount = 0;
+  /** FIX: poll queue-count in-flight — gateway chậm (timeout 10s) không chồng request mỗi 1s. */
+  private queuePollInFlight = false;
+  /** Tăng mỗi resetRunState — vô hiệu hoá poll# cũ đang in-flight (finally chỉ clear nếu còn cùng gen). */
+  private pollGeneration = 0;
   private restDriver: RestDriver | null = null;
   private accounts: TestAccount[] = [];
   private stopRequested: 'manual' | 'kill' | null = null;
@@ -214,7 +224,16 @@ export class LoadTestCoordinator {
     this.startTimers(); // tick provisioning progress ngay từ đầu (dashboard)
     // FK race fix: AWAIT insertRun TRƯỚC mọi log_events (runs row phải tồn tại
     // trước khi provisioning/log ghi DB — nếu không sẽ 23503 log_events_run_id_fkey).
-    await this.dbWriter?.writeRunStart(this.config);
+    try {
+      await this.dbWriter?.writeRunStart(this.config);
+    } catch (err) {
+      // FIX: DB chết sau boot → writeRunStart throw → rollback. Trước đây start() trả 500 nhưng
+      // phase đã 'provisioning' + timers chạy mà provisionAndLaunch không bao giờ chạy → kẹt vĩnh viễn.
+      const msg = err instanceof Error ? err.message : String(err);
+      ltLog.error(`writeRunStart fail: ${msg}`);
+      void this.finishRun('auto', `DB writeRunStart fail (${sanitizeLogText(msg, 120)})`, true);
+      return { ok: false, error: `DB writeRunStart fail: ${sanitizeLogText(msg, 200)}` };
+    }
 
     ltLog.info(`=== run ${config.runId} start: target=${config.targetUsers} workers=${config.workerCount} duration=${config.durationMin}m gateway=${config.gatewayUrl} ===`, { runId: config.runId });
     void this.provisionAndLaunch();
@@ -231,6 +250,7 @@ export class LoadTestCoordinator {
     this.tickHistory = [];
     this.lastTick = null;
     this.latestReport = null;
+    this.breakpointResult = null;
     this.workerDoneCount = 0;
     this.provisionSummary = { registered: 0, loggedIn: 0, failed: 0, errors: {} };
     this.provisionProgress = { done: 0, total: 0 };
@@ -246,10 +266,23 @@ export class LoadTestCoordinator {
     this.windowBuckets = [];
     this.lastWindow = { attempts: 0, fails: 0, byType: EMPTY_CONNECT_FAILS };
     this.noPostFixtureCount = 0;
+    this.cumulativeErrorTotals = {};
+    // FIX: clear accounts/restDriver — run mới đang provisioning KHÔNG poll queue-count từ gateway run CŨ
+    // (provisionAndLaunch set lại restDriver sớm + accounts sau khi provisioning xong).
+    this.accounts = [];
+    this.restDriver = null;
+    // m2: tăng generation (vô hiệu hoá poll cũ đang await gateway) + clear flag cho run mới.
+    // poll cũ finally chỉ clear nếu còn cùng generation → không clobber poll#2 của run mới.
+    this.pollGeneration++;
+    this.queuePollInFlight = false;
   }
 
   private async provisionAndLaunch() {
     if (!this.config) return;
+    // FIX: bind runId lúc vào — provisioning mất ~45s; stop + start run mới giữa chừng làm
+    // `shouldStop` thấy phase='provisioning' của run MỚI → luồng cũ vượt guard, ghi pool run cũ
+    // vào config run mới + spawnAll đè farm run mới. Sau MỖI await phải check runId.
+    const myRunId = this.config.runId;
     try {
       // T-07 FIX-2: reuse connection đã mở ở initRedis (startup) — nếu chưa có, tạo mới.
       if (!this.redis) {
@@ -257,6 +290,7 @@ export class LoadTestCoordinator {
         await this.redis.connect().catch(() => {
           throw new Error(`Không kết nối được Redis test: ${redactUrl(this.env.redisUrl)}`);
         });
+        if (this.runId !== myRunId) return; // run mới đã start trong lúc connect → bỏ
       }
       if (!this.env.otpSecret) {
         throw new Error('Thiếu LOADTEST_OTP_SECRET — không thể OTP-Seed register (AF-1). Kiểm tra loadtest/.env');
@@ -276,6 +310,8 @@ export class LoadTestCoordinator {
         // DB-based pool reuse (seed-accounts.ts): tìm pool seed khớp gateway + targetUsers → login lại.
         dbWriter ? (gw, tu) => dbWriter.findPoolForRun(gw, tu) : undefined,
       );
+      // run mới đã start trong lúc provisioning → KHÔNG ghi pool/spawn farm của run cũ vào run mới
+      if (this.runId !== myRunId) return;
       this.provisionSummary = summary;
       void this.dbWriter?.writePool(this.config, summary); // DB: pools + pool_accounts (per-account outcome) — PRD B1
 
@@ -291,7 +327,8 @@ export class LoadTestCoordinator {
         return this.finishRun('auto', `provisioning fail: chỉ có ${summary.accounts.length} account`);
       }
       // Kill-switch giữa chừng provisioning → không spawn worker
-      if (this.finishing || !['provisioning'].includes(this.phase)) return;
+      // (runId check: luồng cũ của run đã stop không được đè farm/phase/pool của run mới)
+      if (this.finishing || this.runId !== myRunId || !['provisioning'].includes(this.phase)) return;
       this.accounts = summary.accounts;
       ltLog.info(`provisioning done: registered=${summary.registered} loggedIn=${summary.loggedIn} failed=${summary.failed} (${summary.accounts.length}/${this.config.targetUsers} accounts)`);
 
@@ -301,6 +338,8 @@ export class LoadTestCoordinator {
       this.setPhase(transition(this.phase, 'ramping'));
       this.broadcastRun();
     } catch (err) {
+      // FIX: luồng cũ của run đã stop (run mới đang chạy) lỗi → KHÔNG finishRun run mới
+      if (this.runId !== myRunId) return;
       ltLog.error(`provisioning exception: ${err instanceof Error ? err.message : String(err)}`);
       // R-1: err.message là text không tin cậy (exception text) → sanitize trước khi vào stopReason
       // (DB/report/export — không đi qua logger redact).
@@ -417,9 +456,20 @@ export class LoadTestCoordinator {
       case 'log':
         ltLog.info(`worker#${workerId}: ${msg.msg}`, { workerId, runId: this.runId || undefined });
         break;
-      case 'fatal':
+      case 'fatal': {
         ltLog.error(`worker#${workerId} fatal: ${msg.error}`);
+        // FIX: uncaughtException → worker state hỏng nhưng vẫn gửi tick → metrics sai cả run.
+        // Kill để đi qua onWorkerDied → restart logic hiện có (trước đây chỉ log).
+        const w = this.farm.get(workerId);
+        if (w?.alive) {
+          try {
+            w.child.kill('SIGKILL');
+          } catch {
+            // đã chết
+          }
+        }
         break;
+      }
       case 'ready': {
         // Worker gửi ready SAU khi xử lý `run` — chỉ gửi run lại khi worker CHƯA nhận (restart/new)
         const w = this.farm.get(workerId);
@@ -453,14 +503,16 @@ export class LoadTestCoordinator {
           queueCount: 0, roomCount: 0, droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
           connectAttempts: 0, connectFails: 0, usersFailed: 0,
           connectFailsByType: { ...EMPTY_CONNECT_FAILS },
+          reconcileCount: 0, reconnectTotalMs: 0, reconnectMaxMs: 0, usersLost: 0,
         },
         rates: { successRate: 100, echoRate: 100, connectFailRate: 0 },
         actionsPerSec: {},
         latency: { p50: 0, p95: 0, p99: 0 },
         errors: [],
+        errorsByStage: {},
         server: { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0 },
         // Chưa spawn worker (đang register users) — total=0 tránh UI hiểu nhầm "worker chết" (E3 giả)
-        workers: { alive: 0, total: 0, cpuAvg: 0 },
+        workers: { alive: 0, total: 0, cpuAvg: 0, rssAvgMb: 0 },
         hasConnectData: true, // tick LIVE (DESIGN §2.1)
       };
       this.pushTick(tick);
@@ -480,6 +532,7 @@ export class LoadTestCoordinator {
       alive: this.farm.alive,
       total: this.farm.total,
       cpuAvg: agg.tick.workers.cpuAvg,
+      rssAvgMb: agg.tick.workers.rssAvgMb,
     };
     // Histogram cumulative: rebuild từ giá trị MỚI NHẤT của từng worker (worker histogram
     // là cumulative — merge thêm mỗi giây sẽ phóng đại count lên ~T lần, phá AC6.4).
@@ -492,6 +545,9 @@ export class LoadTestCoordinator {
     // Kết quả ok/fail theo action (cumulative — replace, không accumulate).
     this.cumulativeActionOk = { ...(agg.actionOk as Record<string, number>) };
     this.cumulativeActionFail = { ...(agg.actionFail as Record<string, number>) };
+    // FIX: error totals KHÔNG cắt top-10 (agg.errorTotals) — report tổng đúng mọi error code.
+    this.cumulativeErrorTotals = { ...agg.errorTotals };
+    this.cumulativeErrorTotalsByStage = { ...(agg.errorTotalsByStage as Record<string, Record<string, number>>) };
     for (const s of agg.errorSamples) this.errorSamplesPrivate.push(s);
     if (this.errorSamplesPrivate.length > 50) this.errorSamplesPrivate = this.errorSamplesPrivate.slice(-50);
 
@@ -574,8 +630,20 @@ export class LoadTestCoordinator {
         connectFailRate: agg.tick.rates.connectFailRate,
         registeredTotal: 0,
         connectTotal: this.lastWindow.attempts,
+        // F2: breakpoint mode — dừng khi success rate tụt (không chỉ connect-fail E2).
+        breakpoint:
+          this.config?.rampMode === 'breakpoint'
+            ? { enabled: true, successRate: agg.tick.rates.successRate, actionsTotal: agg.tick.counters.actionsTotal }
+            : undefined,
       });
       if (decision.stop) {
+        if (decision.kind === 'breakpoint') {
+          // F2: record điểm gãy — usersConnected lúc success rate tụt.
+          const users = agg.tick.counters.usersConnected;
+          this.breakpointResult = { usersConnected: users, atSec: elapsedSec, reason: decision.reason ?? 'breakpoint' };
+          ltLog.error(`F2 BREAKPOINT: ${decision.reason} @ ${users} users`);
+          return this.finishRun('auto', `breakpoint: ${decision.reason} @ ${users} users`, false);
+        }
         const stopReason = `E2: ${decision.reason}`; // AC-2: stopReason bắt đầu "E2:" (hiện tại bắt đầu "auto-stop:")
         const usersFailed = ticks.reduce((a, t) => a + t.counters.usersFailed, 0);
         ltLog.error(`E2: ${decision.reason} | ${formatE2Log({
@@ -638,12 +706,17 @@ export class LoadTestCoordinator {
 
   private async pollQueueCount() {
     if (!this.restDriver || !this.accounts.length) return;
+    if (this.queuePollInFlight) return; // FIX: gateway chậm → không chồng request (timeout 10s vs poll 1s)
+    this.queuePollInFlight = true;
+    const gen = this.pollGeneration; // m2: chỉ clear nếu run không đổi giữa chừng (resetRunState bump gen)
     try {
       const res = await this.restDriver.chatQueueCount();
       const count = res.data?.count ?? 0;
       if (Number.isFinite(count)) this.queueCount = count;
     } catch {
       // Redis chết — giữ giá trị cũ (E5)
+    } finally {
+      if (gen === this.pollGeneration) this.queuePollInFlight = false;
     }
   }
 
@@ -711,6 +784,8 @@ export class LoadTestCoordinator {
           perActionHistograms: this.cumulativeHistograms,
           actionOk: this.cumulativeActionOk,
           actionFail: this.cumulativeActionFail,
+          errorTotals: this.cumulativeErrorTotals,
+          errorTotalsByStage: this.cumulativeErrorTotalsByStage,
           maxConnected: this.maxConnected,
           maxActive: this.maxActive,
           maxQueue: this.maxQueue,
@@ -718,6 +793,8 @@ export class LoadTestCoordinator {
           provisioned: this.provisionSummary.registered + this.provisionSummary.loggedIn,
           stopReason,
           noPostFixtureSkipped: this.noPostFixtureCount,
+          breakpoint: this.breakpointResult ?? undefined,
+          thresholds: this.config?.thresholds,
         });
         this.setPhase(phase);
         saveReportFiles(this.latestReport, this.tickHistory, this.env.reportsDir);

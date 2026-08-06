@@ -39,11 +39,16 @@ export const runHandlers = {
     const startReq: StartRunRequest = {
       targetUsers: Number(body.targetUsers),
       rampRate: Number(body.rampRate ?? 200),
-      rampMode: (body.rampMode as 'rate' | 'minutes' | 'burst') ?? 'rate',
+      rampMode: (body.rampMode as 'rate' | 'minutes' | 'burst' | 'breakpoint') ?? 'rate',
       durationMin: Number(body.durationMin),
       profile: body.profile as StartRunRequest['profile'],
       gatewayUrl: String(body.gatewayUrl ?? ctx.env.gatewayUrl),
-      freshAccounts: Boolean(body.freshAccounts),
+      // Boolean("false") === true — client gửi chuỗi "false" sẽ register ồ ạt; chỉ nhận boolean thật, mặc định an toàn.
+      freshAccounts: typeof body.freshAccounts === 'boolean' ? body.freshAccounts : false,
+      // Network impairment + chaos — validate ở validateRunRequest (sai shape → 400)
+      network: (body.network as StartRunRequest['network']) ?? undefined,
+      chaos: (body.chaos as StartRunRequest['chaos']) ?? undefined,
+      thresholds: (body.thresholds as StartRunRequest['thresholds']) ?? undefined,
     };
     const envForGuard = { ...ctx.env, allowlist: mergedAllowlist(ctx.env) };
     const v = validateRunRequest(startReq, envForGuard);

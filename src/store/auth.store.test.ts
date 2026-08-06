@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mocks = vi.hoisted(() => ({
   chatApi: { login: vi.fn() },
   onAuthFailure: vi.fn(),
+  doRefresh: vi.fn(),
   decodeJwt: vi.fn(),
   tokenStorage: {
     set: vi.fn(),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/api', () => ({
   chatApi: mocks.chatApi,
   onAuthFailure: mocks.onAuthFailure,
+  doRefresh: mocks.doRefresh,
   ApiError: class ApiError extends Error {
     constructor(
       public statusCode: number,
@@ -59,40 +61,57 @@ describe('auth.store — hydrate', () => {
     mocks.tokenStorage.clear.mockClear();
     mocks.chatApi.login.mockReset();
     mocks.decodeJwt.mockReset();
+    mocks.doRefresh.mockReset();
     useAuthStore.setState({ user: null, accessToken: null, isAuthenticated: false, authReady: false });
   });
 
-  it('không có token → authReady true, không authenticated', () => {
-    useAuthStore.getState().hydrate();
+  it('không có token → authReady true, không authenticated', async () => {
+    await useAuthStore.getState().hydrate();
     const s = useAuthStore.getState();
     expect(s.authReady).toBe(true);
     expect(s.isAuthenticated).toBe(false);
   });
 
-  it('token hết hạn → clear + authReady true', () => {
+  it('token hết hạn + refresh thất bại → clear + authReady true (không login lại)', async () => {
     mocks.tokenStorage.accessToken = 'tok.expired';
     mocks.decodeJwt.mockReturnValue({ sub: 'u1', exp: 1000 }); // 1000s → năm 1970, đã hết hạn
-    useAuthStore.getState().hydrate();
+    mocks.doRefresh.mockResolvedValue(false);
+    await useAuthStore.getState().hydrate();
     const s = useAuthStore.getState();
+    expect(mocks.doRefresh).toHaveBeenCalled();
     expect(mocks.tokenStorage.clear).toHaveBeenCalled();
     expect(s.isAuthenticated).toBe(false);
     expect(s.authReady).toBe(true);
   });
 
-  it('token hợp lệ → authenticated + user từ sub/email', () => {
+  it('token hết hạn nhưng refresh còn sống → refresh thành công, KHÔNG logout', async () => {
+    mocks.tokenStorage.accessToken = 'tok.expired';
+    mocks.decodeJwt.mockReturnValue({ sub: 'u1', exp: 1000 });
+    mocks.doRefresh.mockResolvedValue(true);
+    mocks.tokenStorage.accessToken = 'tok.new'; // doRefresh (mock) đổi access mới
+    await useAuthStore.getState().hydrate();
+    const s = useAuthStore.getState();
+    expect(mocks.doRefresh).toHaveBeenCalled();
+    expect(mocks.tokenStorage.clear).not.toHaveBeenCalled();
+    expect(s.isAuthenticated).toBe(true);
+    expect(s.accessToken).toBe('tok.new');
+    expect(s.user).toEqual({ id: 'u1' });
+  });
+
+  it('token hợp lệ → authenticated + user từ sub/email', async () => {
     mocks.tokenStorage.accessToken = 'tok.valid';
     mocks.decodeJwt.mockReturnValue({ sub: 'u1', email: 'a@b.c', exp: null });
-    useAuthStore.getState().hydrate();
+    await useAuthStore.getState().hydrate();
     const s = useAuthStore.getState();
     expect(s.isAuthenticated).toBe(true);
     expect(s.accessToken).toBe('tok.valid');
     expect(s.user).toEqual({ id: 'u1', email: 'a@b.c' });
   });
 
-  it('token không decode được → user fallback { id: "" }', () => {
+  it('token không decode được → user fallback { id: "" }', async () => {
     mocks.tokenStorage.accessToken = 'tok.bad';
     mocks.decodeJwt.mockReturnValue(null);
-    useAuthStore.getState().hydrate();
+    await useAuthStore.getState().hydrate();
     const s = useAuthStore.getState();
     expect(s.isAuthenticated).toBe(true);
     expect(s.user).toEqual({ id: '' });

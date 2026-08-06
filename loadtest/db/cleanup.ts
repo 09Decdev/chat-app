@@ -10,8 +10,11 @@
  * Phạm vi:
  *   - runs start_at < cutoff && status <> 'running' — cascade xoá
  *     metric_samples + log_events (FK ON DELETE CASCADE, schema.sql).
+ *   - run 'running' còn sót quá (maxDurationMin + 1h) (máy khác crash — crash-detect chỉ xử lý
+ *     machine_id hiện tại) → đánh dấu error trước khi xóa. Ngưỡng > maxDurationMin để không
+ *     xoá nhầm run soak (tới 12h) đang chạy thật.
  *   - pools created_at < cutoff — cascade xoá pool_accounts.
- *   - KHÔNG đụng admin_users, KHÔNG đụng run đang chạy.
+ *   - KHÔNG đụng admin_users, KHÔNG đụng run đang chạy thật (mới).
  *
  * Env: LOADTEST_DATABASE_URL (bắt buộc — placeholder → exit 1).
  */
@@ -60,6 +63,17 @@ async function main(): Promise<void> {
     let runs: { rowCount: number | null };
     let pools: { rowCount: number | null };
     try {
+      // FIX: run 'running' còn sót của máy khác (crash-detect — store.ts markRunsRunningAsError —
+      // chỉ xử lý machine_id hiện tại) không bao giờ được dọn. Run thật có thể soak tới
+      // env.maxDurationMin (mặc định 60, soak 720=12h) — ngưỡng stale phải > maxDurationMin
+      // (+1h buffer) để KHÔNG đánh dấu error/xoá nhầm run soak đang chạy thật.
+      const staleRunningMs = (env.maxDurationMin + 60) * 60_000;
+      const staleRunningCutoff = Date.now() - staleRunningMs;
+      const stale = await client.query(
+        `UPDATE runs SET status = 'error', stop_reason = 'cleanup: run running quá ${env.maxDurationMin + 60} phút (máy khác crash) — đánh dấu error', updated_at = $1
+         WHERE status = 'running' AND start_at < $2`,
+        [Date.now(), staleRunningCutoff],
+      );
       const r = await client.query(
         `DELETE FROM runs WHERE start_at < $1 AND status <> 'running' RETURNING run_id`,
         [cutoff],
@@ -68,6 +82,9 @@ async function main(): Promise<void> {
       await client.query('COMMIT');
       runs = r;
       pools = p;
+      if ((stale.rowCount ?? 0) > 0) {
+        console.log(`[lt][db] cleanup: đánh dấu error ${stale.rowCount} run running quá ${env.maxDurationMin + 60} phút (máy khác crash) trước khi xóa`);
+      }
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
       throw err;

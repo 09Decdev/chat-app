@@ -53,7 +53,7 @@ class PostIdCache {
   private async fetchCommunity(gateway: string, token: string): Promise<{ ok: boolean; ids: string[] }> {
     const res = await requestJson<unknown>(
       gateway,
-      `/content-service/post/communityId/${this.communityId}?page=1&limit=20`,
+      `/content-service/post/communityId/${encodeURIComponent(this.communityId)}?page=1&limit=20`,
       { token, timeoutMs: 10_000, body: undefined, method: 'GET' },
     );
     if (!res.ok && res.failClass !== 'FORBIDDEN') return { ok: false, ids: [] };
@@ -176,7 +176,7 @@ export class RestDriver {
   async readPostDetail(token: string): Promise<{ detail: ActionResult; view: ActionResult | null }> {
     const postId = await this.postIdCache.get(this.gateway, token);
     if (!postId) return { detail: this.noFixture(), view: null };
-    const d = await this.exec(token, `/content-service/post/${postId}`);
+    const d = await this.exec(token, `/content-service/post/${encodeURIComponent(postId)}`);
     const detail = this.action(d, 'read');
     const view = await this.viewPost(token, postId);
     return { detail, view };
@@ -186,7 +186,7 @@ export class RestDriver {
   async viewPost(token: string, postId?: string): Promise<ActionResult> {
     const id = postId ?? (await this.postIdCache.get(this.gateway, token));
     if (!id) return this.noFixture();
-    const res = await this.exec(token, `/content-service/post/${id}/view`, { method: 'POST', body: {} });
+    const res = await this.exec(token, `/content-service/post/${encodeURIComponent(id)}/view`, { method: 'POST', body: {} });
     return this.action(res, 'view');
   }
 
@@ -194,7 +194,7 @@ export class RestDriver {
   async createComment(token: string, userIndex: number): Promise<ActionResult> {
     const postId = await this.postIdCache.get(this.gateway, token);
     if (!postId) return this.noFixture();
-    const res = await this.exec(token, `/content-service/comments/posts/${postId}`, {
+    const res = await this.exec(token, `/content-service/comments/posts/${encodeURIComponent(postId)}`, {
       method: 'POST',
       body: { content: genCommentContent(userIndex) },
     });
@@ -205,7 +205,7 @@ export class RestDriver {
   async readComments(token: string): Promise<ActionResult> {
     const postId = await this.postIdCache.get(this.gateway, token);
     if (!postId) return this.noFixture();
-    const res = await this.exec(token, `/content-service/comments/posts/${postId}?page=1&limit=20`);
+    const res = await this.exec(token, `/content-service/comments/posts/${encodeURIComponent(postId)}?page=1&limit=20`);
     return this.action(res, 'comment');
   }
 
@@ -218,7 +218,7 @@ export class RestDriver {
     if (Date.now() - last < 30_000) {
       return { ok: true, latencyMs: 0, code: 'LIKE_PACED_SKIP', failClass: 'OK' };
     }
-    const res = await this.exec(token, `/content-service/like/post/${postId}`, { method: 'POST', body: {} });
+    const res = await this.exec(token, `/content-service/like/post/${encodeURIComponent(postId)}`, { method: 'POST', body: {} });
     if (res.ok || res.failClass !== 'SERVER') this.lastLikeAt.set(key, Date.now());
     return this.action(res, 'like');
   }
@@ -287,6 +287,22 @@ export class RestDriver {
         ? ((res.data as { roomId?: unknown }).roomId as string | null) ?? null
         : null;
     return { ...this.action(res, 'chat'), roomId };
+  }
+
+  /** Soak: refresh access token (TTL 1h) — /auth/refresh-token khớp VITE_REFRESH_ENDPOINT. */
+  async refreshAccessToken(refreshToken: string): Promise<{ ok: boolean; accessToken?: string; code?: string; error?: string }> {
+    const res = await requestJson<unknown>(this.gateway, '/auth/refresh-token', {
+      method: 'POST',
+      body: { refreshToken },
+      timeoutMs: 10_000,
+    });
+    if (!res.ok) return { ok: false, code: res.code, error: res.message };
+    const body = res.data as { accessToken?: unknown; data?: { accessToken?: unknown } } | null;
+    const accessToken =
+      (typeof body?.accessToken === 'string' && body.accessToken) ||
+      (typeof body?.data?.accessToken === 'string' && body.data.accessToken) ||
+      '';
+    return accessToken ? { ok: true, accessToken } : { ok: false, code: 'REFRESH_NO_TOKEN', error: 'response thiếu accessToken' };
   }
 
   /** GET queue-count — không cần token (chat.controller.ts:52-57). */

@@ -56,13 +56,18 @@ function makeTick(ts: number, phase: string): LoadTestTick {
       connectFails: 0,
       connectFailsByType: { timeout: 0, transport: 0, reject: 0, other: 0 },
       usersFailed: 0,
+      reconcileCount: 0,
+      reconnectTotalMs: 0,
+      reconnectMaxMs: 0,
+      usersLost: 0,
     },
     rates: { successRate: 1, echoRate: 1, connectFailRate: 0 },
     actionsPerSec: {},
     latency: { p50: 1, p95: 2, p99: 3 },
     errors: [],
+    errorsByStage: {},
     server: { wsConnections: 1, wsMessagesEmitted: 1, wsMessagesPerSec: 1 },
-    workers: { alive: 1, total: 1, cpuAvg: 0 },
+    workers: { alive: 1, total: 1, cpuAvg: 0, rssAvgMb: 0 },
   };
 }
 
@@ -157,6 +162,20 @@ describe('loadtest.store — run lifecycle', () => {
     expect(s.pollStatus).toBe('connecting');
   });
 
+  it('startRun → warnings trả về khi server gửi (không nuốt)', async () => {
+    mocks.loadtestApi.start.mockResolvedValue({ runId: 'run-2', warnings: ['target vượt năng lực máy'], estimate: {} });
+    const res = await useLoadtestStore.getState().startRun({
+      targetUsers: 1000,
+      rampRate: 10,
+      rampMode: 'rate',
+      durationMin: 5,
+      profile: DEFAULT_PROFILE,
+      gatewayUrl: 'http://localhost:3000',
+    });
+    expect(res).toEqual({ ok: true, runId: 'run-2', warnings: ['target vượt năng lực máy'] });
+    expect(useLoadtestStore.getState().paused).toBe(false);
+  });
+
   it('startRun failure → ok:false + error từ toApiError', async () => {
     mocks.loadtestApi.start.mockRejectedValue(new Error('rate limit'));
     mocks.toApiError.mockReturnValue({ statusCode: 429, message: 'Thử lại sau', retryAfterSec: 30 });
@@ -227,12 +246,33 @@ describe('loadtest.store — run lifecycle', () => {
     expect(s.ticks).toHaveLength(1);
   });
 
+  it('pollOnce in-flight → bỏ qua tick khi request trước chưa xong (không chồng request)', async () => {
+    useLoadtestStore.setState({ phase: 'steady', ticks: [], lastTick: null });
+    let resolveStatus!: (v: unknown) => void;
+    mocks.loadtestApi.status.mockReturnValue(
+      new Promise((r) => {
+        resolveStatus = r;
+      }),
+    );
+    mocks.loadtestApi.metrics.mockResolvedValue({ runId: 'run-1', ticks: [] });
+    const p1 = useLoadtestStore.getState().pollOnce();
+    // Tick thứ 2 khi request trước còn treo → return ngay, không gọi api lần nữa.
+    await useLoadtestStore.getState().pollOnce();
+    expect(mocks.loadtestApi.status).toHaveBeenCalledTimes(1);
+    resolveStatus({ runId: 'run-1', phase: 'steady', startAt: 1, elapsedSec: 2, isRunning: true, stopReason: null });
+    await p1;
+    // Hết in-flight → tick sau chạy bình thường.
+    await useLoadtestStore.getState().pollOnce();
+    expect(mocks.loadtestApi.status).toHaveBeenCalledTimes(2);
+  });
+
   it('resetRun → state về idle', () => {
-    useLoadtestStore.setState({ phase: 'steady', isRunning: true, ticks: [makeTick(1, 'steady')] });
+    useLoadtestStore.setState({ phase: 'steady', isRunning: true, paused: true, ticks: [makeTick(1, 'steady')] });
     useLoadtestStore.getState().resetRun();
     const s = useLoadtestStore.getState();
     expect(s.phase).toBe('idle');
     expect(s.isRunning).toBe(false);
+    expect(s.paused).toBe(false);
     expect(s.ticks).toEqual([]);
     expect(s.pollStatus).toBe('offline');
   });
@@ -242,21 +282,26 @@ describe('loadtest.store — run lifecycle', () => {
     expect(useLoadtestStore.getState().profile.chat).toBe(50);
   });
 
-  it('pauseRun → gọi loadtestApi.pause (best-effort)', async () => {
+  it('pauseRun → gọi loadtestApi.pause (best-effort) + paused = true khi thành công', async () => {
     mocks.loadtestApi.pause.mockResolvedValue({ ok: true });
     await useLoadtestStore.getState().pauseRun();
     expect(mocks.loadtestApi.pause).toHaveBeenCalledTimes(1);
+    expect(useLoadtestStore.getState().paused).toBe(true);
   });
 
-  it('pauseRun failure → không throw (best-effort — trạng thái từ poll tiếp theo)', async () => {
+  it('pauseRun failure → không throw (best-effort), paused không đổi', async () => {
+    useLoadtestStore.setState({ paused: false });
     mocks.loadtestApi.pause.mockRejectedValue(new Error('net'));
     await expect(useLoadtestStore.getState().pauseRun()).resolves.toBeUndefined();
+    expect(useLoadtestStore.getState().paused).toBe(false);
   });
 
-  it('resumeRun → gọi loadtestApi.resume (best-effort)', async () => {
+  it('resumeRun → gọi loadtestApi.resume (best-effort) + paused = false', async () => {
+    useLoadtestStore.setState({ paused: true });
     mocks.loadtestApi.resume.mockResolvedValue({ ok: true });
     await useLoadtestStore.getState().resumeRun();
     expect(mocks.loadtestApi.resume).toHaveBeenCalledTimes(1);
+    expect(useLoadtestStore.getState().paused).toBe(false);
   });
 
   it('resumeRun failure → không throw (best-effort)', async () => {

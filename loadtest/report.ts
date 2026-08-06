@@ -7,7 +7,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { LoadTestTick, RunConfig, RunPhase } from './types';
 import type { ActionHistograms } from './metrics';
-import type { RunReport, ActionReport, BottleneckCandidate } from './types';
+import type { RunReport, ActionReport, BottleneckCandidate, Thresholds, ThresholdResult } from './types';
 import { ltLog } from './util';
 
 export interface ReportInput {
@@ -21,6 +21,10 @@ export interface ReportInput {
   /** ok/fail theo action (cumulative) — per-action success rate thật (AC6.1). */
   actionOk: Record<string, number>;
   actionFail: Record<string, number>;
+  /** Error totals KHÔNG cắt top-10 (từ aggregateTicks) — tổng run đúng (tick.errors chỉ giữ 10). */
+  errorTotals?: Record<string, number>;
+  /** Error tách theo giai đoạn (connect/matching/chat/rest/...) — report tách tầng. */
+  errorTotalsByStage?: Record<string, Record<string, number>>;
   maxConnected: number;
   maxActive: number;
   maxQueue: number;
@@ -29,6 +33,33 @@ export interface ReportInput {
   stopReason?: string;
   /** Số lần NO_POST_FIXTURE — coordinator đếm từ raw worker errors (T-07/S-12). */
   noPostFixtureSkipped?: number;
+  /** F2: điểm gãy — coordinator set khi rampMode='breakpoint' dừng do success rate tụt. */
+  breakpoint?: { usersConnected: number; atSec: number; reason: string };
+  /** Chaos events đã apply (atSec <= duration thực tế) — timeline recovery. */
+  chaosApplied?: { atSec: number; action: string; durationSec?: number }[];
+  /** F3: SLO/thresholds — optional, eval pass/fail sau run. */
+  thresholds?: Thresholds;
+}
+
+/** F3: eval thresholds → results + overall pass (cho CI exit code). */
+function evalThresholds(
+  thresholds: Thresholds | undefined,
+  successRate: number,
+  echoRate: number,
+  overallP95: number,
+): { thresholdResults: ThresholdResult[]; thresholdsPassed: boolean } {
+  if (!thresholds) return { thresholdResults: [], thresholdsPassed: true };
+  const results: ThresholdResult[] = [];
+  if (thresholds.p95Ms != null) {
+    results.push({ metric: 'p95', threshold: thresholds.p95Ms, actual: overallP95, pass: overallP95 <= thresholds.p95Ms, unit: 'ms' });
+  }
+  if (thresholds.successRate != null) {
+    results.push({ metric: 'successRate', threshold: thresholds.successRate, actual: successRate, pass: successRate >= thresholds.successRate, unit: '%' });
+  }
+  if (thresholds.echoRate != null) {
+    results.push({ metric: 'echoRate', threshold: thresholds.echoRate, actual: echoRate, pass: echoRate >= thresholds.echoRate, unit: '%' });
+  }
+  return { thresholdResults: results, thresholdsPassed: results.every((r) => r.pass) };
 }
 
 export function buildReport(input: ReportInput): RunReport {
@@ -40,6 +71,12 @@ export function buildReport(input: ReportInput): RunReport {
   };
   const durationSec = Math.max(1, Math.round((input.endAt - input.startAt) / 1000));
   const successTotal = c.successTotal + c.failTotal;
+  // FIX: throughput avg — KHÔNG chia từ startAt (gồm provisioning vài chục phút chưa có action).
+  // Span từ tick ĐẦU TIÊN có action → tick cuối (hoặc endAt).
+  const firstActionTick = history.find((t) => t.counters.actionsTotal > 0);
+  const actionSpanSec = firstActionTick
+    ? Math.max(1, Math.round(((last?.ts ?? input.endAt) - firstActionTick.ts) / 1000))
+    : durationSec;
 
   // Per-action từ histogram cumulative + per-action ok/fail thật
   const perAction: ActionReport[] = [];
@@ -64,13 +101,46 @@ export function buildReport(input: ReportInput): RunReport {
   perAction.sort((a, b) => b.count - a.count);
 
   const errorsMap = new Map<string, number>();
-  for (const t of history) {
-    for (const e of t.errors) errorsMap.set(e.code, (errorsMap.get(e.code) ?? 0) + e.count);
+  if (input.errorTotals) {
+    // FIX: dùng cumulative totals KHÔNG cắt — tick.errors chỉ giữ top-10 mỗi giây → tổng run bị undercount
+    for (const [code, count] of Object.entries(input.errorTotals)) errorsMap.set(code, count);
+  } else {
+    for (const t of history) {
+      for (const e of t.errors) errorsMap.set(e.code, (errorsMap.get(e.code) ?? 0) + e.count);
+    }
   }
   const errors = [...errorsMap.entries()]
     .map(([code, count]) => ({ code, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 20);
+
+  // Error tách theo giai đoạn (tầng nào hỏng khi prod yếu — connect/matching/chat/rest/...)
+  const errorsByStage: Record<string, { code: string; count: number }[]> = {};
+  if (input.errorTotalsByStage) {
+    for (const [stage, byCode] of Object.entries(input.errorTotalsByStage)) {
+      errorsByStage[stage] = Object.entries(byCode)
+        .map(([code, count]) => ({ code, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+    }
+  }
+
+  // Chaos đã apply: event có atSec <= thời lượng run thực tế (deterministic theo elapsedSec)
+  const chaosApplied =
+    input.chaosApplied ??
+    (input.config.chaos?.events ?? [])
+      .filter((e) => e.atSec <= durationSec)
+      .map((e) => ({ atSec: e.atSec, action: e.action, durationSec: e.durationSec }));
+
+  // Reconnect quality: avg time-to-reconnect (count = reconnectCount từ tick cuối)
+  const reconnectCount = c.reconnectCount ?? 0;
+  const reconnectTotalMs = c.reconnectTotalMs ?? 0;
+  const usersLost = c.usersLost ?? 0;
+  // m4: mẫu số = tổng user đã tạo (cumulative, từ tick cuối) — KHÔNG phải peak concurrent
+  // (input.maxConnected). Với churn, usersLost (unique) có thể > peak → pct > 100% gây hiểu nhầm.
+  // usersLost ≤ usersCreated nên pct bounded ≤ 100%.
+  const usersEverCreated = c.usersCreated ?? input.maxConnected;
+  const usersLostPct = usersEverCreated > 0 ? Math.round((usersLost / usersEverCreated) * 1000) / 10 : 0;
 
   // T-07/S-12: NO_POST_FIXTURE — feed trống, không phải lỗi hệ thống; báo rõ trong report.
   const noPostFixtureSkipped =
@@ -88,6 +158,12 @@ export function buildReport(input: ReportInput): RunReport {
     workerCpu: history.slice(-60).reduce((a, t) => a + t.workers.cpuAvg, 0) / Math.max(1, history.slice(-60).length),
   };
   const bottlenecks = detectBottlenecks(bottleneckInput);
+
+  // F3: threshold eval (cho CI exit code) — overall p95 = max p95 across actions.
+  const succRate = successTotal > 0 ? Math.round((c.successTotal / successTotal) * 1000) / 10 : 100;
+  const echoRateVal = c.echoSent > 0 ? Math.round((c.echoOk / c.echoSent) * 1000) / 10 : 100;
+  const overallP95 = perAction.reduce((m, a) => Math.max(m, a.p95Ms), 0);
+  const { thresholdResults, thresholdsPassed } = evalThresholds(input.thresholds, succRate, echoRateVal, overallP95);
 
   return {
     runId: input.runId,
@@ -107,15 +183,26 @@ export function buildReport(input: ReportInput): RunReport {
       echoOk: c.echoOk,
       echoSent: c.echoSent,
       echoRate: c.echoSent > 0 ? Math.round((c.echoOk / c.echoSent) * 1000) / 10 : 100,
-      throughputAvg: Math.round(c.actionsTotal / durationSec),
+      throughputAvg: Math.round(c.actionsTotal / actionSpanSec),
       throughputPeak: input.peakActionsPerSec,
       queueCountPeak: input.maxQueue,
+      reconnectCount,
+      avgReconnectMs: reconnectCount > 0 ? Math.round(reconnectTotalMs / reconnectCount) : 0,
+      maxReconnectMs: c.reconnectMaxMs ?? 0,
+      usersLost,
+      usersLostPct,
+      reconcileCount: c.reconcileCount ?? 0,
     },
     perAction,
     errors,
+    errorsByStage,
+    chaosApplied,
     bottlenecks,
     stopReason: input.stopReason,
     noPostFixtureSkipped,
+    breakpoint: input.breakpoint,
+    thresholdResults,
+    thresholdsPassed,
   };
 }
 
@@ -190,6 +277,23 @@ export function detectBottlenecks(input: BottleneckInput): BottleneckCandidate[]
     });
   }
 
+  // 5. Soak — worker RSS tăng dần đều (nghi memory leak) — chỉ đáng chú ý khi run đủ dài
+  if (h.length >= 120) {
+    const rss = seriesOf((t) => t.workers.rssAvgMb).filter((p) => p.value > 0);
+    if (rss.length >= 60) {
+      const first10 = rss.slice(0, Math.min(rss.length, 120)).reduce((a, p) => a + p.value, 0) / Math.min(rss.length, 120);
+      const last10 = rss.slice(-Math.min(rss.length, 120)).reduce((a, p) => a + p.value, 0) / Math.min(rss.length, 120);
+      if (first10 >= 50 && last10 > first10 * 1.25) {
+        out.push({
+          level: last10 > first10 * 1.5 ? 'High' : 'Med',
+          title: `Worker RSS tăng ${(last10 / Math.max(1, first10)).toFixed(1)}× (${Math.round(first10)}MB → ${Math.round(last10)}MB)`,
+          detail: 'Nghi memory leak phía tool hoặc phía server (soak) — xem xu hướng rssAvgMb theo thời gian.',
+          evidence: rss.slice(-300),
+        });
+      }
+    }
+  }
+
   return out;
 }
 
@@ -242,7 +346,33 @@ export function reportToMarkdown(r: RunReport): string {
     `| Throughput avg / peak | ${s.throughputAvg}/s · ${s.throughputPeak}/s |`,
     `| Chat echo rate | ${s.echoRate}% (${s.echoOk}/${s.echoSent}) |`,
     `| Queue peak | ${s.queueCountPeak} |`,
+    `| Reconnect | ${s.reconnectCount.toLocaleString()} lần · avg ${formatMs(s.avgReconnectMs)} · max ${formatMs(s.maxReconnectMs)} |`,
+    `| User mất kết nối (lost) | ${s.usersLost.toLocaleString()} (${s.usersLostPct}% của tổng user tạo) |`,
+    `| Reconcile (đã ngồi phòng) | ${s.reconcileCount.toLocaleString()} |`,
     '',
+    ...(r.chaosApplied && r.chaosApplied.length > 0
+      ? [
+          '## Chaos (failure injection)',
+          '',
+          `- ${r.chaosApplied.map((e) => `@${e.atSec}s \`${e.action}\`${e.durationSec ? ` (${e.durationSec}s)` : ''}`).join(' · ')}`,
+          '',
+        ]
+      : []),
+    ...(r.summary.reconnectCount > 0 || (r.errorsByStage && Object.keys(r.errorsByStage).length > 0)
+      ? [
+          '## Reconnect & lỗi theo giai đoạn',
+          '',
+          ...(r.errorsByStage && Object.keys(r.errorsByStage).length > 0
+            ? Object.entries(r.errorsByStage)
+                .sort((a, b) => b[1].reduce((x, e) => x + e.count, 0) - a[1].reduce((x, e) => x + e.count, 0))
+                .map(
+                  ([stage, entries]) =>
+                    `- **${stage}**: ${entries.map((e) => `\`${e.code}\` ${e.count.toLocaleString()}`).join(', ')}`,
+                )
+            : []),
+          '',
+        ]
+      : []),
     ...(r.noPostFixtureSkipped && r.noPostFixtureSkipped > 0
       ? [
           '## Không có post fixture — bỏ qua bước đọc feed',

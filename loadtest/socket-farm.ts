@@ -32,6 +32,7 @@ const ECHO_TTL_MS = 60_000; // echo TTL (SF-5)
 const CHAT_SEND_MIN_MS = 2000; // 1 msg/2s/user (chat-message.service.ts:82-92)
 const TYPING_DEBOUNCE_MS = 1500;
 const TOPIC_MIN_MS = 15_000;
+const VOTE_KICK_MIN_MS = 60_000; // pacing vote_kick start (không spam — F1)
 const COOLDOWN_MS = 900_000; // CHAT_LEAVE_COOLDOWN_SECONDS 900
 const REST_READ_INTERVAL_MS = 3000;
 const REST_COMMENT_INTERVAL_MS = 10_000;
@@ -90,6 +91,30 @@ function classifyByMessage(message: string): ConnectFailType {
   return 'other';
 }
 
+/** Map action → giai đoạn (report tách lỗi theo tầng). */
+export function stageForAction(action: ErrorSample['action'], code?: string): ErrorSample['stage'] {
+  switch (action) {
+    case 'connect': return 'connect';
+    case 'register': return 'register';
+    case 'login': return 'login';
+    case 'chat':
+    case 'vote_kick':
+      // Enqueue/matching phase nằm trong chat cycle — tách MATCH_* + CHAT_ALREADY_SEATED
+      if (code === 'MATCH_TIMEOUT' || code === 'CHAT_ALREADY_SEATED' || code === 'CHAT_COOLDOWN_ACTIVE') return 'matching';
+      return 'chat';
+    case 'typing':
+    case 'topic':
+    case 'read':
+    case 'comment':
+    case 'like':
+    case 'view':
+    case 'post':
+      return 'rest';
+    default:
+      return 'other';
+  }
+}
+
 /** 1 virtual user — vòng đời theo SE-2. */
 export class VirtualUser {
   readonly index: number;
@@ -109,6 +134,12 @@ export class VirtualUser {
   lastTypingAt = 0;
   lastTopicAt = 0;
   lastRestAt = 0;
+  lastVoteKickAt = 0;
+  voteKickCooldownUntil = 0;
+  /** Thành viên trong phòng (userIds) — chọn target vote_kick (từ matching:found + member_join/left). */
+  members: string[] = [];
+  /** Vote kick đang active (mình start hoặc người khác start) — không start mới khi active. */
+  activeVoteKick: { targetUserId: string; voted: boolean } | null = null;
   lastError: string | null = null;
   outbox = new Map<string, PendingMsg>();
   // ── Action state (bảng users — chỉ gán biến, KHÔNG log — hot path) ──
@@ -117,14 +148,53 @@ export class VirtualUser {
   lastActionMs: number | null = null;
   messagesSent = 0;
   messagesEchoed = 0;
+  /** Số lần enqueue bị 409 CHAT_ALREADY_SEATED (state reconcile — không phải fail). */
+  reconcileCount = 0;
+  /** Tổng thời gian hồi phục (disconnect → connect OK) — reconnect quality. */
+  reconnectTotalMs = 0;
+  reconnectMaxMs = 0;
+  /** Chaos: user đang bị ngắt mạnh (chaos disconnect_all) — chờ backoff rồi connect lại. */
+  chaosDisconnectedAt = 0;
+  /** Soak: lần refresh token gần nhất (per-user 50phut — token TTL 1h, refresh trước khi hết hạn). */
+  lastTokenRefreshAt = 0;
+  /** Soak: refresh đang in-flight — chống re-entry từ scheduler 100ms. */
+  tokenRefreshInFlight = false;
   private socket: Socket | null = null;
   private wsUrl: string;
+  private netLatencyMs = 0;
+  private netJitterMs = 0;
+  private netDropRate = 0;
+  /** Epoch ms lúc disconnect gần nhất — đo time-to-reconnect ở 'connect' tiếp theo. */
+  private lastDisconnectAt = 0;
 
-  constructor(index: number, account: TestAccount, profile: Profile, gatewayUrl: string) {
+  constructor(index: number, account: TestAccount, profile: Profile, gatewayUrl: string, network?: RunConfig['network']) {
     this.index = index;
     this.account = account;
     this.profile = profile;
     this.wsUrl = normalizeUrl(gatewayUrl).replace(/^http/, 'ws');
+    // Network impairment — deterministic per-user (index): phân tán latency quanh giá trị config
+    if (network?.latencyMs && network.latencyMs > 0) {
+      const j = network.jitterMs ?? 0;
+      const spread = (index % 7) - 3; // -3..3
+      this.netLatencyMs = Math.max(0, network.latencyMs + Math.round((spread * j) / 3));
+    } else if (network?.jitterMs && network.jitterMs > 0) {
+      this.netLatencyMs = Math.round(network.jitterMs / 2);
+    }
+    this.netJitterMs = network?.jitterMs ?? 0;
+    this.netDropRate = Math.min(100, Math.max(0, network?.dropRate ?? 0));
+  }
+
+  /** Network impairment: delay trước mỗi emit (latency + jitter ngẫu nhiên quanh giá trị user). */
+  private async netDelay(): Promise<void> {
+    if (this.netLatencyMs <= 0) return;
+    const j = this.netJitterMs > 0 ? (Math.random() * 2 - 1) * this.netJitterMs : 0;
+    const d = Math.max(0, Math.round(this.netLatencyMs + j));
+    if (d > 0) await sleep(d);
+  }
+
+  /** Network impairment: % message bị drop ngẫu nhiên (mô phỏng packet loss). */
+  private shouldDrop(): boolean {
+    return this.netDropRate > 0 && Math.random() * 100 < this.netDropRate;
   }
 
   /** Đánh dấu bắt đầu action (gán biến rẻ — gọi từ action scheduler). */
@@ -178,6 +248,13 @@ export class VirtualUser {
       this.runtimeStats.connectAttempts++;
       this.everConnected = true;
       this.consecutiveConnectFails = 0; // streak thành công → reset cap (DESIGN §5.1)
+      // Reconnect quality: đo thời gian hồi phục (disconnect → connect OK) — chaos/network yếu
+      if (this.lastDisconnectAt > 0) {
+        const dt = Date.now() - this.lastDisconnectAt;
+        this.reconnectTotalMs += dt;
+        this.reconnectMaxMs = Math.max(this.reconnectMaxMs, dt);
+        this.lastDisconnectAt = 0;
+      }
       // Reconcile trên reconnect (PRD §1.2): nếu đang trong phòng → re-join
       if (this.roomId) {
         s.emit('chat:join', { roomId: this.roomId });
@@ -204,6 +281,7 @@ export class VirtualUser {
       // socket.io tự retry (kênh C engine-level) — connect_error + cap-5 bao phủ (F-T7-2).
       this.phase = 'connecting';
       this.reconnectCount++;
+      this.lastDisconnectAt = Date.now(); // reconnect quality: đo thời gian hồi phục
     });
 
     s.on('connect_error', (err: Error) => {
@@ -231,12 +309,15 @@ export class VirtualUser {
       }
     });
 
-    s.on('matching:found', (p: { roomId: string; roomEndsAt?: number | null }) => {
+    s.on('matching:found', (p: { roomId: string; roomEndsAt?: number | null; members?: { userId: string }[] }) => {
       if (!p?.roomId) return;
       this.roomId = p.roomId;
       this.roomEndsAt = p.roomEndsAt ?? null;
       this.phase = 'in_room';
       this.lastSendAt = Date.now(); // tránh send ngay vừa vào phòng
+      // F1: capture members cho vote_kick targeting.
+      const ids = (p.members ?? []).map((m) => m?.userId).filter((id): id is string => !!id);
+      if (ids.length) this.members = ids;
       s.emit('chat:join', { roomId: p.roomId });
     });
 
@@ -266,6 +347,37 @@ export class VirtualUser {
       this.onError?.(`chat:${p?.code ?? 'ERROR'}`, this.lastError);
     });
 
+    // ─── vote_kick + member tracking (F1 — mô phỏng vote kick như app thật) ───
+    s.on('chat:member_join', (p: { member?: { userId?: string }; roomEndsAt?: number | null }) => {
+      const id = p?.member?.userId;
+      if (id && !this.members.includes(id)) this.members = [...this.members, id];
+      if (typeof p?.roomEndsAt === 'number') this.roomEndsAt = p.roomEndsAt;
+    });
+    s.on('chat:member_left', (p: { userId?: string }) => {
+      const id = p?.userId;
+      if (id) this.members = this.members.filter((m) => m !== id);
+    });
+    s.on('chat:vote_kick:started', (p: { targetUserId?: string; initiatorId?: string }) => {
+      if (!p?.targetUserId) return;
+      this.activeVoteKick = { targetUserId: p.targetUserId, voted: false };
+      const me = this.account.userId;
+      // Không phải initiator/target → có thể vote (70%) — mô phỏng tham gia vote.
+      if (me && p.initiatorId !== me && p.targetUserId !== me && this.socket?.connected && this.roomId && Math.random() < 0.7) {
+        this.markActionStart('vote_kick');
+        this.socket.emit('chat:vote_kick:vote', { roomId: this.roomId });
+        this.markActionEnd('vote_kick', 0);
+        if (this.activeVoteKick) this.activeVoteKick.voted = true;
+        this.onVoteKickVote?.();
+      }
+    });
+    s.on('chat:vote_kick:result', (p: { targetUserId?: string; result?: string }) => {
+      this.activeVoteKick = null;
+      this.voteKickCooldownUntil = Date.now() + 30_000; // tránh spam start lại ngay sau 1 vote
+      if (p?.result === 'KICKED' && p.targetUserId && p.targetUserId !== this.account.userId) {
+        this.members = this.members.filter((m) => m !== p.targetUserId);
+      }
+    });
+
     s.on('roomExpired', () => this.leaveRoom('ROOM_EXPIRED'));
     s.on('chat:room_closed', () => this.leaveRoom('ROOM_CLOSED'));
   }
@@ -273,6 +385,8 @@ export class VirtualUser {
   /** Sự kiện ngoài (worker runtime) — tránh callback lồng nhau. */
   onEchoOk: ((latencyMs: number) => void) | null = null;
   onError: ((code: string, message: string, action?: ErrorSample['action']) => void) | null = null;
+  /** vote_kick vote (trên vote người khác start) — worker record action. */
+  onVoteKickVote: (() => void) | null = null;
   /** Stats rẻ tiền cho auto-stop (connect attempts/fails) — đọc trong emitTick. */
   readonly runtimeStats = {
     connectAttempts: 0,
@@ -284,14 +398,45 @@ export class VirtualUser {
     this.roomId = null;
     this.roomEndsAt = null;
     this.outbox.clear();
+    this.members = [];
+    this.activeVoteKick = null;
+    // FIX: reset queuedAt — enqueue kế tiếp sau cooldown 900s không kế thừa queuedAt cũ >60s
+    // (nếu không, tick() đếm MATCH_TIMEOUT phantom trong lúc await enqueue in-flight).
+    this.queuedAt = 0;
     this.cooldownUntil = Date.now() + COOLDOWN_MS;
     this.phase = 'cooldown';
     this.resetAction();
     this.lastError = sanitizeLogText(`leaveRoom(${reason})`, 160);
   }
 
+  /** Chaos disconnect_all: ngắt mạnh socket (mô phỏng mất mạng di động).
+   *  socket.disconnect() (client namespace) → socket.io KHÔNG auto-reconnect — chờ chaosResume.
+   *  Handler 'disconnect' tự đếm reconnectCount + lastDisconnectAt (reconnect quality). */
+  chaosDisconnect() {
+    const s = this.socket;
+    if (!s || !this.socketConnected) return;
+    if (this.phase === 'failed') return;
+    this.chaosDisconnectedAt = Date.now();
+    s.disconnect();
+  }
+
+  /** Chaos kết thúc (hết block window / hết backoff) — connect lại thủ công. */
+  chaosResume() {
+    const s = this.socket;
+    if (!s || this.socketConnected || this.phase === 'failed') return;
+    if (!this.chaosDisconnectedAt) return;
+    this.chaosDisconnectedAt = 0;
+    // Recreate socket: `auth` object + Authorization header đều snapshot lúc io(), nên sau khi
+    // refresh token (soak) phải tạo socket mới thì token mới mới vào CONNECT packet + header.
+    // Path chaos (token không đổi) recreate cũng an toàn — đồng nhất 2 path, không rẽ nhánh.
+    s.removeAllListeners();
+    s.disconnect();
+    this.socket = null;
+    this.connect();
+  }
+
   /** Scheduler 100ms — trả về 1 action cần chạy (null = chưa đến lúc). */
-  tick(now: number, worker: WorkerRuntime): { action: 'send' | 'typing' | 'topic' | 'rest' } | null {
+  tick(now: number, worker: WorkerRuntime): { action: 'send' | 'typing' | 'topic' | 'rest' | 'vote_kick' } | null {
     // Timeout chờ matching (AC3.2): 60s không thấy matching:found → backoff 30s rồi thử lại.
     // queuedAt > 0 bắt buộc: queuedAt=0 = enqueue ĐANG in-flight (phase 'queued' set trước await
     // ở ensureChatCycle, queuedAt chỉ gán sau khi enqueue thành công). Nếu không guard, `now - 0`
@@ -322,10 +467,22 @@ export class VirtualUser {
         this.lastTopicAt = now;
         return { action: 'topic' };
       }
+      // vote_kick (F1): paced 60s, 8% chance, ≥2 member, không active, hết cooldown.
+      if (
+        this.profile === 'chat' &&
+        now - this.lastVoteKickAt >= VOTE_KICK_MIN_MS &&
+        now >= this.voteKickCooldownUntil &&
+        !this.activeVoteKick &&
+        this.members.length >= 2 &&
+        Math.random() < 0.08
+      ) {
+        this.lastVoteKickAt = now;
+        return { action: 'vote_kick' };
+      }
       return null;
     }
     // REST pacing ngoài phòng (kể cả cooldown — giữ tải)
-    if ((this.phase === 'connected' || this.phase === 'cooldown' || this.phase === 'idle') && now - this.lastRestAt >= this.restInterval()) {
+    if ((this.phase === 'connected' || this.phase === 'cooldown' || this.phase === 'idle') && !this.restInFlight && now - this.lastRestAt >= this.restInterval()) {
       this.lastRestAt = now;
       return { action: 'rest' };
     }
@@ -343,24 +500,64 @@ export class VirtualUser {
     }
   }
 
-  sendChat(worker: WorkerRuntime) {
+  async sendChat(worker: WorkerRuntime) {
+    if (this.sendInFlight) return; // tránh re-entry khi netDelay > CHAT_SEND_MIN_MS → burst emit + false NO_ECHO
     if (!this.socket?.connected || !this.roomId) return;
-    const clientMsgId = uuidV4();
-    const content = genChatContent(this.index);
-    this.outbox.set(clientMsgId, { clientMsgId, sentAt: Date.now() });
-    this.markActionStart('chat');
-    this.socket.emit('chat:send', { roomId: this.roomId, content, clientMsgId });
-    this.messagesSent++;
-    // AC3.3: chỉ tính "attempt" ngay lúc emit — success/fail quyết định bởi echo/không-echo
-    worker.onChatSent(this);
+    // Network impairment: packet loss — KHÔNG emit (outbox chờ echo → NO_ECHO_TIMEOUT đo hệ thống
+    // xử lý mạng yếu thế nào: retry/rate-limit/echo pipeline).
+    if (this.shouldDrop()) return;
+    this.sendInFlight = true;
+    try {
+      await this.netDelay();
+      // Re-check sau netDelay (có thể 30s): socket có thể disconnect trong lúc chờ (chaos
+      // disconnect_all / gateway drop). Không re-check → emit phantom vào outbox → 60s sau
+      // NO_ECHO_TIMEOUT fires metric no-echo giả (m1).
+      if (!this.socket?.connected || !this.roomId) return;
+      const clientMsgId = uuidV4();
+      const content = genChatContent(this.index);
+      this.outbox.set(clientMsgId, { clientMsgId, sentAt: Date.now() });
+      this.markActionStart('chat');
+      this.socket.emit('chat:send', { roomId: this.roomId, content, clientMsgId });
+      this.messagesSent++;
+      // AC3.3: chỉ tính "attempt" ngay lúc emit — success/fail quyết định bởi echo/không-echo
+      worker.onChatSent(this);
+    } finally {
+      this.sendInFlight = false;
+    }
   }
 
   sendTyping(worker: WorkerRuntime) {
+    if (this.typingInFlight) return;
     if (!this.socket?.connected || !this.roomId) return;
-    this.markActionStart('typing');
-    this.socket.emit('chat:typing', { roomId: this.roomId });
-    this.markActionEnd('typing', 0);
-    worker.recordAction('typing', 0, true, this, 'chat:typing');
+    if (this.shouldDrop()) return;
+    this.typingInFlight = true;
+    void this.netDelay()
+      .then(() => {
+        this.typingInFlight = false;
+        if (!this.socket?.connected || !this.roomId) return;
+        this.markActionStart('typing');
+        this.socket.emit('chat:typing', { roomId: this.roomId });
+        this.markActionEnd('typing', 0);
+        worker.recordAction('typing', 0, true, this, 'chat:typing');
+      })
+      .catch(() => {
+        this.typingInFlight = false;
+      });
+  }
+
+  /** vote_kick (F1): start vote 1 thành viên ngẫu nhiên (chỉ khi in_room, ≥2 member, chưa active). */
+  startVoteKick(worker: WorkerRuntime) {
+    if (!this.socket?.connected || !this.roomId || this.activeVoteKick) return;
+    const me = this.account.userId;
+    const targets = this.members.filter((id) => id && id !== me);
+    if (targets.length === 0) return;
+    if (this.shouldDrop()) return; // packet loss — không emit
+    const targetUserId = targets[Math.floor(Math.random() * targets.length)];
+    this.markActionStart('vote_kick');
+    this.socket.emit('chat:vote_kick:start', { roomId: this.roomId, targetUserId });
+    this.activeVoteKick = { targetUserId, voted: false };
+    this.markActionEnd('vote_kick', 0);
+    worker.recordAction('vote_kick', 0, true, this, '');
   }
 
   /** Dọn outbox hết TTL → đếm no-echo (rate-limited / Kafka chậm) — PRD AC3.3. */
@@ -375,64 +572,70 @@ export class VirtualUser {
   }
 
   async runRest(worker: WorkerRuntime) {
-    if (this.profile === 'chat') {
-      // F1: 'read' không được chọn (0%) → user chat KHÔNG tự read khi cooldown — chỉ giữ chat.
-      if ((worker.config?.profile?.read ?? 0) === 0) return;
-      // chat profile ngoài phòng/cooldown: chỉ đọc nhẹ
-      this.markActionStart('read');
-      await worker.rest.readPostDetail(this.account.accessToken).then((r) => {
-        this.markActionEnd('read', r.detail.latencyMs);
-        worker.recordResult('read', r.detail, this);
-      });
-      return;
-    }
-    const driver = worker.rest;
-    let res: ActionResult;
-    switch (this.profile) {
-      case 'read': {
+    if (this.restInFlight) return; // FIX: call trước còn in-flight → không gửi request thứ 2 song song
+    this.restInFlight = true;
+    try {
+      if (this.profile === 'chat') {
+        // F1: 'read' không được chọn (0%) → user chat KHÔNG tự read khi cooldown — chỉ giữ chat.
+        if ((worker.config?.profile?.read ?? 0) === 0) return;
+        // chat profile ngoài phòng/cooldown: chỉ đọc nhẹ
         this.markActionStart('read');
-        const r = await driver.readPostDetail(this.account.accessToken);
-        this.markActionEnd('read', r.detail.latencyMs);
-        worker.recordResult('read', r.detail, this);
-        if (r.view) worker.recordResult('view', r.view, this);
+        await worker.rest.readPostDetail(this.account.accessToken).then((r) => {
+          this.markActionEnd('read', r.detail.latencyMs);
+          worker.recordResult('read', r.detail, this);
+        });
         return;
       }
-      case 'comment': {
-        if (Math.random() < 0.6) {
-          this.markActionStart('comment');
-          res = await driver.createComment(this.account.accessToken, this.index);
-          this.markActionEnd('comment', res.latencyMs);
-          worker.recordResult('comment', res, this);
-        } else {
-          this.markActionStart('comment');
-          res = await driver.readComments(this.account.accessToken);
-          this.markActionEnd('comment', res.latencyMs);
-          worker.recordResult('comment', res, this);
+      const driver = worker.rest;
+      let res: ActionResult;
+      switch (this.profile) {
+        case 'read': {
+          this.markActionStart('read');
+          const r = await driver.readPostDetail(this.account.accessToken);
+          this.markActionEnd('read', r.detail.latencyMs);
+          worker.recordResult('read', r.detail, this);
+          if (r.view) worker.recordResult('view', r.view, this);
+          return;
         }
-        return;
+        case 'comment': {
+          if (Math.random() < 0.6) {
+            this.markActionStart('comment');
+            res = await driver.createComment(this.account.accessToken, this.index);
+            this.markActionEnd('comment', res.latencyMs);
+            worker.recordResult('comment', res, this);
+          } else {
+            this.markActionStart('comment');
+            res = await driver.readComments(this.account.accessToken);
+            this.markActionEnd('comment', res.latencyMs);
+            worker.recordResult('comment', res, this);
+          }
+          return;
+        }
+        case 'like': {
+          this.markActionStart('like');
+          res = await driver.likePost(this.account.accessToken);
+          this.markActionEnd('like', res.latencyMs);
+          worker.recordResult('like', res, this);
+          return;
+        }
+        case 'view': {
+          this.markActionStart('view');
+          res = await driver.viewPost(this.account.accessToken);
+          this.markActionEnd('view', res.latencyMs);
+          worker.recordResult('view', res, this);
+          return;
+        }
+        case 'post': {
+          // F3: join community PUBLIC 1 lần (RestDriver nhớ state) rồi đăng bài — pacing 20s/user.
+          this.markActionStart('post');
+          res = await driver.createPost(this.account.accessToken, this.index);
+          this.markActionEnd('post', res.latencyMs);
+          worker.recordResult('post', res, this);
+          return;
+        }
       }
-      case 'like': {
-        this.markActionStart('like');
-        res = await driver.likePost(this.account.accessToken);
-        this.markActionEnd('like', res.latencyMs);
-        worker.recordResult('like', res, this);
-        return;
-      }
-      case 'view': {
-        this.markActionStart('view');
-        res = await driver.viewPost(this.account.accessToken);
-        this.markActionEnd('view', res.latencyMs);
-        worker.recordResult('view', res, this);
-        return;
-      }
-      case 'post': {
-        // F3: join community PUBLIC 1 lần (RestDriver nhớ state) rồi đăng bài — pacing 20s/user.
-        this.markActionStart('post');
-        res = await driver.createPost(this.account.accessToken, this.index);
-        this.markActionEnd('post', res.latencyMs);
-        worker.recordResult('post', res, this);
-        return;
-      }
+    } finally {
+      this.restInFlight = false;
     }
   }
 
@@ -453,11 +656,18 @@ export class VirtualUser {
         this.phase = 'cooldown';
         this.cooldownUntil = Date.now() + COOLDOWN_MS;
       } else if (res.code === 'CHAT_ALREADY_SEATED') {
-        // state lệch: user thật sự đã ngồi — reconcile qua my-room ở chu kỳ sau
+        // state lệch: user thật sự đã ngồi — reconcile qua my-room ở chu kỳ sau.
+        // KHÔNG đếm failTotal (409 nghiệp vụ — user đã seated sẵn, không phải lỗi hệ thống):
+        // chỉ đếm reconcile + top-errors cho visibility.
         this.phase = 'connected';
+        this.reconcileCount++;
+        worker.recordReconcile(this);
       } else {
         this.phase = 'idle';
       }
+      // FIX: reset queuedAt ở MỌI nhánh fail — queuedAt cũ >60s từ chu kỳ trước (leaveRoom/cooldown)
+      // bị tick() coi là MATCH_TIMEOUT phantom trong lúc await enqueue in-flight (phase='queued').
+      this.queuedAt = 0;
       this.resetAction(); // FIX-2: enqueue fail → không còn chờ matching — bảng users không thấy "Đang chat"
       this.lastError = sanitizeLogText(`enqueue: ${res.code}`, 160);
       worker.recordResult('chat', res, this);
@@ -470,6 +680,12 @@ export class VirtualUser {
   }
   private lastEnqueueAt = 0;
   private queuedAt = 0;
+  /** FIX: REST action đang in-flight — REST call có thể mất 30s (15s×2 retry) > interval 3s → không chồng request. */
+  private restInFlight = false;
+  /** sendChat đang in-flight (await netDelay) — chống re-entry khi netDelay > 2s (burst emit + false no-echo). */
+  private sendInFlight = false;
+  /** sendTyping đang in-flight — cùng lý do sendInFlight. */
+  private typingInFlight = false;
 
   async ensureJoined(worker: WorkerRuntime) {
     // reconnect/start: reconcile my-room (PRD §1.3) → nếu đang ngồi thì re-join
@@ -491,6 +707,8 @@ export class VirtualUser {
     }
     this.socketConnected = false;
     this.outbox.clear();
+    // FIX: reset queuedAt — chu kỳ chat sau reconnect không kế thừa queuedAt cũ (MATCH_TIMEOUT phantom)
+    this.queuedAt = 0;
   }
 
   toRow(): VirtualUserRow {
@@ -531,11 +749,17 @@ export class WorkerRuntime {
     connectAttempts: 0, connectFails: 0,
     connectFailsByType: { ...EMPTY_CONNECT_FAILS }, // sum per-user runtimeStats trong emitTick (T4)
     usersFailed: 0, // T3 đếm phase 'failed' trong emitTick — init 0 (T1)
+    reconcileCount: 0, // CHAT_ALREADY_SEATED — state reconcile, KHÔNG phải fail
+    reconnectTotalMs: 0, // reconnect quality — sum per-user trong emitTick
+    reconnectMaxMs: 0,
+    usersLost: 0, // everConnected nhưng cuối cùng mất kết nối
   };
   private histograms = new Map<string, BucketedHistogram>();
   private actionOk = new Map<string, number>();
   private actionFail = new Map<string, number>();
   private errorCounters = new Map<string, number>();
+  /** Error theo giai đoạn (connect/matching/chat/rest/...) — report tách tầng. */
+  private errorCountersByStage = new Map<string, Map<string, number>>();
   private errorSamples: WorkerTick['errorSamples'] = [];
   private secCounters = new Map<number, Partial<Record<string, number>>>();
   private currentSecKey = 0;
@@ -549,6 +773,12 @@ export class WorkerRuntime {
   /** F3 — paced connect theo rampRate (user/s chia đều cho worker). */
   private rampStartedAt = 0;
   private connectStarted = 0;
+  /** Chaos: index các event đã apply (theo elapsedSec). */
+  private chaosApplied = new Set<number>();
+  /** Chaos: chặn reconnect tới khi hết block window (block_reconnect). */
+  private chaosBlockUntil = 0;
+  /** Soak: lần refresh token gần nhất (throttle 5s giữa các đợt refresh). */
+  private lastRefreshAt = 0;
   onMessage: ((msg: unknown) => void) | null = null;
 
   constructor(workerId: number, env: LoadTestEnv) {
@@ -567,11 +797,12 @@ export class WorkerRuntime {
     this.accounts = accounts;
     this.rest = new RestDriver(config.gatewayUrl, this.env);
     this.users = accounts.map(
-      (acc, i) => new VirtualUser(i, acc, pickProfile(config.profile), config.gatewayUrl),
+      (acc, i) => new VirtualUser(i, acc, pickProfile(config.profile), config.gatewayUrl, config.network),
     );
     for (const u of this.users) {
       u.onEchoOk = (latencyMs) => this.recordEchoOk(latencyMs);
       u.onError = (code, message, action) => this.recordError(code, message, u, action);
+      u.onVoteKickVote = () => this.recordAction('vote_kick', 0, true, u, '');
       // F3: KHÔNG connect ngay — scheduler connect theo rampRate (paced)
     }
     this.rampStartedAt = Date.now();
@@ -616,6 +847,17 @@ export class WorkerRuntime {
   private schedulerTick() {
     if (this.stopping) return;
     const now = Date.now();
+    this.chaosTick(now);
+
+    // Soak: refresh access token định kỳ per-user (50phut — token TTL 1h) để chạy quá 60 phút.
+    // Worker-level 5s throttle giới hạn tần suất loop; per-user cadence + in-flight guard
+    // chống re-entry. Reconnect (recreate socket) được stagger qua chaos backoff 3-15s/user.
+    if (this.config && !this.paused && now - this.rampStartedAt >= 55 * 60_000 && now - this.lastRefreshAt >= 5_000) {
+      this.lastRefreshAt = now;
+      for (const u of this.users) {
+        if (now - u.lastTokenRefreshAt >= 50 * 60_000) void this.maybeRefreshToken(u);
+      }
+    }
 
     // F3: paced connect theo rampRate — mỗi worker nhận rampRate/workerCount user/s.
     // F2: rampMode='burst' → connect TOÀN BỘ user ngay tick đầu (vòng while sẵn cạn user trong ~1 tick).
@@ -654,12 +896,84 @@ export class WorkerRuntime {
           case 'typing': u.sendTyping(this); break;
           case 'topic': void this.doTopic(u); break;
           case 'rest': void u.runRest(this); break;
+          case 'vote_kick': u.startVoteKick(this); break;
         }
       }
       if (u.profile === 'chat') {
         void u.ensureChatCycle(this, now);
         if (now % 10_000 < 100) void u.ensureJoined(this); // reconcile định kỳ ~10s
       }
+    }
+  }
+
+  /** Chaos scheduler (failure injection theo elapsedSec): apply event đúng giờ + resume đúng lúc. */
+  private chaosTick(now: number) {
+    const events = this.config?.chaos?.events;
+    if (events?.length) {
+      const elapsedSec = Math.floor((now - this.rampStartedAt) / 1000);
+      for (let i = 0; i < events.length; i++) {
+        const ev = events[i];
+        if (this.chaosApplied.has(i)) continue;
+        if (elapsedSec < ev.atSec) continue;
+        this.chaosApplied.add(i);
+        if (ev.action === 'disconnect_all') {
+          let n = 0;
+          for (const u of this.users) {
+            if (u.socketConnected) {
+              u.chaosDisconnect();
+              n++;
+            }
+          }
+          ltLog.info(`worker#${this.workerId}: chaos disconnect_all @${elapsedSec}s — ngắt ${n} sockets`, { workerId: this.workerId });
+        } else if (ev.action === 'block_reconnect') {
+          this.chaosBlockUntil = now + Math.max(1, ev.durationSec ?? 60) * 1000;
+          ltLog.info(`worker#${this.workerId}: chaos block_reconnect ${ev.durationSec ?? 60}s @${elapsedSec}s`, { workerId: this.workerId });
+        }
+      }
+    }
+    // Hết block window → cho phép connect lại (chaosResume ở loop dưới tự chạy)
+    if (this.chaosBlockUntil > 0 && now >= this.chaosBlockUntil) {
+      this.chaosBlockUntil = 0;
+      ltLog.info(`worker#${this.workerId}: chaos block_reconnect hết hạn — resume`, { workerId: this.workerId });
+    }
+    // disconnect_all: connect lại sau backoff 3-15s/user (tránh thundering herd)
+    if (this.chaosBlockUntil <= 0) {
+      for (const u of this.users) {
+        if (u.chaosDisconnectedAt > 0) {
+          const backoff = 3000 + (u.index % 12) * 1000;
+          if (now >= u.chaosDisconnectedAt + backoff) u.chaosResume();
+        }
+      }
+    }
+  }
+
+  /** Soak: refresh access token trước khi hết hạn (1h) — recreate socket để token mới có hiệu lực. */
+  private async maybeRefreshToken(u: VirtualUser) {
+    // Per-user 50phut cadence + in-flight guard — scheduler 100ms có thể gọi lại khi refresh đang await.
+    if (u.tokenRefreshInFlight) return;
+    u.tokenRefreshInFlight = true;
+    try {
+      const res = await this.rest.refreshAccessToken(u.account.refreshToken);
+      if (res.ok && res.accessToken) {
+        u.account.accessToken = res.accessToken;
+        u.lastTokenRefreshAt = Date.now(); // success → 50phut tới lần refresh kế tiếp
+        // Socket giữ token cũ (auth + header snapshot lúc io()) → ngắt; chaosResume (sau backoff
+        // 3-15s/user — tránh thundering herd) sẽ recreate socket với token mới.
+        if (u.socketConnected) u.chaosDisconnect();
+        else if (u.phase === 'failed') {
+          // user failed vì token hết hạn — revive: chaosResume recreate socket với token mới.
+          u.phase = 'connecting';
+          u.chaosDisconnectedAt = Date.now();
+        }
+        ltLog.info(`worker#${this.workerId}: refresh token user#${u.index} — recreate socket với token mới`, { workerId: this.workerId });
+      } else {
+        // fail → retry sau 5phut (không đợi 50phut — có thể lỗi tạm, muốn phục hồi sớm).
+        u.lastTokenRefreshAt = Date.now() - 45 * 60_000;
+        u.lastError = sanitizeLogText(`refresh token fail: ${res.error ?? res.code ?? 'unknown'}`, 160);
+        ltLog.warn(`worker#${this.workerId}: refresh token fail user#${u.index} (${res.code})`, { workerId: this.workerId });
+      }
+    } finally {
+      u.tokenRefreshInFlight = false;
     }
   }
 
@@ -749,7 +1063,12 @@ export class WorkerRuntime {
   recordResult(action: string, res: ActionResult, u: VirtualUser) {
     if (res.code === 'LIKE_PACED_SKIP') return; // không phải action thật
     if (res.code === 'NO_POST_FIXTURE') {
+      // T-07/S-12: action bị BỎ QUA (feed trống) — đếm 1 lần vào error counter, KHÔNG gọi
+      // recordAction (trước đây recordAction(fail) đếm recordError lần 2 + vào failTotal →
+      // success rate sai dù design nói "bị bỏ qua").
       this.recordError('NO_POST_FIXTURE', 'Chưa có post fixture trong feed', u);
+      u.lastError = sanitizeLogText(`${action}:${res.code}`, 160);
+      return;
     }
     this.recordAction(action, res.latencyMs, res.ok, u, res.code || '');
     if (!res.ok) {
@@ -758,13 +1077,26 @@ export class WorkerRuntime {
   }
 
   /** Cap số loại error code riêng biệt (S-4 R2): gateway bơm N code lạ → bucket 'OTHER' (chống map vô hạn). */
-  recordError(code: string, message: string, u: VirtualUser, action: ErrorSample['action'] = 'chat') {
+  recordError(code: string, message: string, u: VirtualUser, action: ErrorSample['action'] = 'chat', stage?: ErrorSample['stage']) {
     code = sanitizeLogText(code, 64); // F-4: cap 64 — TOP ERRORS/report file không bị bloat
     message = sanitizeLogText(message, 160); // F-2/F-3: errorSamples sạch (thay slice(0,160))
     const key = this.errorCounters.has(code) || this.errorCounters.size < MAX_ERROR_CODES ? code : 'OTHER';
     this.errorCounters.set(key, (this.errorCounters.get(key) ?? 0) + 1);
-    this.errorSamples.push({ ts: Date.now(), action, code, message, userId: u.account.email });
+    const st = stage ?? stageForAction(action, code);
+    let byStage = this.errorCountersByStage.get(st);
+    if (!byStage) {
+      byStage = new Map();
+      this.errorCountersByStage.set(st, byStage);
+    }
+    byStage.set(key, (byStage.get(key) ?? 0) + 1);
+    this.errorSamples.push({ ts: Date.now(), action, stage: st, code, message, userId: u.account.email });
     if (this.errorSamples.length > 20) this.errorSamples.shift();
+  }
+
+  /** CHAT_ALREADY_SEATED (409) — user đã ngồi sẵn: đếm reconcile, KHÔNG vào failTotal/actionsTotal. */
+  recordReconcile(u: VirtualUser) {
+    this.counters.reconcileCount++;
+    this.recordError('CHAT_ALREADY_SEATED', 'user đã ngồi phòng — reconcile qua my-room', u, 'chat', 'matching');
   }
 
   private emitTick(final = false) {
@@ -786,6 +1118,18 @@ export class WorkerRuntime {
     this.counters.usersInRoom = inRoom;
     this.counters.reconnectCount = reconnect;
     this.counters.usersFailed = failed; // phase 'failed' terminal (DESIGN §5.1) → đếm đúng 1 lần/user
+    // Reconnect quality + usersLost (everConnected nhưng cuối tick không còn kết nối — kể cả failed)
+    let reconnectTotalMs = 0, reconnectMaxMs = 0, usersLost = 0, reconcile = 0;
+    for (const u of this.users) {
+      reconnectTotalMs += u.reconnectTotalMs;
+      reconnectMaxMs = Math.max(reconnectMaxMs, u.reconnectMaxMs);
+      reconcile += u.reconcileCount;
+      if (u.everConnected && !u.socketConnected) usersLost++;
+    }
+    this.counters.reconnectTotalMs = reconnectTotalMs;
+    this.counters.reconnectMaxMs = reconnectMaxMs;
+    this.counters.usersLost = usersLost;
+    this.counters.reconcileCount = reconcile;
     // Periodic summary 10s/worker — dễ theo dõi worker đang làm gì.
     if (!final && now - this.lastSummaryAt > 10_000) {
       this.lastSummaryAt = now;
@@ -827,6 +1171,15 @@ export class WorkerRuntime {
     const histograms: Partial<Record<string, number[]>> = {};
     for (const [action, h] of this.histograms) histograms[action] = h.buckets;
 
+    // Error theo giai đoạn (report tách tầng) — top-10 mỗi stage
+    const errorsByStage: Record<string, { code: string; count: number }[]> = {};
+    for (const [stage, byCode] of this.errorCountersByStage) {
+      errorsByStage[stage] = [...byCode.entries()]
+        .map(([code, count]) => ({ code, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+    }
+
     const tick: WorkerTick = {
       type: 'tick',
       workerId: this.workerId,
@@ -837,6 +1190,7 @@ export class WorkerRuntime {
       actionOk: Object.fromEntries(this.actionOk) as WorkerTick['actionOk'],
       actionFail: Object.fromEntries(this.actionFail) as WorkerTick['actionFail'],
       errors: Object.fromEntries(this.errorCounters),
+      errorsByStage,
       errorSamples: [...this.errorSamples],
       histograms,
       histogramBucketCount: HISTOGRAM_BUCKETS,

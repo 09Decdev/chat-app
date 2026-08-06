@@ -27,12 +27,17 @@ export default function SettingsPage() {
   const [showSecrets, setShowSecrets] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // GET allowlist fail → không reset mảng (tránh "Lưu" ghi đè allowlist server bằng []), disable nút lưu.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     loadtestApi
       .allowlist()
-      .then(({ allowlist }) => setUrls(allowlist))
-      .catch(() => setUrls([]));
+      .then(({ allowlist }) => {
+        setUrls(allowlist);
+        setLoadError(null);
+      })
+      .catch((e) => setLoadError(toApiError(e).message));
   }, []);
 
   const addUrl = () => {
@@ -77,6 +82,13 @@ export default function SettingsPage() {
       <h1 className="text-lg font-semibold">CÀI ĐẶT</h1>
       {saveError && (
         <AlertBanner variant="destructive" title="Không lưu được cấu hình" description={saveError} />
+      )}
+      {loadError && (
+        <AlertBanner
+          variant="destructive"
+          title="Không đọc được allowlist từ server"
+          description={`${loadError} — nút lưu bị khóa để không ghi đè cấu hình server bằng danh sách rỗng.`}
+        />
       )}
 
       <div className="grid gap-4 lg:grid-cols-12">
@@ -235,12 +247,12 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <div className="fixed inset-x-0 bottom-16 z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
+      <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
         <div className="flex gap-3">
           <Button variant="outline" className="min-h-12 flex-1" onClick={() => navigate(-1)}>
             Hủy
           </Button>
-          <Button className="min-h-12 flex-1" disabled={saving} onClick={() => void save()}>
+          <Button className="min-h-12 flex-1" disabled={saving || !!loadError} onClick={() => void save()}>
             {saving ? 'Đang lưu...' : 'Lưu cấu hình'}
           </Button>
         </div>

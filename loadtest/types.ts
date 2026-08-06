@@ -9,7 +9,7 @@ export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' 
 export const ACTION_TYPES: ActionType[] = ['chat', 'read', 'comment', 'like', 'view', 'post', 'typing', 'topic', 'vote_kick'];
 
 /** Trạng thái action hiện tại của 1 virtual user ('idle' = không làm gì, null = chưa hành động). */
-export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'idle';
+export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick' | 'idle';
 
 /** Phase lifecycle 1 virtual user (bảng users virtualized). */
 export type UserPhase = 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';
@@ -37,15 +37,55 @@ export interface ActionProfile {
   post?: number;
 }
 
+/** Cấu hình network impairment (mô phỏng user mạng yếu — delay/drop phía client). */
+export interface NetworkImpairment {
+  /** Delay thêm (ms) trước mỗi socket emit — 0/undefined = tắt. */
+  latencyMs?: number;
+  /** Biến thiên ± (ms) quanh latencyMs. */
+  jitterMs?: number;
+  /** % socket message bị drop ngẫu nhiên (0-100) — 0/undefined = tắt. */
+  dropRate?: number;
+}
+
+/** 1 sự kiện chaos theo lịch (failure injection — đo recovery). */
+export interface ChaosEvent {
+  /** Thời điểm trigger (giây kể từ lúc bắt đầu connect ramp). */
+  atSec: number;
+  /** disconnect_all: ngắt mạnh 100% socket đang kết nối (mô phỏng mất mạng di động). */
+  action: 'disconnect_all' | 'block_reconnect';
+  /** Cho block_reconnect: chặn reconnect trong durationSec rồi cho quay lại. */
+  durationSec?: number;
+}
+
+/** F3: SLO/thresholds — eval pass/fail sau run (cho CI exit code). */
+export interface Thresholds {
+  /** P95 latency tối đa (ms) — overall p95 (max across actions). */
+  p95Ms?: number;
+  /** Success rate tối thiểu (%) — 0-100. */
+  successRate?: number;
+  /** Echo rate tối thiểu (%) — 0-100. */
+  echoRate?: number;
+}
+
+/** F3: kết quả eval 1 threshold. */
+export interface ThresholdResult {
+  metric: string;
+  threshold: number;
+  actual: number;
+  pass: boolean;
+  unit: string;
+}
+
 /** Cấu hình 1 run — đúng form Control Panel (Màn 1). */
 export interface RunConfig {
   runId: string;
   targetUsers: number; // 10k-100k MVP
   rampRate: number; // user/s connect + action start
   /** 'rate' = connect theo rampRate/s · 'minutes' = rampRate là target/phút (chưa dùng — parse/lưu)
-   *  'burst' (F2) = connect TOÀN BỘ user ngay tick đầu (không pacing). */
-  rampMode: 'rate' | 'minutes' | 'burst';
-  durationMin: number; // ≤ 60 (access token 1h)
+   *  'burst' (F2) = connect TOÀN BỘ user ngay tick đầu · 'breakpoint' (F2) = ramp tới khi success
+   *  rate tụt < 90% → dừng, ghi điểm gãy (operator set targetUsers = cap cao). */
+  rampMode: 'rate' | 'minutes' | 'burst' | 'breakpoint';
+  durationMin: number; // ≤ 720 (soak; access token tự refresh sau 55 phút)
   durationSec: number; // = durationMin * 60 (đã resolve)
   profile: ActionProfile; // tổng 100
   gatewayUrl: string; // ws:// hoặc http:// — phải nằm trong allowlist
@@ -56,17 +96,29 @@ export interface RunConfig {
   freshAccounts: boolean; // --fresh: bỏ token pool disk, register lại
   seed: number; // hạt ngẫu nhiên ổn định cho id/user
   createdAt: number;
+  /** Network impairment (mạng yếu) — optional, default tắt. */
+  network?: NetworkImpairment;
+  /** Failure injection theo lịch — optional, default không có. */
+  chaos?: { events: ChaosEvent[] };
+  /** F3: SLO/thresholds — optional, eval pass/fail sau run. */
+  thresholds?: Thresholds;
 }
 
 /** Cấu hình tiêu chuẩn do UI bấm (trước khi server resolve runId/workerCount...). */
 export interface StartRunRequest {
   targetUsers: number;
   rampRate: number;
-  rampMode: 'rate' | 'minutes' | 'burst';
+  rampMode: 'rate' | 'minutes' | 'burst' | 'breakpoint';
   durationMin: number;
   profile: ActionProfile;
   gatewayUrl: string;
   freshAccounts?: boolean;
+  /** Network impairment (mạng yếu) — optional. */
+  network?: NetworkImpairment;
+  /** Failure injection theo lịch — optional. */
+  chaos?: { events: ChaosEvent[] };
+  /** F3: SLO/thresholds — optional. */
+  thresholds?: Thresholds;
 }
 
 /** 1 account test đã provision (AF-2 token pool). */
@@ -115,12 +167,22 @@ export interface WorkerTick {
     connectFailsByType: ConnectFailsByType;
     /** Số user phase='failed' (T3/T4) — cumulative per-worker từ lúc process khởi động. */
     usersFailed: number;
+    /** Enqueue bị 409 CHAT_ALREADY_SEATED — state reconcile (đã ngồi sẵn), KHÔNG tính fail. */
+    reconcileCount: number;
+    /** Tổng thời gian reconnect thành công (disconnect → connect lại) — reconnect quality. */
+    reconnectTotalMs: number;
+    /** Reconnect chậm nhất (ms) — p99 mạng yếu. */
+    reconnectMaxMs: number;
+    /** User đã từng connected nhưng kết thúc run ở trạng thái mất kết nối (không hồi phục). */
+    usersLost: number;
   };
   actionsPerSec: Partial<Record<ActionType, number>>;
   /** Kết quả theo action (cumulative) — AC6.1 per-action success rate. */
   actionOk: Partial<Record<ActionType, number>>;
   actionFail: Partial<Record<ActionType, number>>;
   errors: Record<string, number>; // code → count (đã cộng dồn)
+  /** Lỗi tách theo giai đoạn (top-10 mỗi stage) — report tách tầng connect/matching/chat/rest. */
+  errorsByStage: Record<string, { code: string; count: number }[]>;
   errorSamples: ErrorSample[]; // tối đa 20 mẫu mới nhất
   histograms: Partial<Record<ActionType, number[]>>; // bucket counts (log-scale, 48 buckets)
   histogramBucketCount: number;
@@ -132,6 +194,8 @@ export interface WorkerTick {
 export interface ErrorSample {
   ts: number;
   action: ActionType | 'register' | 'login' | 'connect';
+  /** Giai đoạn xảy ra lỗi — report tách theo tầng (connect/matching/chat/rest/other). */
+  stage: 'connect' | 'matching' | 'chat' | 'rest' | 'register' | 'login' | 'other';
   code: string; // HTTP status / error code / socket error
   message: string; // rút gọn
   userId: string;
@@ -200,6 +264,10 @@ export interface LoadTestTick {
     connectFails: number; // cùng semantics
     connectFailsByType: ConnectFailsByType;
     usersFailed: number; // user phase='failed' (cumulative per-worker)
+    reconcileCount: number; // CHAT_ALREADY_SEATED — state reconcile, KHÔNG phải fail
+    reconnectTotalMs: number; // tổng thời gian hồi phục (ms) — avg = total/count
+    reconnectMaxMs: number;
+    usersLost: number; // everConnected nhưng cuối cùng mất kết nối
   };
   rates: { successRate: number; echoRate: number; connectFailRate: number };
   /** TRUE trên tick LIVE (aggregate/provisioning); FALSE trên DB-replay (toMetricTick — MVP không persist) — UI-1. */
@@ -207,8 +275,10 @@ export interface LoadTestTick {
   actionsPerSec: Partial<Record<ActionType, number>>;
   latency: { p50: number; p95: number; p99: number };
   errors: { code: string; count: number }[];
+  /** Lỗi tách theo giai đoạn (tick live) — report tổng theo stage. */
+  errorsByStage: Record<string, { code: string; count: number }[]>;
   server: { wsConnections: number; wsMessagesEmitted: number; wsMessagesPerSec: number };
-  workers: { alive: number; total: number; cpuAvg: number };
+  workers: { alive: number; total: number; cpuAvg: number; rssAvgMb: number };
 }
 
 /** Báo cáo 1 action trong report (RE-1). */
@@ -254,13 +324,32 @@ export interface RunReport {
     throughputAvg: number; // action/s trung bình
     throughputPeak: number;
     queueCountPeak: number;
+    /** Reconnect quality — thời gian hồi phục sau mất mạng (chaos/network impairment). */
+    reconnectCount: number;
+    avgReconnectMs: number;
+    maxReconnectMs: number;
+    /** % user đã từng connected nhưng cuối run không hồi phục được (mất hẳn). */
+    usersLost: number;
+    usersLostPct: number;
+    /** Enqueue bị 409 (đã ngồi phòng) — state reconcile, không phải fail. */
+    reconcileCount: number;
   };
   perAction: ActionReport[];
   errors: { code: string; count: number }[];
+  /** Lỗi tách theo giai đoạn (connect/matching/chat/rest/register/login/other). */
+  errorsByStage?: Record<string, { code: string; count: number }[]>;
+  /** Chaos events đã apply (failure injection) — timeline phục vụ đối chiếu recovery. */
+  chaosApplied?: { atSec: number; action: string; durationSec?: number }[];
   bottlenecks: BottleneckCandidate[];
   stopReason?: string;
   /** Số lần NO_POST_FIXTURE (T-07/S-12) — feed trống, action read/view/comment/like bị bỏ qua. */
   noPostFixtureSkipped?: number;
+  /** F2: điểm gãy — chỉ có khi rampMode='breakpoint' dừng do success rate tụt. */
+  breakpoint?: { usersConnected: number; atSec: number; reason: string };
+  /** F3: kết quả eval thresholds (chỉ có khi RunConfig.thresholds set). */
+  thresholdResults?: ThresholdResult[];
+  /** F3: true nếu mọi threshold pass (hoặc không có thresholds) — CLI exit 0. */
+  thresholdsPassed?: boolean;
 }
 
 /** Message IPC coordinator → worker. */

@@ -13,6 +13,7 @@ export type StopKind = 'auto' | 'manual' | 'kill';
 export interface StopDecision {
   stop: boolean;
   reason?: string;
+  kind?: 'E1' | 'E2' | 'breakpoint';
 }
 
 /** Chuyển phase hợp lệ. */
@@ -51,6 +52,12 @@ export interface AutoStopInput {
   connectFailRate: number; // 0-100
   registeredTotal: number; // tổng đã thử register
   connectTotal: number; // tổng đã thử connect
+  /** F2: breakpoint mode — dừng khi success rate < ngưỡng (hệ thống gãy, không chỉ connect-fail). */
+  breakpoint?: {
+    enabled: boolean;
+    successRate: number; // 0-100 (cumulative tick)
+    actionsTotal: number; // cumulative — cần ≥ BREAKPOINT_MIN_ACTIONS mới eval
+  };
 }
 
 /** Format rate cho reason/stopReason — 1 chữ số thập phân (F6: 30.1 → "30.1", không làm tròn 30). */
@@ -60,12 +67,19 @@ function formatRatePct(rate: number): string {
 
 export function decideAutoStop(input: AutoStopInput): StopDecision {
   if (input.registerFailRate > 50 && input.registeredTotal >= 10) {
-    return { stop: true, reason: `auto-stop: register fail ${formatRatePct(input.registerFailRate)}% > 50% (E1)` };
+    return { stop: true, kind: 'E1', reason: `auto-stop: register fail ${formatRatePct(input.registerFailRate)}% > 50% (E1)` };
   }
   // E2: connectTotal = attempts TRONG window 60s (semantics đổi — PRD §6.6 chấp nhận; window chưa đủ
   // 50 attempts → rate 0 từ connectFailRateFromWindow nên nhánh này không trigger — AC-3).
   if (input.connectFailRate > E2_FAIL_RATE_PCT && input.connectTotal >= E2_MIN_ATTEMPTS) {
-    return { stop: true, reason: `auto-stop: connect fail ${formatRatePct(input.connectFailRate)}% > ${E2_FAIL_RATE_PCT}% (E2)` };
+    return { stop: true, kind: 'E2', reason: `auto-stop: connect fail ${formatRatePct(input.connectFailRate)}% > ${E2_FAIL_RATE_PCT}% (E2)` };
+  }
+  // F2: breakpoint — success rate tụt dưới ngưỡng (cần đủ actions mới eval — tránh false sớm).
+  if (input.breakpoint?.enabled) {
+    const bp = input.breakpoint;
+    if (bp.actionsTotal >= BREAKPOINT_MIN_ACTIONS && bp.successRate < BREAKPOINT_SUCCESS_THRESHOLD_PCT) {
+      return { stop: true, kind: 'breakpoint', reason: `success rate ${formatRatePct(bp.successRate)}% < ${BREAKPOINT_SUCCESS_THRESHOLD_PCT}% @ ${bp.actionsTotal} actions (F2)` };
+    }
   }
   return { stop: false };
 }
@@ -95,6 +109,9 @@ export const E2_MIN_ATTEMPTS = 50;
 export const E2_MAX_BUCKETS = 120;
 /** Ngưỡng fail rate E2 (PRD §6.6: KHÔNG cấu hình hóa). */
 export const E2_FAIL_RATE_PCT = 30;
+/** F2: breakpoint — dừng khi success rate tụt (hệ thống gãy dưới tải ramp tăng dần). */
+export const BREAKPOINT_SUCCESS_THRESHOLD_PCT = 90;
+export const BREAKPOINT_MIN_ACTIONS = 1000;
 
 /**
  * Diff cumulative per-worker → delta bucket (T5 wiring dùng).
@@ -216,6 +233,10 @@ export interface AggregatedTick {
   actionFail: Partial<Record<ActionType, number>>;
   /** Error samples gần nhất (tối đa 20). */
   errorSamples: ErrorSample[];
+  // Error totals KHÔNG cắt top-10 (tick.errors chỉ slice 10) — report dùng để tổng run đúng.
+  errorTotals: Record<string, number>;
+  /** Lỗi tách theo giai đoạn (top-10 mỗi stage) — report tách tầng. */
+  errorTotalsByStage: Record<string, Record<string, number>>;
 }
 
 export function aggregateTicks(runId: string, ts: number, elapsedSec: number, phase: RunPhase, ticks: WorkerTick[], _prev?: AggregatedTick): AggregatedTick {
@@ -224,16 +245,20 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
     actionsTotal: 0, successTotal: 0, failTotal: 0, echoOk: 0, echoSent: 0,
     droppedOutbox: 0, reconnectCount: 0, rateLimitedNoEcho: 0,
     connectAttempts: 0, connectFails: 0, usersFailed: 0,
+    reconcileCount: 0, reconnectTotalMs: 0, reconnectMaxMs: 0, usersLost: 0,
     connectFailsByType: { ...EMPTY_CONNECT_FAILS },
   };
   const actionsPerSec: Partial<Record<ActionType, number>> = {};
   const actionOk: Partial<Record<ActionType, number>> = {};
   const actionFail: Partial<Record<ActionType, number>> = {};
   const errors: Record<string, number> = {};
+  const errorsByStage: Record<string, Record<string, number>> = {};
   const histograms: Record<string, number[]> = {};
   let histBucketCount = 0;
   let cpuSum = 0;
   let cpuN = 0;
+  let rssSum = 0;
+  let rssN = 0;
   let errorSamples: ErrorSample[] = [];
 
   for (const t of ticks) {
@@ -250,6 +275,10 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
     C.droppedOutbox += t.counters.droppedOutbox;
     C.reconnectCount += t.counters.reconnectCount;
     C.rateLimitedNoEcho += t.counters.rateLimitedNoEcho;
+    C.reconcileCount += t.counters.reconcileCount ?? 0;
+    C.reconnectTotalMs += t.counters.reconnectTotalMs ?? 0;
+    C.reconnectMaxMs = Math.max(C.reconnectMaxMs, t.counters.reconnectMaxMs ?? 0);
+    C.usersLost += t.counters.usersLost ?? 0;
     // Connect metrics (DESIGN §2) — cumulative per-worker, sum tick mới nhất (BE-2)
     C.connectAttempts += t.counters.connectAttempts;
     C.connectFails += t.counters.connectFails;
@@ -270,6 +299,12 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
       if (fail) actionFail[action] = (actionFail[action] ?? 0) + fail;
     }
     for (const [code, count] of Object.entries(t.errors)) errors[code] = (errors[code] ?? 0) + count;
+    if (t.errorsByStage) {
+      for (const [stage, entries] of Object.entries(t.errorsByStage)) {
+        const target = (errorsByStage[stage] ??= {});
+        for (const e of entries) target[e.code] = (target[e.code] ?? 0) + e.count;
+      }
+    }
     if (t.histograms) {
       for (const [action, buckets] of Object.entries(t.histograms)) {
         const target = (histograms[action] ??= new Array(t.histogramBucketCount || 0).fill(0));
@@ -280,6 +315,10 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
     if (t.cpuPct > 0) {
       cpuSum += t.cpuPct;
       cpuN++;
+    }
+    if (t.rssMb > 0) {
+      rssSum += t.rssMb;
+      rssN++;
     }
     if (t.errorSamples?.length) {
       errorSamples = [...t.errorSamples, ...errorSamples].slice(0, 20);
@@ -325,6 +364,10 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
       connectFails: C.connectFails,
       connectFailsByType: C.connectFailsByType,
       usersFailed: C.usersFailed,
+      reconcileCount: C.reconcileCount,
+      reconnectTotalMs: C.reconnectTotalMs,
+      reconnectMaxMs: C.reconnectMaxMs,
+      usersLost: C.usersLost,
     },
     rates: {
       successRate: successTotal > 0 ? Math.round((C.successTotal / successTotal) * 1000) / 10 : 100,
@@ -335,12 +378,26 @@ export function aggregateTicks(runId: string, ts: number, elapsedSec: number, ph
     actionsPerSec,
     latency: { p50: q.p50, p95: q.p95, p99: q.p99 },
     errors: topErrors,
+    errorsByStage: Object.fromEntries(
+      Object.entries(errorsByStage).map(([stage, byCode]) => [
+        stage,
+        Object.entries(byCode)
+          .map(([code, count]) => ({ code, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 10),
+      ]),
+    ),
     server: { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0 },
-    workers: { alive: ticks.length, total: ticks.length, cpuAvg: cpuN > 0 ? Math.round(cpuSum / cpuN) : 0 },
+    workers: {
+      alive: ticks.length,
+      total: ticks.length,
+      cpuAvg: cpuN > 0 ? Math.round(cpuSum / cpuN) : 0,
+      rssAvgMb: rssN > 0 ? Math.round(rssSum / rssN) : 0,
+    },
     hasConnectData: true, // tick LIVE (DESIGN §2.1 — replay đặt false ở toMetricTick)
   };
 
-  return { tick, perActionHistograms: histograms, actionOk, actionFail, errorSamples };
+  return { tick, perActionHistograms: histograms, actionOk, actionFail, errorSamples, errorTotals: errors, errorTotalsByStage: errorsByStage };
 }
 
 /** Tính throughput peak từ chuỗi tick (dùng report). */

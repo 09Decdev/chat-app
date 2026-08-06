@@ -37,13 +37,15 @@ function tick(ts: number): LoadTestTick {
       connectAttempts: 0, connectFails: 0,
       connectFailsByType: { timeout: 0, transport: 0, reject: 0, other: 0 },
       usersFailed: 0,
+      reconcileCount: 0, reconnectTotalMs: 0, reconnectMaxMs: 0, usersLost: 0,
     },
     rates: { successRate: 100, echoRate: 100, connectFailRate: 0 },
     actionsPerSec: {},
     latency: { p50: 0, p95: 0, p99: 0 },
     errors: [],
+    errorsByStage: {},
     server: { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0 },
-    workers: { alive: 1, total: 1, cpuAvg: 0 },
+    workers: { alive: 1, total: 1, cpuAvg: 0, rssAvgMb: 0 },
     hasConnectData: true,
   };
 }

@@ -57,7 +57,9 @@ export function onAuthFailure(cb: () => void) {
   authFailureCb = cb;
 }
 
-async function doRefresh(): Promise<boolean> {
+/** Refresh token (best-effort, endpoint khong co trong CHAT_API.md).
+ *  Export cho auth.store hydrate — thử refresh trước khi logout khi access hết hạn. */
+export async function doRefresh(): Promise<boolean> {
   const refresh = tokenStorage.refresh;
   if (!refresh) return false;
   const controller = new AbortController();

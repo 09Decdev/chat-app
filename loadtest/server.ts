@@ -78,6 +78,11 @@ async function main() {
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // FIX: promise reject không ai bắt (vd URIError path malformed) → CHỈ log, KHÔNG exit process
+  // (exit qua crash = DoS — attacker bơm request lỗi để giết server).
+  process.on('unhandledRejection', (reason) => {
+    ltLog.error(`unhandledRejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
+  });
 }
 
 main().catch((err) => {

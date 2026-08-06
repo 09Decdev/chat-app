@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import {
   Activity,
   FileBarChart,
+  FlaskConical,
   History,
   LogOut,
   Pause,
@@ -11,10 +12,12 @@ import {
   Settings2,
   SlidersHorizontal,
   TerminalSquare,
+  Trash2,
   Users,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { routes } from '@/lib/env';
@@ -37,11 +40,12 @@ function RunStickyHeader() {
   const stopRun = useLoadtestStore((s) => s.stopRun);
   const pauseRun = useLoadtestStore((s) => s.pauseRun);
   const resumeRun = useLoadtestStore((s) => s.resumeRun);
+  const paused = useLoadtestStore((s) => s.paused);
   const [stopOpen, setStopOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
-  const [paused, setPaused] = useState(false);
-  // 429 rate-limit cooldown (UI-SPEC §5.3) — sticky stop lỗi → toast + disable + countdown.
+  // 429 rate-limit cooldown (UI-SPEC §5.3) — sticky stop lỗi → toast + disable + countdown + progress.
   const [stopCooldown, setStopCooldown] = useState(0);
+  const [stopCooldownTotal, setStopCooldownTotal] = useState(0);
 
   useEffect(() => {
     if (stopCooldown <= 0) return;
@@ -59,6 +63,7 @@ function RunStickyHeader() {
     if (!res.ok) {
       toast.error('Không dừng được run', { description: res.error?.message });
       if (res.error?.retryAfterSec && res.error.retryAfterSec > 0) {
+        setStopCooldownTotal(res.error.retryAfterSec);
         setStopCooldown(res.error.retryAfterSec);
       }
     }
@@ -84,30 +89,30 @@ function RunStickyHeader() {
               size="sm"
               className="min-h-11"
               aria-label={paused ? 'Tiếp tục run' : 'Tạm dừng run'}
-              onClick={() => {
-                if (paused) {
-                  void resumeRun();
-                  setPaused(false);
-                } else {
-                  void pauseRun();
-                  setPaused(true);
-                }
-              }}
+              onClick={() => (paused ? void resumeRun() : void pauseRun())}
             >
               {paused ? <Play className="h-4 w-4" aria-hidden /> : <Pause className="h-4 w-4" aria-hidden />}
               {paused ? 'Tiếp tục' : 'Tạm dừng'}
             </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              className="min-h-11"
-              aria-label="Dừng run"
-              disabled={stopCooldown > 0}
-              onClick={() => setStopOpen(true)}
-            >
-              {stopCooldown > 0 ? `Thử lại sau ${stopCooldown}s` : 'Dừng'}
-            </Button>
+            <div className="relative">
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                className="min-h-11"
+                aria-label={stopCooldown > 0 ? `Thử lại sau ${stopCooldown} giây` : 'Dừng run'}
+                disabled={stopCooldown > 0}
+                onClick={() => setStopOpen(true)}
+              >
+                {stopCooldown > 0 ? `Thử lại sau ${stopCooldown}s` : 'Dừng'}
+              </Button>
+              {stopCooldown > 0 && stopCooldownTotal > 0 && (
+                <Progress
+                  value={(stopCooldown / stopCooldownTotal) * 100}
+                  className="absolute -bottom-1.5 left-0 right-0 h-1"
+                />
+              )}
+            </div>
             <Button
               type="button"
               variant="ghost"
@@ -131,10 +136,12 @@ function RunStickyHeader() {
 
 const NAV_ITEMS = [
   { to: routes.loadtest, label: 'Cấu hình', icon: Settings2 },
+  { to: routes.loadtestScenario, label: 'Kịch bản', icon: FlaskConical },
   { to: routes.loadtestLive, label: 'Live', icon: Activity },
   { to: routes.loadtestUsers, label: 'Users', icon: Users },
   { to: routes.loadtestHistory, label: 'Lịch sử', icon: History },
   { to: routes.loadtestReport, label: 'Báo cáo', icon: FileBarChart },
+  { to: routes.loadtestCleanup, label: 'Dọn dẹp', icon: Trash2 },
   { to: routes.loadtestSettings, label: 'Cài đặt', icon: SlidersHorizontal },
 ];
 
@@ -146,7 +153,7 @@ function MobileBottomNav() {
       className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/80 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden"
       aria-label="Điều hướng chính"
     >
-      <div className="grid grid-cols-6">
+      <div className="flex overflow-x-auto no-scrollbar">
         {NAV_ITEMS.map(({ to, label, icon: Icon }) => {
           const disabled = to === routes.loadtestReport && !reportEnabled;
           const item = (
@@ -157,7 +164,7 @@ function MobileBottomNav() {
               tabIndex={disabled ? -1 : undefined}
               className={({ isActive }) =>
                 cn(
-                  'flex min-h-12 flex-col items-center justify-center gap-0.5 text-xs',
+                  'flex min-h-12 min-w-[4.5rem] flex-shrink-0 flex-col items-center justify-center gap-0.5 text-xs',
                   isActive ? 'text-primary' : 'text-muted-foreground',
                   disabled && 'pointer-events-none opacity-40',
                 )
@@ -256,11 +263,15 @@ function AppShell() {
   const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    void loadConfig();
-  }, [loadConfig]);
+    // F5/reload: store reset phase='idle' → ACTIVE_PHASES không include idle → poll interval không start.
+    // Gọi pollOnce 1 lần trên mount để phát hiện run đang chạy (status.phase từ server).
+    void loadConfig().then(() => void pollOnce());
+  }, [loadConfig, pollOnce]);
 
   useEffect(() => {
-    if (TERMINAL_PHASES.includes(phase)) return;
+    // Chỉ poll khi run đang active (provisioning→report) — idle chưa có run / terminal
+    // đã kết thúc: không gửi 2 request vô ích mỗi giây từ khi login.
+    if (!ACTIVE_PHASES.includes(phase)) return;
     if (timerRef.current !== null) return;
     timerRef.current = window.setInterval(() => {
       void pollOnce();
@@ -280,6 +291,12 @@ function AppShell() {
 
   return (
     <div className="min-h-full">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-[100] focus:rounded-md focus:bg-background focus:px-3 focus:py-2 focus:text-sm focus:shadow"
+      >
+        Bỏ qua tới nội dung
+      </a>
       <DesktopTopNav />
       <RunStickyHeader />
       {/* User bar mobile — header desktop đã hiện admin + logout */}
@@ -301,7 +318,7 @@ function AppShell() {
       <div className="px-4 pt-3">
         <SessionExpiryBanner />
       </div>
-      <main className="mx-auto w-full max-w-6xl px-4 pb-24 pt-4 lg:px-6 lg:pb-10">
+      <main id="main" tabIndex={-1} className="mx-auto w-full max-w-6xl px-4 pb-24 pt-4 focus:outline-none lg:px-6 lg:pb-10">
         {/* Lớp 2 — route-level: crash 1 trang loadtest → fallback, shell + nav + poll 1s sống.
             resetKey=pathname → chuyển trang tự reset. Bọc TRONG guard (guard trả <Outlet/>,
             redirect null không bao giờ crash → không chặn luồng login). */}

@@ -1,19 +1,24 @@
 /**
  * MAYogu LoadTest Tool — password hashing (scrypt, node:crypto) + strength validation.
- * Format hash: `scrypt$16384$8$1$<salt>$<hash>` — khớp db/init.ts (PRD A1: không cần bcrypt/argon2).
+ * Format hash: `scrypt$N$r$p$salt$hash` (N được lưu trong chuỗi) — khớp db/init.ts
+ * (PRD A1: không cần bcrypt/argon2). Nâng N lên 2^17 (OWASP hiện hành) — verify đọc N
+ * từ hash đã lưu nên hash cũ (2^14) vẫn verify được.
  */
 
 import * as crypto from 'node:crypto';
 
-const SCRYPT_N = 16384;
+/** 2^17 — OWASP scrypt params (trước đây 2^14 thấp hơn khuyến nghị). */
+const SCRYPT_N = 131072;
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const KEY_LEN = 64;
+/** scryptSync maxmem: 128·N·r = 128MiB với N=2^17,r=8 — set 256MiB cho dư (hash cũ N nhỏ hơn vẫn OK). */
+const SCRYPT_MAXMEM = 256 * 1024 * 1024;
 
 /** Hash password bằng scrypt theo format `scrypt$N$r$p$salt$hash`. */
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, KEY_LEN).toString('hex');
+  const hash = crypto.scryptSync(password, salt, KEY_LEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM }).toString('hex');
   return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt}$${hash}`;
 }
 
@@ -28,7 +33,7 @@ export function verifyPassword(password: string, stored: string): boolean {
     const salt = parts[4];
     const expected = parts[5];
     if (!Number.isFinite(n) || !Number.isFinite(r) || !Number.isFinite(p) || !salt || !expected) return false;
-    const actual = crypto.scryptSync(password, salt, KEY_LEN, { N: n, r, p }).toString('hex');
+    const actual = crypto.scryptSync(password, salt, KEY_LEN, { N: n, r, p, maxmem: SCRYPT_MAXMEM }).toString('hex');
     const a = Buffer.from(actual, 'hex');
     const b = Buffer.from(expected, 'hex');
     if (a.length !== b.length) return false;

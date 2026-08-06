@@ -21,6 +21,9 @@ import { TERMINAL_PHASES } from '@/types/loadtest';
 export const RING_CAPACITY = 3600; // 1 giờ @1s — UI-SPEC 4.1
 export const DEFAULT_PROFILE: ActionProfile = { chat: 40, read: 30, comment: 20, like: 10, view: 0, post: 0 };
 
+/** Guard in-flight pollOnce — interval 1s nhưng response chậm >1s → bỏ qua tick, tránh append trùng. */
+let pollInFlight = false;
+
 interface LoadtestState {
   // config (server)
   config: LoadTestConfig | null;
@@ -34,6 +37,7 @@ interface LoadtestState {
   elapsedSec: number;
   stopReason: string;
   isRunning: boolean;
+  paused: boolean;
 
   // live data
   lastTick: LoadTestTick | null;
@@ -50,7 +54,7 @@ interface LoadtestState {
 
   // actions
   loadConfig: () => Promise<void>;
-  startRun: (req: StartRunRequest) => Promise<{ ok: boolean; runId?: string; error?: LoadtestApiError }>;
+  startRun: (req: StartRunRequest) => Promise<{ ok: boolean; runId?: string; warnings?: string[]; error?: LoadtestApiError }>;
   stopRun: (force?: boolean) => Promise<{ ok: boolean; error?: LoadtestApiError }>;
   pauseRun: () => Promise<void>;
   resumeRun: () => Promise<void>;
@@ -69,6 +73,7 @@ export const useLoadtestStore = create<LoadtestState>((set, get) => ({
   elapsedSec: 0,
   stopReason: '',
   isRunning: false,
+  paused: false,
 
   lastTick: null,
   ticks: [],
@@ -104,11 +109,14 @@ export const useLoadtestStore = create<LoadtestState>((set, get) => ({
         elapsedSec: 0,
         stopReason: '',
         isRunning: true,
+        paused: false,
         lastTick: null,
         ticks: [],
         pollStatus: 'connecting',
       });
-      return { ok: true, runId: res.runId };
+      const out: { ok: true; runId: string; warnings?: string[] } = { ok: true, runId: res.runId };
+      if (res.warnings && res.warnings.length > 0) out.warnings = res.warnings;
+      return out;
     } catch (e) {
       return { ok: false, error: toApiError(e) };
     }
@@ -126,14 +134,16 @@ export const useLoadtestStore = create<LoadtestState>((set, get) => ({
   pauseRun: async () => {
     try {
       await loadtestApi.pause();
+      set({ paused: true });
     } catch {
-      // best-effort — trạng thái từ poll tiếp theo
+      // best-effort — trạng thái không đổi, poll tiếp theo không trả paused (backend không expose)
     }
   },
 
   resumeRun: async () => {
     try {
       await loadtestApi.resume();
+      set({ paused: false });
     } catch {
       // best-effort
     }
@@ -143,6 +153,9 @@ export const useLoadtestStore = create<LoadtestState>((set, get) => ({
     const st = get();
     // Run đã kết thúc — không poll thêm (FROZEN, chờ tick cuối).
     if (TERMINAL_PHASES.includes(st.phase)) return;
+    // Request trước còn in-flight (response > 1s) — bỏ qua tick, không chồng request cùng `since`.
+    if (pollInFlight) return;
+    pollInFlight = true;
     try {
       const [status, metrics] = await Promise.all([
         loadtestApi.status(),
@@ -165,6 +178,8 @@ export const useLoadtestStore = create<LoadtestState>((set, get) => ({
       set((s) => ({
         pollStatus: s.pollStatus === 'live' ? 'reconnecting' : s.pollStatus === 'offline' ? 'offline' : s.pollStatus,
       }));
+    } finally {
+      pollInFlight = false;
     }
   },
 
@@ -176,6 +191,7 @@ export const useLoadtestStore = create<LoadtestState>((set, get) => ({
       elapsedSec: 0,
       stopReason: '',
       isRunning: false,
+      paused: false,
       lastTick: null,
       ticks: [],
       pollStatus: 'offline',

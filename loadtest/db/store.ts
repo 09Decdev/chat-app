@@ -277,13 +277,15 @@ export class LoadtestStore {
   }
 
   async findAdminByLogin(identifier: string): Promise<QueryResult<AdminRow>> {
-    return this.query<AdminRow>(
-      `SELECT id, username, email, password_hash AS "passwordHash", display_name AS "displayName",
+    const cols = `id, username, email, password_hash AS "passwordHash", display_name AS "displayName",
               role, is_active AS "isActive", created_at AS "createdAt", updated_at AS "updatedAt",
-              last_login_at AS "lastLoginAt"
-       FROM admin_users WHERE username = $1 OR email = $1 LIMIT 1`,
-      [identifier],
-    );
+              last_login_at AS "lastLoginAt"`;
+    // Username ưu tiên, rồi mới email — tránh `username = $1 OR email = $1 LIMIT 1` không ORDER BY
+    // khớp nhầm khi username admin A trùng email admin B (register không chặn cross-collision).
+    const byUsername = await this.query<AdminRow>(`SELECT ${cols} FROM admin_users WHERE username = $1 LIMIT 1`, [identifier]);
+    if (!byUsername.ok) return byUsername;
+    if (byUsername.rows.length > 0) return byUsername;
+    return this.query<AdminRow>(`SELECT ${cols} FROM admin_users WHERE email = $1 LIMIT 1`, [identifier]);
   }
 
   async getAdminById(id: number): Promise<QueryResult<AdminRow>> {
@@ -424,6 +426,14 @@ export class LoadtestStore {
     return this.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM metric_samples WHERE run_id = $1`, [runId]);
   }
 
+  /** Đếm runs (total thật cho phân trang — không phải độ dài trang hiện tại). */
+  async countRuns(filter?: { status?: string }): Promise<QueryResult<{ n: number }>> {
+    const params: unknown[] = [];
+    const where = filter?.status ? ` WHERE status = $1` : '';
+    if (filter?.status) params.push(filter.status);
+    return this.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM runs${where}`, params);
+  }
+
   // ─── log_events ──────────────────────────────────────────────────────────
 
   async insertLogEvent(runId: string, level: string, msg: string, ts = Date.now()): Promise<QueryResult<void>> {
@@ -446,6 +456,17 @@ export class LoadtestStore {
        WHERE ${where.join(' AND ')} ORDER BY ts ASC, id ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset],
     );
+  }
+
+  /** Đếm log events của 1 run (total thật cho phân trang — pattern countMetricSamples). */
+  async countLogEvents(runId: string, opts?: { level?: string }): Promise<QueryResult<{ n: number }>> {
+    const where: string[] = [`run_id = $1`];
+    const params: unknown[] = [runId];
+    if (opts?.level) {
+      params.push(opts.level);
+      where.push(`level = $${params.length}`);
+    }
+    return this.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM log_events WHERE ${where.join(' AND ')}`, params);
   }
 
   // ─── pools ───────────────────────────────────────────────────────────────
@@ -577,8 +598,9 @@ export class LoadtestStore {
     email: string,
     input: { status?: string; lastErrorCode?: string | null; lastUsedRunId?: string | null; lastLoginAt?: number | null },
   ): Promise<QueryResult<void>> {
+    // last_used_run_id COALESCE — login fail (null) KHÔNG xóa lịch sử reuse cũ; chỉ ghi khi login thành công.
     return this.query(
-      `UPDATE pool_accounts SET status = COALESCE($1, status), last_error_code = $2, last_used_run_id = $3, last_login_at = COALESCE($4, last_login_at)
+      `UPDATE pool_accounts SET status = COALESCE($1, status), last_error_code = $2, last_used_run_id = COALESCE($3, last_used_run_id), last_login_at = COALESCE($4, last_login_at)
        WHERE pool_id = $5 AND email = $6`,
       [input.status ?? null, input.lastErrorCode ?? null, input.lastUsedRunId ?? null, input.lastLoginAt ?? null, poolId, email],
       { write: true },
@@ -609,10 +631,11 @@ export class LoadtestStore {
   /**
    * Đánh dấu pool seed đã được 1 run reuse (DB-based reuse login):
    * - Append runId vào reused_by_run_ids_json (idempotent — không trùng).
-   * - Cập nhật per-account last_used_run_id / last_login_at / status='logged_in'
-   *   (outcome login thật của run được writePool ghi vào pool của run đó).
+   * - KHÔNG đụng per-account status/last_login_at ở đây: trạng thái login thật
+   *   (logged_in/failed) được writePool ghi SAU khi login xong (summary.results) —
+   *   đánh dấu sớm sẽ ghi 'logged_in' giả khi run chết giữa chừng provisioning.
    */
-  async markPoolReused(poolId: string, runId: string, now = Date.now()): Promise<QueryResult<void>> {
+  async markPoolReused(poolId: string, runId: string): Promise<QueryResult<void>> {
     const p = await this.query<PoolRow>(
       `SELECT pool_id AS "poolId", gateway_url AS "gatewayUrl", target_users AS "targetUsers",
               account_count AS "accountCount", registered, logged_in AS "loggedIn", failed,
@@ -633,14 +656,8 @@ export class LoadtestStore {
     }
     const list = Array.isArray(reused) ? reused.filter((x): x is string => typeof x === 'string') : [];
     if (!list.includes(runId)) list.push(runId);
-    const up = await this.query(`UPDATE pools SET reused_by_run_ids_json = $1 WHERE pool_id = $2`, [JSON.stringify(list), poolId], {
+    return this.query(`UPDATE pools SET reused_by_run_ids_json = $1 WHERE pool_id = $2`, [JSON.stringify(list), poolId], {
       write: true,
     });
-    if (!up.ok) return up;
-    return this.query(
-      `UPDATE pool_accounts SET last_used_run_id = $1, last_login_at = $2, status = 'logged_in' WHERE pool_id = $3`,
-      [runId, now, poolId],
-      { write: true },
-    );
   }
 }

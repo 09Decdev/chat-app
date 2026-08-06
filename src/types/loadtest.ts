@@ -43,7 +43,7 @@ export const ACTION_LABELS: Record<ActionType, string> = {
 };
 
 /** Trạng thái action hiện tại của 1 virtual user — khớp loadtest/types.ts (2-chiều contract). */
-export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'idle';
+export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick' | 'idle';
 
 /** Phase lifecycle 1 virtual user — khớp loadtest/types.ts (2-chiều contract). */
 export type UserPhase = 'provisioned' | 'connecting' | 'connected' | 'queued' | 'in_room' | 'idle' | 'cooldown' | 'failed';
@@ -80,22 +80,61 @@ export interface UsersResponse {
   phaseCounts: Partial<Record<UserPhase, number>>;
 }
 
+/** Network impairment (mạng yếu) — khớp loadtest/types.ts. */
+export interface NetworkImpairment {
+  latencyMs?: number;
+  jitterMs?: number;
+  dropRate?: number;
+}
+
+export interface ChaosEvent {
+  atSec: number;
+  action: 'disconnect_all' | 'block_reconnect';
+  durationSec?: number;
+}
+
+/** Nhãn hiển thị action chaos — dùng ở ControlPanel (select) + Report timeline. */
+export const CHAOS_ACTION_LABELS: Record<ChaosEvent['action'], string> = {
+  disconnect_all: 'Ngắt 100% socket (mất mạng)',
+  block_reconnect: 'Chặn reconnect X giây',
+};
+
+/** F3: SLO/thresholds — eval pass/fail sau run (cho CI exit code). */
+export interface Thresholds {
+  p95Ms?: number;
+  successRate?: number;
+  echoRate?: number;
+}
+
+/** F3: kết quả eval 1 threshold. */
+export interface ThresholdResult {
+  metric: string;
+  threshold: number;
+  actual: number;
+  pass: boolean;
+  unit: string;
+}
+
 /** Body POST /api/loadtest/start. */
 export interface StartRunRequest {
   targetUsers: number;
   rampRate: number;
-  rampMode: 'rate' | 'minutes' | 'burst';
+  rampMode: 'rate' | 'minutes' | 'burst' | 'breakpoint';
   durationMin: number;
   profile: ActionProfile;
   gatewayUrl: string;
   freshAccounts?: boolean;
+  network?: NetworkImpairment;
+  chaos?: { events: ChaosEvent[] };
+  /** F3: SLO/thresholds — optional. */
+  thresholds?: Thresholds;
 }
 
 export interface RunConfig {
   runId: string;
   targetUsers: number;
   rampRate: number;
-  rampMode: 'rate' | 'minutes' | 'burst';
+  rampMode: 'rate' | 'minutes' | 'burst' | 'breakpoint';
   durationMin: number;
   durationSec: number;
   profile: ActionProfile;
@@ -107,6 +146,10 @@ export interface RunConfig {
   freshAccounts: boolean;
   seed: number;
   createdAt: number;
+  network?: NetworkImpairment;
+  chaos?: { events: ChaosEvent[] };
+  /** F3: SLO/thresholds — optional. */
+  thresholds?: Thresholds;
 }
 
 export interface LoadTestConfig {
@@ -152,6 +195,10 @@ export interface LoadTestTick {
     connectFails: number;
     connectFailsByType: ConnectFailsByType;
     usersFailed: number;
+    reconcileCount: number; // CHAT_ALREADY_SEATED — state reconcile, không phải fail
+    reconnectTotalMs: number;
+    reconnectMaxMs: number;
+    usersLost: number;
   };
   rates: { successRate: number; echoRate: number; connectFailRate: number }; // connectFailRate = window 60s
   /** FALSE trên DB-replay (MVP không persist connect) — UI phân biệt no-data vs 0 (UI-1). */
@@ -159,8 +206,9 @@ export interface LoadTestTick {
   actionsPerSec: Partial<Record<ActionType, number>>;
   latency: { p50: number; p95: number; p99: number };
   errors: { code: string; count: number }[];
+  errorsByStage: Record<string, { code: string; count: number }[]>;
   server: { wsConnections: number; wsMessagesEmitted: number; wsMessagesPerSec: number };
-  workers: { alive: number; total: number; cpuAvg: number };
+  workers: { alive: number; total: number; cpuAvg: number; rssAvgMb: number };
 }
 
 export interface RunStatus {
@@ -177,6 +225,7 @@ export interface RunStatus {
 export interface ErrorSample {
   ts: number;
   action: string;
+  stage?: string;
   code: string;
   message: string;
   userId: string;
@@ -227,10 +276,24 @@ export interface RunReport {
     throughputAvg: number;
     throughputPeak: number;
     queueCountPeak: number;
+    reconnectCount: number;
+    avgReconnectMs: number;
+    maxReconnectMs: number;
+    usersLost: number;
+    usersLostPct: number;
+    reconcileCount: number;
   };
   perAction: ActionReport[];
   errors: { code: string; count: number }[];
+  errorsByStage?: Record<string, { code: string; count: number }[]>;
+  chaosApplied?: { atSec: number; action: string; durationSec?: number }[];
   bottlenecks: BottleneckCandidate[];
+  /** F2: điểm gãy — chỉ có khi breakpoint mode. */
+  breakpoint?: { usersConnected: number; atSec: number; reason: string };
+  /** F3: kết quả eval thresholds (chỉ có khi RunConfig.thresholds set). */
+  thresholdResults?: ThresholdResult[];
+  /** F3: true nếu mọi threshold pass (hoặc không có thresholds) — CLI exit 0. */
+  thresholdsPassed?: boolean;
   stopReason?: string;
 }
 
@@ -291,6 +354,8 @@ export interface LoadtestRunSummary {
   poolSourceRunId: string | null;
   createdAt: number;
   updatedAt: number;
+  /** F4: sub-object summary (cho trend/compare) — null nếu run chưa terminal/chưa có report. */
+  summary: RunReport['summary'] | null;
 }
 
 /** Detail run — GET /runs/{id}: config + report tái dựng từ summary_json. */

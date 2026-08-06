@@ -66,7 +66,7 @@ describe('provisionAccounts — DB pool reuse (useExistingAccounts)', () => {
       const loadCalls: Array<[string, number]> = [];
       const summary = await provisionAccounts(fakeRedis, config, env, undefined, undefined, async (gw, tu) => {
         loadCalls.push([gw, tu]);
-        return seedAccounts;
+        return { poolRunId: 'lt-seed-pool', accounts: seedAccounts };
       });
 
       // 1. loadPoolFromDb được gọi đúng gateway + targetUsers
@@ -79,7 +79,8 @@ describe('provisionAccounts — DB pool reuse (useExistingAccounts)', () => {
       expect(summary.accounts).toHaveLength(2);
       expect(summary.accounts[0].accessToken).toBeTruthy();
       expect(summary.accounts[0].refreshToken).toBeTruthy();
-      expect(summary.poolSourceRunId).toBeUndefined(); // DB pool — poolId do DbWriter quản lý
+      // DB pool — poolRunId từ loadPoolFromDb → writePool cập nhật pool nguồn sau login thật
+      expect(summary.poolSourceRunId).toBe('lt-seed-pool');
       // 3. Mock gateway nhận đúng request: login ×2, register ×0
       const logins = gateway.requestLog.filter((r) => r.method === 'POST' && r.path === '/auth/login');
       expect(logins).toHaveLength(2);

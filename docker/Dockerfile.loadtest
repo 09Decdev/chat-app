@@ -31,9 +31,18 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# Chỉ copy code loadtest/ + package.json (health.ts import '../package.json').
-# .dockerignore chặn loadtest/.env + loadtest/data (secret) vào image.
-COPY loadtest ./loadtest
+# Chỉ copy code loadtest/ CẦN CHO RUNTIME (server + routes + db) — KHÔNG copy
+# loadtest/.env, loadtest/data (secret), __tests__ (test không chạy trong image).
+# health.ts import '../package.json' — package.json đã copy ở /app (dòng trên).
+# .dockerignore (repo root) chặn loadtest/.env + loadtest/data — lớp phòng thủ 2.
+COPY loadtest/*.ts ./loadtest/
+COPY loadtest/routes ./loadtest/routes
+COPY loadtest/db ./loadtest/db
+
+# Không chạy root + PID 1 đúng: node user nhận SIGTERM trực tiếp (server.ts có
+# graceful shutdown SIGTERM/SIGINT — B-2). Data dirs (/data) mount ngoài.
+RUN mkdir -p /data /data/logs /data/reports && chown -R node:node /data /app
+USER node
 
 # Volume gợi ý cho data (accounts pool, auth-secret, JSONL logs) — mount ngoài.
 VOLUME ["/data"]
@@ -47,4 +56,6 @@ EXPOSE 3401
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://localhost:3401/api/loadtest/health || exit 1
 
-CMD ["npm", "run", "loadtest:server"]
+# node là PID 1 → nhận SIGTERM trực tiếp (tương đương `npm run loadtest:server`
+# = `tsx loadtest/server.ts`; tsx là devDep đã cài ở /app/node_modules).
+CMD ["node", "--import", "tsx", "loadtest/server.ts"]

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { chatApi, ApiError, onAuthFailure } from '@/lib/api';
+import { chatApi, ApiError, onAuthFailure, doRefresh } from '@/lib/api';
 import { tokenStorage, deviceStorage } from '@/lib/storage';
 import { decodeJwt } from '@/lib/jwt';
 import type { AuthUser } from '@/types/auth';
@@ -20,7 +20,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
   authReady: false,
 
-  hydrate: () => {
+  hydrate: async () => {
     const access = tokenStorage.access;
     if (!access) {
       set({ authReady: true });
@@ -29,8 +29,23 @@ export const useAuthStore = create<AuthState>((set) => ({
     const payload = decodeJwt(access);
     const exp = payload?.exp;
     if (exp && exp * 1000 < Date.now()) {
-      tokenStorage.clear();
-      set({ authReady: true });
+      // Access hết hạn nhưng refresh có thể còn sống — thử refresh TRƯỚC khi clear
+      // (chỉ logout khi refresh thất bại). doRefresh không chạy qua interceptor 401
+      // → không có vòng lặp.
+      const ok = await doRefresh();
+      if (!ok) {
+        tokenStorage.clear();
+        set({ authReady: true });
+        return;
+      }
+      const next = tokenStorage.access;
+      const p = next ? decodeJwt(next) : null;
+      set({
+        accessToken: next,
+        isAuthenticated: !!next,
+        user: p?.sub ? { id: p.sub, email: p.email } : { id: '' },
+        authReady: true,
+      });
       return;
     }
     set({

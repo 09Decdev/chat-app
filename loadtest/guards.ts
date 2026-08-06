@@ -6,7 +6,7 @@
 
 import * as http from 'node:http';
 import type { LoadTestEnv } from './config';
-import { verifySessionToken } from './auth';
+import { verifySessionToken, isTokenBlacklisted } from './auth';
 import type { SessionUser } from './auth';
 
 export type AuthResult = { ok: true; user: SessionUser } | { ok: false; message: string };
@@ -22,6 +22,10 @@ export function requireAuth(req: http.IncomingMessage, authSecret: string): Auth
       ok: false,
       message: result.reason === 'expired' ? 'Phiên hết hạn, đăng nhập lại' : 'Token không hợp lệ',
     };
+  }
+  // Token đã logout (blacklist in-memory) — từ chối dù HMAC còn hợp lệ.
+  if (isTokenBlacklisted(m[1])) {
+    return { ok: false, message: 'Phiên đã đăng xuất — đăng nhập lại' };
   }
   return { ok: true, user: { id: Number(result.payload.sub), username: result.payload.username } };
 }

@@ -42,7 +42,7 @@ export interface LoadTestEnv {
   authSecret: string;
   redisUrl: string;
   maxTarget: number;
-  maxDurationMin: number;
+  maxDurationMin: number; // ≤ 720 (soak — tool tự refresh access token sau 55 phút)
   maxRegisterRamp: number;
   workerCount: number; // 0 = auto
   maxSocketsPerWorker: number;
@@ -177,7 +177,7 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
     authSecret: env.LOADTEST_AUTH_SECRET || '',
     redisUrl: env.LOADTEST_REDIS_URL || 'redis://localhost:6379',
     maxTarget: num('LOADTEST_MAX_TARGET', 200_000),
-    maxDurationMin: num('LOADTEST_MAX_DURATION_MIN', 60),
+    maxDurationMin: num('LOADTEST_MAX_DURATION_MIN', 60), // 60 mặc định; soak đổi 720 + refresh token
     maxRegisterRamp: num('LOADTEST_MAX_REGISTER_RAMP', 100),
     workerCount: configuredWorkers,
     maxSocketsPerWorker: num('LOADTEST_MAX_SOCKETS_PER_WORKER', 10_000),
@@ -343,6 +343,57 @@ export function validateRunRequest(req: StartRunRequest, env: LoadTestEnv): Vali
     }
   }
 
+  // Network impairment (mạng yếu) — optional. m3: guard shape — non-object (chuỗi/số/mảng) trước
+  // đây lọt qua vì net.latencyMs === undefined trên non-object (comment "sai shape → 400" ở route
+  // chỉ đúng cho chaos, sai cho network). TS cast ở route start không phải runtime check.
+  const net = req.network;
+  if (net !== undefined) {
+    if (net === null || typeof net !== 'object' || Array.isArray(net)) {
+      errors.push('network phải là object (latencyMs/jitterMs/dropRate)');
+    } else {
+      if (net.latencyMs !== undefined && (!Number.isFinite(net.latencyMs) || net.latencyMs < 0 || net.latencyMs > 30_000)) {
+        errors.push('network.latencyMs phải trong [0, 30000] ms');
+      }
+      if (net.jitterMs !== undefined && (!Number.isFinite(net.jitterMs) || net.jitterMs < 0 || net.jitterMs > 10_000)) {
+        errors.push('network.jitterMs phải trong [0, 10000] ms');
+      }
+      if (net.dropRate !== undefined && (!Number.isFinite(net.dropRate) || net.dropRate < 0 || net.dropRate > 100)) {
+        errors.push('network.dropRate phải trong [0, 100] %');
+      }
+    }
+  }
+
+  // Chaos (failure injection) — optional
+  const chaos = req.chaos;
+  if (chaos !== undefined) {
+    if (!Array.isArray(chaos.events) || chaos.events.length === 0 || chaos.events.length > 20) {
+      errors.push('chaos.events phải là mảng 1-20 event');
+    } else {
+      for (let i = 0; i < chaos.events.length; i++) {
+        const e = chaos.events[i];
+        if (!Number.isFinite(e.atSec) || e.atSec < 0) errors.push(`chaos.events[${i}].atSec phải ≥ 0`);
+        if (e.action !== 'disconnect_all' && e.action !== 'block_reconnect') {
+          errors.push(`chaos.events[${i}].action phải là disconnect_all hoặc block_reconnect`);
+        }
+        if (e.action === 'block_reconnect' && e.durationSec !== undefined && (!Number.isFinite(e.durationSec) || e.durationSec <= 0)) {
+          errors.push(`chaos.events[${i}].durationSec phải > 0`);
+        }
+      }
+    }
+  }
+
+  // F3: thresholds (optional SLO) — validate shape nếu có.
+  const th = req.thresholds;
+  if (th !== undefined && th !== null) {
+    if (typeof th !== 'object' || Array.isArray(th)) {
+      errors.push('thresholds phải là object (p95Ms/successRate/echoRate)');
+    } else {
+      if (th.p95Ms !== undefined && (!Number.isFinite(th.p95Ms) || th.p95Ms <= 0)) errors.push('thresholds.p95Ms phải > 0 (ms)');
+      if (th.successRate !== undefined && (!Number.isFinite(th.successRate) || th.successRate < 0 || th.successRate > 100)) errors.push('thresholds.successRate phải trong [0, 100]');
+      if (th.echoRate !== undefined && (!Number.isFinite(th.echoRate) || th.echoRate < 0 || th.echoRate > 100)) errors.push('thresholds.echoRate phải trong [0, 100]');
+    }
+  }
+
   return { ok: errors.length === 0, errors, warnings };
 }
 
@@ -413,6 +464,9 @@ export function buildRunConfig(req: StartRunRequest, env: LoadTestEnv): RunConfi
     freshAccounts: !!req.freshAccounts,
     seed: Date.now() % 1_000_000,
     createdAt: Date.now(),
+    network: req.network,
+    chaos: req.chaos,
+    thresholds: req.thresholds,
   };
 }
 
@@ -436,8 +490,13 @@ export function loadSettings(env: LoadTestEnv): SettingsFile {
 }
 
 export function saveSettings(env: LoadTestEnv, s: SettingsFile) {
+  // Atomic: ghi temp file rồi rename — crash giữa chừng không để lại JSON hỏng
+  // (loadSettings catch ignore → allowlist mất im lặng).
   fs.mkdirSync(env.dataDir, { recursive: true });
-  fs.writeFileSync(path.join(env.dataDir, 'settings.json'), JSON.stringify(s, null, 2), 'utf8');
+  const p = path.join(env.dataDir, 'settings.json');
+  const tmp = path.join(env.dataDir, `settings.json.tmp-${process.pid}`);
+  fs.writeFileSync(tmp, JSON.stringify(s, null, 2), 'utf8');
+  fs.renameSync(tmp, p);
 }
 
 /** Allowlist thực tế = env allowlist + allowlist từ settings file (Màn 6). */

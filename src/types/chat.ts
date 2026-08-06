@@ -89,6 +89,14 @@ export interface MemberLeftPayload {
   reason: 'VOLUNTARY' | string;
 }
 
+/** chat:member_join payload — có người mới vào phòng (kèm profile để hiển thị ngay, CHAT_API.md 5.2). */
+export interface MemberJoinPayload {
+  roomId: string;
+  member: { userId: string; displayName?: string | null; avatarUrl?: string | null };
+  /** VÁ-4: absolute room end time (epoch ms) — làm mới countdown phòng. */
+  roomEndsAt?: number | null;
+}
+
 /** chat:room_closed payload. */
 export interface RoomClosedPayload {
   roomId: string;

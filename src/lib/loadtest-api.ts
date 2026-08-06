@@ -216,7 +216,8 @@ export const loadtestApi = {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    // Firefox có thể hủy download nếu revoke ngay sau click — hoãn ~1s.
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
   allowlist: async () => {
     const res = await client.get('/allowlist');

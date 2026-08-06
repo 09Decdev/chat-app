@@ -146,4 +146,71 @@ function StopRunConfirmDialog({ open, onOpenChange, kill, onConfirm }: StopRunCo
   );
 }
 
-export { StartRunConfirmDialog, StopRunConfirmDialog };
+// ─── SD-4: Cleanup confirm — chặn cứng (gõ "TÔI XÁC NHẬN") ─────────────────
+
+export interface CleanupConfirmDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  runId: string;
+  redisKeys: number;
+  onConfirm: () => void;
+}
+
+function CleanupConfirmDialog({ open, onOpenChange, runId, redisKeys, onConfirm }: CleanupConfirmDialogProps) {
+  const [typed, setTyped] = useState('');
+  const valid = typed.trim() === CONFIRM_PHRASE;
+
+  // Mỗi lần mở modal phải gõ lại — reset state.
+  useEffect(() => {
+    if (open) setTyped('');
+  }, [open]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        role="alertdialog"
+        aria-labelledby="cleanup-dialog-title"
+        className="max-w-md border-destructive/40"
+      >
+        <DialogHeader>
+          <DialogTitle id="cleanup-dialog-title" className="text-base text-destructive">
+            XÓA DỮ LIỆU TEST?
+          </DialogTitle>
+          <DialogDescription>
+            Sẽ xóa {redisKeys} redis keys và user/post/comment test của run{' '}
+            <span className="font-mono text-xs text-foreground">{runId}</span>. Hành động không thể hoàn tác —
+            chạy dry-run trước nếu chưa chắc chắn.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="cleanup-confirm-phrase" className="text-sm">
+            Gõ chính xác chuỗi bên dưới để xác nhận: <span className="font-semibold text-foreground">{CONFIRM_PHRASE}</span>
+          </Label>
+          <Input
+            id="cleanup-confirm-phrase"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            placeholder={CONFIRM_PHRASE}
+            autoComplete="off"
+            aria-describedby={valid ? undefined : 'cleanup-confirm-phrase-hint'}
+          />
+          {!valid && (
+            <p id="cleanup-confirm-phrase-hint" className="text-xs text-muted-foreground">
+              Phải gõ đúng chuỗi (kể cả dấu) để mở khóa nút xóa.
+            </p>
+          )}
+        </div>
+        <DialogFooter className="gap-2 sm:gap-2">
+          <Button type="button" variant="outline" className="min-h-11" onClick={() => onOpenChange(false)}>
+            Hủy
+          </Button>
+          <Button type="button" variant="destructive" className="min-h-11" disabled={!valid} onClick={onConfirm}>
+            Xóa
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export { StartRunConfirmDialog, StopRunConfirmDialog, CleanupConfirmDialog };

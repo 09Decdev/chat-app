@@ -6,6 +6,16 @@
 import type { MetricSampleRow, RunRow } from './db/store';
 
 export function toRunSummary(row: RunRow) {
+  // F4: parse sub-object summary (cho trend/compare) — KHÔNG trả full report (nặng).
+  let summary: unknown = null;
+  if (row.summaryJson) {
+    try {
+      const r = JSON.parse(row.summaryJson) as { summary?: unknown };
+      summary = r?.summary ?? null;
+    } catch {
+      summary = null;
+    }
+  }
   return {
     runId: row.runId,
     status: row.status,
@@ -20,6 +30,7 @@ export function toRunSummary(row: RunRow) {
     poolSourceRunId: row.poolSourceRunId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    summary,
   };
 }
 
@@ -73,13 +84,21 @@ export function toMetricTick(row: MetricSampleRow) {
       connectFails: 0,
       connectFailsByType: { timeout: 0, transport: 0, reject: 0, other: 0 },
       usersFailed: 0,
+      // Các field dưới KHÔNG được persist (MVP — toMetricSample không có cột) — default 0 để
+      // replay không vỡ type contract: LiveDashboardPage chia reconnectTotalMs/reconcileCount
+      // → NaN nếu undefined; workers.rssAvgMb cũng cần default cho run cũ.
+      reconcileCount: 0,
+      reconnectTotalMs: 0,
+      reconnectMaxMs: 0,
+      usersLost: 0,
     },
     rates: { successRate: row.successRate, echoRate: row.echoRate, connectFailRate: 0 },
     actionsPerSec: parse(row.actionsPerSecJson, {}),
     latency: parse(row.latencyJson, { p50: 0, p95: 0, p99: 0 }),
     errors: parse(row.errorsJson, []),
-    server: parse(row.serverJson, {}),
-    workers: parse(row.workersJson, {}),
+    errorsByStage: {}, // không persist trên tick 1s — chỉ aggregate ở report
+    server: { wsConnections: 0, wsMessagesEmitted: 0, wsMessagesPerSec: 0, ...(parse(row.serverJson, {}) as object) },
+    workers: { alive: 0, total: 0, cpuAvg: 0, rssAvgMb: 0, ...(parse(row.workersJson, {}) as object) },
     hasConnectData: false, // replay — UI phân biệt "không persist" vs "thật 0" (DESIGN §2.1, UI-1)
   };
 }

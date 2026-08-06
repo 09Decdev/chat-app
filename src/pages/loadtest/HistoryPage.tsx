@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { Eye, RotateCw, Search, Trash2 } from 'lucide-react';
+import { Eye, GitCompare, RotateCw, Search, Trash2 } from 'lucide-react';
+import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,6 +15,7 @@ import { RunStatusBadge } from '@/components/loadtest/run-status-badge';
 import { loadtestApi, toApiError } from '@/lib/loadtest-api';
 import { fmtClock, fmtCompact, fmtDateTime } from '@/lib/loadtest-format';
 import { routes } from '@/lib/env';
+import { cn } from '@/lib/utils';
 import type { LoadtestRunSummary } from '@/types/loadtest';
 
 const STATUS_OPTIONS = [
@@ -23,6 +25,22 @@ const STATUS_OPTIONS = [
   { value: 'stopped', label: 'Stopped' },
   { value: 'error', label: 'Error' },
 ] as const;
+
+// F4 — trend metric qua các run (chỉ plot run có summary — đã terminal).
+type TrendKey = 'successRate' | 'echoRate' | 'throughputPeak' | 'actionsTotal';
+const TREND_METRICS: { key: TrendKey; label: string; fmt: (v: number) => string }[] = [
+  { key: 'successRate', label: 'Success %', fmt: (v) => v.toFixed(1) },
+  { key: 'echoRate', label: 'Echo %', fmt: (v) => v.toFixed(1) },
+  { key: 'throughputPeak', label: 'Throughput peak', fmt: (v) => fmtCompact(v) },
+  { key: 'actionsTotal', label: 'Actions total', fmt: (v) => fmtCompact(v) },
+];
+function trendFmt(key: TrendKey): (v: number) => string {
+  return TREND_METRICS.find((m) => m.key === key)?.fmt ?? String;
+}
+function metricValue(s: LoadtestRunSummary['summary'], key: TrendKey): number {
+  if (!s) return 0;
+  return s[key] ?? 0;
+}
 
 /** Màn 8 — Lịch sử run (PRD D2): list từ DB + filter status + search runId + xóa. */
 export default function HistoryPage() {
@@ -34,6 +52,22 @@ export default function HistoryPage() {
   const [search, setSearch] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<LoadtestRunSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // F4 — chọn 2 run để compare + metric cho trend chart.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [trendMetric, setTrendMetric] = useState<TrendKey>('successRate');
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) {
+        n.delete(id);
+      } else {
+        if (n.size >= 2) n.clear(); // max 2 — chọn thứ 3 reset (tránh lẫn)
+        n.add(id);
+      }
+      return n;
+    });
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -58,6 +92,16 @@ export default function HistoryPage() {
     return runs.filter((r) => r.runId.toLowerCase().includes(q));
   }, [runs, search]);
 
+  // F4 — trend data: chỉ run có summary (terminal), sort theo thời gian.
+  const trendData = useMemo(
+    () =>
+      filtered
+        .filter((r) => r.summary)
+        .map((r) => ({ runId: r.runId, t: r.startAt, v: metricValue(r.summary, trendMetric) }))
+        .sort((a, b) => a.t - b.t),
+    [filtered, trendMetric],
+  );
+
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
@@ -77,10 +121,22 @@ export default function HistoryPage() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-base font-semibold">LỊCH SỬ RUN</h1>
-        <Button variant="outline" size="sm" className="min-h-10" onClick={() => void load()} disabled={loading}>
-          <RotateCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden />
-          Làm mới
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-10"
+            disabled={selected.size !== 2}
+            onClick={() => navigate(`/loadtest/compare?ids=${encodeURIComponent([...selected].join(','))}`)}
+            aria-label="So sánh 2 run đã chọn"
+          >
+            <GitCompare className="h-4 w-4" aria-hidden /> So sánh{selected.size > 0 ? ` (${selected.size}/2)` : ''}
+          </Button>
+          <Button variant="outline" size="sm" className="min-h-10" onClick={() => void load()} disabled={loading}>
+            <RotateCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} aria-hidden />
+            Làm mới
+          </Button>
+        </div>
       </div>
 
       <Card className="p-4">
@@ -110,6 +166,46 @@ export default function HistoryPage() {
           </Select>
         </div>
       </Card>
+
+      {trendData.length >= 2 && (
+        <Card className="p-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-medium">XU HƯỚNG ({trendData.length} run có summary)</h2>
+            <Select value={trendMetric} onValueChange={(v) => setTrendMetric(v as TrendKey)}>
+              <SelectTrigger className="w-44" aria-label="Metric xu hướng">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {TREND_METRICS.map((m) => (
+                  <SelectItem key={m.key} value={m.key}>
+                    {m.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="h-48" role="img" aria-label={`Xu hướng ${trendMetric} qua các run`}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={trendData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                <XAxis
+                  dataKey="t"
+                  tickFormatter={(t: number) => new Date(t).toLocaleDateString()}
+                  stroke="hsl(var(--muted-foreground))"
+                  fontSize={11}
+                  tickMargin={4}
+                />
+                <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} width={48} />
+                <Tooltip
+                  labelFormatter={(t: number) => new Date(t).toLocaleString()}
+                  formatter={(v) => trendFmt(trendMetric)(Number(v))}
+                />
+                <Line type="monotone" dataKey="v" stroke="hsl(var(--primary))" strokeWidth={2} dot={{ r: 3 }} isAnimationActive={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
 
       {error && (
         <AlertBanner
@@ -172,6 +268,19 @@ export default function HistoryPage() {
                   <TableCell className="max-w-48 truncate text-xs text-muted-foreground">{r.stopReason ?? '—'}</TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className={cn('h-11 w-11', selected.has(r.runId) && 'bg-primary/15 text-primary')}
+                        aria-label={`Chọn ${r.runId} để so sánh`}
+                        aria-pressed={selected.has(r.runId)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleSelect(r.runId);
+                        }}
+                      >
+                        <GitCompare className="h-4 w-4" aria-hidden />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"

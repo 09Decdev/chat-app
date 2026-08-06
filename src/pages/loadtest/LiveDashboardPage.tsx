@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Download } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -26,7 +26,8 @@ import {
   type RangeKey,
 } from '@/components/loadtest/charts';
 import { loadtestApi } from '@/lib/loadtest-api';
-import { fmtCompact, fmtNum } from '@/lib/loadtest-format';
+import { ticksToCsv, downloadTextFile } from '@/lib/csv-export';
+import { fmtCompact, fmtMs, fmtNum } from '@/lib/loadtest-format';
 import { useLoadtestStore } from '@/store/loadtest.store';
 import { routes } from '@/lib/env';
 import { TERMINAL_PHASES } from '@/types/loadtest';
@@ -41,6 +42,31 @@ function useSpark(key: keyof LoadTestTick['counters'], n = 60) {
       const v = t.counters[key];
       return typeof v === 'number' ? v : 0;
     });
+  }, [ticks, key, n]);
+}
+
+/**
+ * Sparkline rate = delta giữa 2 tick liên tiếp (tick hiện tại − tick trước).
+ * Dành cho counters CỘNG DỒN (actionsTotal, successTotal…) — vẽ raw counter → đường
+ * luôn tăng đơn điệu, không phản ánh rate hiện tại.
+ */
+function useDeltaSpark(key: keyof LoadTestTick['counters'], n = 60) {
+  const ticks = useLoadtestStore((s) => s.ticks);
+  return useMemo(() => {
+    const slice = ticks.slice(-n);
+    // M3: i=0 trước đây lấy prev=0 → out[0] = giá trị tuyệt đối (spike) khi run > n giây
+    // (slice cắt giữa run nơi counter đã lớn). Dùng tick ngay trước slice làm prev; nếu
+    // chưa có (đầu run) → delta 0 thay vì spike.
+    const beforeSlice = ticks.length > slice.length ? ticks[ticks.length - slice.length - 1] : null;
+    const out: number[] = [];
+    for (let i = 0; i < slice.length; i++) {
+      const cur = slice[i].counters[key];
+      const prevRaw = i > 0 ? slice[i - 1].counters[key] : beforeSlice?.counters[key];
+      const curV = typeof cur === 'number' ? cur : 0;
+      const prevV = typeof prevRaw === 'number' ? prevRaw : curV;
+      out.push(Math.max(0, curV - prevV));
+    }
+    return out;
   }, [ticks, key, n]);
 }
 
@@ -286,6 +312,7 @@ export default function LiveDashboardPage() {
   const lastTick = useLoadtestStore((s) => s.lastTick);
   const phase = useLoadtestStore((s) => s.phase);
   const stopReason = useLoadtestStore((s) => s.stopReason);
+  const runId = useLoadtestStore((s) => s.runId);
 
   const [range, setRange] = useState<RangeKey>('30m');
   const [logScale, setLogScale] = useState(false);
@@ -299,9 +326,9 @@ export default function LiveDashboardPage() {
     : 0;
 
   const sparkConnections = useSpark('usersConnected');
-  const sparkActions = useSpark('actionsTotal');
-  const sparkSuccess = useSpark('successTotal');
-  const sparkEcho = useSpark('echoOk');
+  const sparkActions = useDeltaSpark('actionsTotal');
+  const sparkSuccess = useDeltaSpark('successTotal');
+  const sparkEcho = useDeltaSpark('echoOk');
   const rateSpark = useRateSpark();
 
   // Tile Connect fail (UI-SPEC §3 D4): `--` chỉ khi !lastTick HOẶC replay (hasConnectData false) —
@@ -362,8 +389,20 @@ export default function LiveDashboardPage() {
         />
       )}
 
-      {/* KPI grid 9 tiles (UI-SPEC §8.1 — xl:grid-cols-9) */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-9">
+      <div className="flex justify-end">
+        <Button
+          variant="outline"
+          size="sm"
+          className="min-h-10"
+          disabled={ticks.length === 0}
+          onClick={() => downloadTextFile(`lt-live-${runId ?? 'run'}.csv`, ticksToCsv(ticks))}
+        >
+          <Download className="h-4 w-4" aria-hidden /> Xuất CSV{ticks.length > 0 ? ` (${ticks.length})` : ''}
+        </Button>
+      </div>
+
+      {/* KPI grid (UI-SPEC §8.1 — xl:grid-cols-6: 11 tile thành 2 hàng, đỡ crushed hơn 9-col) */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
         <StatCard title="Connect" value={c ? fmtCompact(c.usersConnected) : '--'} sparkline={sparkConnections} />
         <StatCard title="Active" value={c ? fmtCompact(c.usersActive) : '--'} variant="success" />
         <StatCard title="Actions/s" value={fmtCompact(actionsTotal)} sparkline={sparkActions} />
@@ -397,6 +436,18 @@ export default function LiveDashboardPage() {
           hint="Tỉ lệ fail/attempt trong cửa sổ 60s. Auto-stop E2: > 30% và window ≥ 50 attempts. < 5% = healthy (AC-5). 0% khi window chưa đủ 50 attempts."
           className="col-span-2 md:col-span-4 xl:col-span-1"
           sparklineNode={showRateSpark ? <RateSparkline values={rateSpark} /> : undefined}
+        />
+        <StatCard
+          title="Reconnect"
+          value={c ? fmtCompact(c.reconnectCount) : '--'}
+          unit={c && c.reconnectCount > 0 ? `· avg ${fmtMs(Math.round(c.reconnectTotalMs / c.reconnectCount))}` : undefined}
+          hint="Lần reconnect socket thành công. Avg = reconnectTotalMs / reconnectCount"
+        />
+        <StatCard
+          title="Lost"
+          value={c ? fmtCompact(c.usersLost) : '--'}
+          variant={(c?.usersLost ?? 0) > 0 ? 'warning' : 'default'}
+          hint="User mất kết nối không lấy lại được (fail vĩnh viễn)"
         />
       </div>
 

@@ -13,6 +13,7 @@ import type {
   MatchingFoundPayload,
   ChatMessagePayload,
   MemberLeftPayload,
+  MemberJoinPayload,
   RoomClosedPayload,
   RoomExpiredPayload,
   ChatErrorPayload,
@@ -26,7 +27,7 @@ import type {
   TopicDeletedPayload,
 } from '@/types/chat';
 
-export type LocalMessage = ChatMessage & { _local?: 'pending' | 'failed' };
+export type LocalMessage = ChatMessage & { _local?: 'pending' | 'failed'; clientMsgId?: string };
 
 export interface VoteKickState {
   active: boolean;
@@ -88,6 +89,7 @@ interface ChatState {
   reset: () => void;
   startVoteKick: (targetUserId: string) => void;
   castVoteKick: () => void;
+  resetVoteKick: () => void;
 
   // topic actions
   setTopicSheetOpen: (open: boolean, mode?: 'create' | 'edit') => void;
@@ -105,6 +107,7 @@ interface ChatState {
   onMessage: (p: ChatMessagePayload) => void;
   onTyping: (p: TypingPayload) => void;
   onMemberLeft: (p: MemberLeftPayload) => void;
+  onMemberJoin: (p: MemberJoinPayload) => void;
   onRoomClosed: (p: RoomClosedPayload) => void;
   onRoomExpired: (p: RoomExpiredPayload) => void;
   onLeft: (p: LeftRoomPayload) => void;
@@ -184,6 +187,19 @@ function clearAllTyping() {
   typingTimers.forEach((t) => clearTimeout(t));
   typingTimers.clear();
 }
+
+/** Timer mark-failed 10s cho từng temp message (khớp echo → clear + xóa khỏi pendingTemp). */
+const pendingTempTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function clearAllPendingTemp() {
+  pendingTempTimers.forEach((t) => clearTimeout(t));
+  pendingTempTimers.clear();
+}
+
+/** Toast auth-fail socket chỉ 1 lần cho tới khi kết nối lại thành công (tránh spam retry). */
+let authFailToastShown = false;
+
+/** roomId chưa gửi được chat:leave (socket disconnected) — gửi ngay sau khi reconnect. */
+let pendingLeaveRoomId: string | null = null;
 
 /** Poll số người trong hàng chờ khi đang matching (refresh mỗi 1s). */
 let queueCountTimer: ReturnType<typeof setInterval> | null = null;
@@ -320,7 +336,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   leaveRoom: () => {
     const roomId = get().roomId;
-    if (roomId) socketManager.emit('chat:leave', { roomId });
+    if (roomId) {
+      if (socketManager.connected) {
+        socketManager.emit('chat:leave', { roomId });
+      } else {
+        // Socket đang ngắt — emit bị drop im lặng → server giữ user trong phòng.
+        // Đánh dấu pendingLeave, gửi chat:leave ngay sau khi reconnect (onConnect).
+        pendingLeaveRoomId = roomId;
+      }
+    }
     matchingFlag.set(false);
     clearAllTyping();
     set({
@@ -343,6 +367,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
     const tempId = `local:${now}:${Math.floor(now / 1000) % 1000}`;
+    const clientMsgId = socketManager.sendChatMessage({ roomId, content: trimmed });
     const tempMsg: LocalMessage = {
       id: tempId,
       roomId,
@@ -357,14 +382,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       moderationStatus: 'ACTIVE',
       createdAt: new Date(now).toISOString(),
       _local: 'pending',
+      clientMsgId, // khớp echo (Risk 1) — onMessage replace đúng temp, không quét theo vị trí
     };
     set((st) => ({
       messages: dedupeById([...st.messages, tempMsg]),
       lastSentAt: now,
       pendingTemp: [...st.pendingTemp, tempId],
     }));
-    socketManager.sendChatMessage({ roomId, content: trimmed });
-    window.setTimeout(() => {
+    const timer = setTimeout(() => {
+      pendingTempTimers.delete(tempId);
       const cur = get();
       if (cur.pendingTemp.includes(tempId)) {
         set((st) => ({
@@ -376,6 +402,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         toast.error('Tin nhan chua duoc xac nhan. Thu lai.');
       }
     }, 10000);
+    pendingTempTimers.set(tempId, timer);
   },
 
   loadHistory: async () => {
@@ -395,8 +422,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // những người đã chat, vì matching:found không re-emit khi vào lại phòng).
         let members = st.members;
         for (const m of reversed) members = upsertMemberProfile(m, members);
+        // Merge thay vì replace: giữ lại tin local đang chờ echo/failed — loadHistory
+        // (reconnect) không được xóa temp message đang pending.
+        const pendingLocal = st.messages.filter((m) => m._local);
         return {
-          messages: reversed,
+          messages: dedupeById([...reversed, ...pendingLocal]),
           nextCursor: page.nextCursor,
           members,
           loadingHistory: false,
@@ -456,6 +486,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   reset: () => {
     stopQueueCountPoll();
     clearAllTyping();
+    clearAllPendingTemp();
+    pendingLeaveRoomId = null; // cross-session: reset (logout) không để leave phòng cũ rò rỉ sang user kế tiếp
     set({ ...idleState, loadingHistory: false, loadingOlder: false, cooldownUntil: null, lastSentAt: null });
   },
 
@@ -518,8 +550,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     socketManager.resendPendingChat(roomId);
   },
 
-  onMessage: ({ message }) => {
+  onMessage: ({ message, clientMsgId }) => {
     const me = meId();
+    console.log('%c[chat] onMessage (echo)', 'color:#22d3ee', {
+      echoUserId: message.userId,
+      meId: me,
+      isMine: message.userId === me,
+      msgId: message.id,
+      clientMsgId,
+      content: message.content?.slice?.(0, 80),
+    });
+    // Risk 1 echo: khớp temp theo clientMsgId (KHÔNG quét _local theo vị trí — nếu tin A
+    // bị reject im lặng rồi tin B echo trước, B phải replace đúng temp B). Xóa khỏi
+    // pendingTemp + hủy timer mark-failed để không bắn toast sai sau 10s.
+    if (clientMsgId) {
+      const st = get();
+      const temp = st.messages.find((m) => m._local && m.clientMsgId === clientMsgId);
+      if (temp) {
+        const t = pendingTempTimers.get(temp.id);
+        if (t) clearTimeout(t);
+        pendingTempTimers.delete(temp.id);
+        set((cur) => ({ pendingTemp: cur.pendingTemp.filter((id) => id !== temp.id) }));
+      }
+    }
     set((st) => {
       // Risk 4: bỏ qua message của user không còn là member — 2 topic outbound
       // (chat.message.event vs chat.room.event) có thể lệch thứ tự: "member rời
@@ -530,7 +583,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       let replaced = false;
       const next = st.messages.map((m) => {
-        if (!replaced && m._local && message.userId === me) {
+        if (!replaced && m._local && clientMsgId && m.clientMsgId === clientMsgId) {
           replaced = true;
           return message;
         }
@@ -542,6 +595,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         messages: dedupeById(next),
         members: upsertMemberProfile(message, st.members),
+      };
+    });
+  },
+
+  onMemberJoin: ({ roomId, member, roomEndsAt }) => {
+    if (get().roomId !== roomId) return; // chỉ phòng hiện tại
+    const me = meId();
+    set((st) => {
+      const exists = st.members.some((m) => m.userId === member.userId);
+      return {
+        // VÁ-4: member_join mang roomEndsAt — làm mới countdown phòng (như onJoined)
+        ...(typeof roomEndsAt === 'number' ? { roomEndsAt } : {}),
+        members: exists
+          ? st.members
+          : [...st.members, { userId: member.userId, displayName: member.displayName ?? null, avatarUrl: member.avatarUrl ?? null, isMe: member.userId === me }],
       };
     });
   },
@@ -605,6 +673,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const roomId = get().roomId;
     if (!roomId) return;
     socketManager.emit('chat:vote_kick:vote', { roomId });
+  },
+
+  resetVoteKick: () => {
+    set({ voteKick: idleVoteKick });
   },
 
   // ─── Topic (per-member topic) ─────────────────────────────────────────
@@ -818,6 +890,7 @@ export function connectChatSocket(token: string) {
   socketManager.connect(token);
 }
 export function disconnectChatSocket() {
+  pendingLeaveRoomId = null; // cross-session: logout/login khác user không emit leave phòng cũ với token sai
   socketManager.disconnect();
 }
 
@@ -825,6 +898,17 @@ function buildHandlers(): SocketHandlers {
   return {
     onConnect: () => {
       useChatStore.setState({ socketConnected: true });
+      authFailToastShown = false; // kết nối lại thành công → cho phép toast auth-fail 1 lần nữa
+      // Leave bị bỏ lỡ lúc offline — gửi ngay khi socket hồi phục (server vẫn giữ user trong phòng).
+      // NHƯNG nếu user đã reconcile lại vào đúng phòng đó (refresh / SPA re-init → init() set
+      // phase 'in_room' cùng roomId) thì leave là ý định cũ → bỏ qua, rơi xuống nhánh re-join.
+      if (pendingLeaveRoomId) {
+        const cur = useChatStore.getState();
+        if (cur.phase !== 'in_room' || cur.roomId !== pendingLeaveRoomId) {
+          socketManager.emit('chat:leave', { roomId: pendingLeaveRoomId });
+        }
+        pendingLeaveRoomId = null;
+      }
       const s = useChatStore.getState();
       if (s.phase === 'in_room' && s.roomId) {
         socketManager.emit('chat:join', { roomId: s.roomId });
@@ -848,6 +932,10 @@ function buildHandlers(): SocketHandlers {
     onConnectError: (err) => {
       const msg = err.message.toLowerCase();
       if (msg.includes('not authorized') || msg.includes('token') || msg.includes('jwt')) {
+        // Toast 1 lần duy nhất — reconnectionAttempts: Infinity retry vô hạn sẽ spam
+        // khi token bị thu hồi. Reset flag khi kết nối thành công (onConnect).
+        if (authFailToastShown) return;
+        authFailToastShown = true;
         toast.error('Xac thuc socket that bai. Dang nhap lai.');
       }
     },
@@ -856,6 +944,7 @@ function buildHandlers(): SocketHandlers {
     onMessage: (p) => useChatStore.getState().onMessage(p),
     onTyping: (p) => useChatStore.getState().onTyping(p),
     onMemberLeft: (p) => useChatStore.getState().onMemberLeft(p),
+    onMemberJoin: (p) => useChatStore.getState().onMemberJoin(p),
     onRoomClosed: (p) => useChatStore.getState().onRoomClosed(p),
     onRoomExpired: (p) => useChatStore.getState().onRoomExpired(p),
     onLeft: (p) => useChatStore.getState().onLeft(p),

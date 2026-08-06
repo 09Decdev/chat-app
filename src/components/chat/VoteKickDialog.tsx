@@ -17,6 +17,7 @@ export function VoteKickDialog() {
   const voteKick = useChatStore((s) => s.voteKick);
   const members = useChatStore((s) => s.members);
   const castVoteKick = useChatStore((s) => s.castVoteKick);
+  const resetVoteKick = useChatStore((s) => s.resetVoteKick);
   const me = useAuthStore((s) => s.user);
 
   const [remaining, setRemaining] = useState(0);
@@ -37,11 +38,13 @@ export function VoteKickDialog() {
     const tick = () => {
       const left = Math.max(0, Math.ceil((voteKick.expiresAt! - Date.now()) / 1000));
       setRemaining(left);
+      // Hết giờ mà server chưa emit result → tự reset về idle (không treo dialog vĩnh viễn)
+      if (left <= 0) resetVoteKick();
     };
     tick();
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [voteKick.active, voteKick.expiresAt]);
+  }, [voteKick.active, voteKick.expiresAt, resetVoteKick]);
 
   const open = voteKick.active && !!voteKick.targetUserId && !dismissed;
   const isTarget = !!me?.id && me.id === voteKick.targetUserId;

@@ -199,6 +199,8 @@ function normalizePoolAccount(raw: unknown, runId: string, index: number): TestA
  * - fresh (hoặc không có pool): register OTP-Seed theo ramp.
  * Trả về mảng account + summary (dashboard đếm register/login fail realtime).
  * shouldStop: callback kill-switch — dừng sớm vòng loop khi run bị hủy (SD-3).
+ * loadPoolFromDb: trả { poolRunId, accounts } — poolRunId để summary.poolSourceRunId
+ * (writePool cập nhật per-account outcome của pool nguồn sau login thật).
  */
 export async function provisionAccounts(
   redis: Redis,
@@ -206,7 +208,7 @@ export async function provisionAccounts(
   env: LoadTestEnv,
   onProgress?: (done: number, total: number) => void,
   shouldStop?: () => boolean,
-  loadPoolFromDb?: (gatewayUrl: string, targetUsers: number) => Promise<TestAccount[] | null>,
+  loadPoolFromDb?: (gatewayUrl: string, targetUsers: number) => Promise<{ poolRunId: string; accounts: TestAccount[] } | null>,
 ): Promise<ProvisionSummary> {
   const gateway = normalizeUrl(config.gatewayUrl);
   const summary: ProvisionSummary = { accounts: [], registered: 0, loggedIn: 0, failed: 0, registerFailed: 0, errors: {} };
@@ -231,10 +233,11 @@ export async function provisionAccounts(
   if (config.useExistingAccounts) {
     // 1. Pool seed trong DB (seed-accounts.ts) — khớp gateway + targetUsers, mới nhất.
     if (loadPoolFromDb) {
-      const dbAccounts = await loadPoolFromDb(gateway, config.targetUsers);
-      if (dbAccounts && dbAccounts.length > 0) {
-        ltLog.info(`Auth Factory: tái sử dụng DB pool (${dbAccounts.length} accounts) — login lại...`);
-        await loginAccounts(gateway, dbAccounts.slice(0, config.targetUsers), config, summary, loginLimiter, onProgress, shouldStop);
+      const dbPool = await loadPoolFromDb(gateway, config.targetUsers);
+      if (dbPool && dbPool.accounts.length > 0) {
+        summary.poolSourceRunId = dbPool.poolRunId; // writePool cập nhật pool nguồn sau login thật
+        ltLog.info(`Auth Factory: tái sử dụng DB pool (${dbPool.accounts.length} accounts) — login lại...`);
+        await loginAccounts(gateway, dbPool.accounts.slice(0, config.targetUsers), config, summary, loginLimiter, onProgress, shouldStop);
         if (summary.accounts.length > 0) {
           persistPool(env, config.runId, config, summary.accounts);
           return summary;

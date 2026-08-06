@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, ChevronRight } from 'lucide-react';
+import { ArrowLeft, ChevronRight, Download } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -20,9 +20,11 @@ import {
 } from '@/components/loadtest/charts';
 import { RunStatusBadge } from '@/components/loadtest/run-status-badge';
 import { loadtestApi, toApiError } from '@/lib/loadtest-api';
+import { ticksToCsv, downloadTextFile } from '@/lib/csv-export';
 import { fmtClock, fmtCompact, fmtDateTime, fmtMs, fmtNum } from '@/lib/loadtest-format';
 import { routes } from '@/lib/env';
 import { cn } from '@/lib/utils';
+import { CHAOS_ACTION_LABELS } from '@/types/loadtest';
 import type { LoadtestLogEvent, LoadtestRunDetail, LoadTestTick } from '@/types/loadtest';
 
 const LOG_LEVELS = [
@@ -116,6 +118,13 @@ export default function RunDetailPage() {
   const summary = report?.summary;
   const isLive = detail.status === 'running';
   const hasTicks = ticks.length > 0;
+  // Chỉ hiện card resilience khi có dữ liệu reconnect/lost/reconcile/chaos.
+  const showResilience =
+    !!report &&
+    ((summary?.reconnectCount ?? 0) > 0 ||
+      (summary?.usersLost ?? 0) > 0 ||
+      (summary?.reconcileCount ?? 0) > 0 ||
+      (report.chaosApplied?.length ?? 0) > 0);
 
   return (
     <div className="space-y-4">
@@ -135,10 +144,28 @@ export default function RunDetailPage() {
           {detail.endAt ? ` – ${fmtDateTime(detail.endAt)}` : ''}
           {detail.durationSec != null ? ` · ${fmtClock(detail.durationSec)}` : ''}
         </span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="min-h-10"
+          disabled={ticks.length === 0}
+          onClick={() => downloadTextFile(`lt-${detail.runId}.csv`, ticksToCsv(ticks))}
+          aria-label="Xuất CSV tick (replay đã load)"
+        >
+          <Download className="h-4 w-4" aria-hidden /> Xuất CSV
+        </Button>
       </div>
 
       {!isLive && detail.stopReason && (
         <AlertBanner variant="warning" title="Run kết thúc" description={detail.stopReason} />
+      )}
+
+      {report?.breakpoint && (
+        <AlertBanner
+          variant="info"
+          title={`BREAKPOINT: ${report.breakpoint.usersConnected.toLocaleString()} users`}
+          description={`${report.breakpoint.reason} @ ${report.breakpoint.atSec}s — điểm gãy (rampMode breakpoint).`}
+        />
       )}
 
       <Tabs defaultValue="overview">
@@ -170,6 +197,40 @@ export default function RunDetailPage() {
             <StatCard title="Throughput đỉnh" value={summary ? fmtCompact(summary.throughputPeak) : '--'} unit="act/s" />
             <StatCard title="Queue peak" value={summary ? fmtCompact(summary.queueCountPeak) : '--'} />
           </div>
+
+          {showResilience && (
+            <Card className="p-4">
+              <h3 className="mb-2 text-base font-medium">RECONNECT & CHAOS</h3>
+              <div className="space-y-1.5">
+                {((summary?.reconnectCount ?? 0) > 0 || (summary?.usersLost ?? 0) > 0) && (
+                  <p className="text-xs text-muted-foreground">
+                    Reconnect:{' '}
+                    <span className="font-mono tabular-nums text-foreground">{fmtNum(summary?.reconnectCount ?? 0)}</span>{' '}
+                    lần · avg <span className="font-mono tabular-nums text-foreground">{fmtMs(summary?.avgReconnectMs ?? 0)}</span> · max{' '}
+                    <span className="font-mono tabular-nums text-foreground">{fmtMs(summary?.maxReconnectMs ?? 0)}</span> · Lost{' '}
+                    <span className="font-mono tabular-nums text-foreground">{fmtNum(summary?.usersLost ?? 0)}</span> user (
+                    <span className="font-mono tabular-nums text-foreground">{(summary?.usersLostPct ?? 0).toFixed(1)}%</span>)
+                  </p>
+                )}
+                {(summary?.reconcileCount ?? 0) > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Reconcile:{' '}
+                    <span className="font-mono tabular-nums text-foreground">{fmtNum(summary?.reconcileCount ?? 0)}</span> lần
+                  </p>
+                )}
+                {(report?.chaosApplied?.length ?? 0) > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {report?.chaosApplied?.map((e) => (
+                      <span key={`${e.atSec}-${e.action}`} className="mr-3 font-mono tabular-nums text-foreground">
+                        @{e.atSec}s {CHAOS_ACTION_LABELS[e.action as keyof typeof CHAOS_ACTION_LABELS] ?? e.action}
+                        {e.action === 'block_reconnect' && e.durationSec != null ? ` (${e.durationSec}s)` : ''}
+                      </span>
+                    ))}
+                  </p>
+                )}
+              </div>
+            </Card>
+          )}
 
           <ChartCard
             title="ACTIVE CONNECTIONS (replay)"
@@ -208,6 +269,17 @@ export default function RunDetailPage() {
                     ))}
                   </TableBody>
                 </Table>
+              )}
+              {report?.errorsByStage && Object.keys(report.errorsByStage).length > 0 && (
+                <div className="mt-3 space-y-1 border-t border-border pt-3">
+                  <h4 className="text-xs font-medium text-muted-foreground">THEO GIAI ĐOẠN</h4>
+                  {Object.entries(report.errorsByStage).map(([stage, buckets]) => (
+                    <p key={stage} className="text-xs text-muted-foreground">
+                      <span className="font-mono text-foreground">{stage}:</span>{' '}
+                      {buckets.map((b) => `${b.code} ${fmtNum(b.count)}`).join(', ')}
+                    </p>
+                  ))}
+                </div>
               )}
             </Card>
           </div>
@@ -294,6 +366,36 @@ export default function RunDetailPage() {
                   )}
                 </Card>
               </div>
+
+              {report.thresholdResults && report.thresholdResults.length > 0 && (
+                <Card className="p-4">
+                  <h2 className="mb-2 text-base font-medium">
+                    SLO / THRESHOLDS — <span className={report.thresholdsPassed ? 'text-success' : 'text-destructive'}>{report.thresholdsPassed ? 'PASS' : 'FAIL'}</span>
+                  </h2>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead scope="col">Metric</TableHead>
+                        <TableHead scope="col" className="text-right">Thực tế</TableHead>
+                        <TableHead scope="col" className="text-right">Ngưỡng</TableHead>
+                        <TableHead scope="col" className="text-right">Kết quả</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {report.thresholdResults.map((r) => (
+                        <TableRow key={r.metric}>
+                          <TableCell className="font-mono text-xs">{r.metric}</TableCell>
+                          <TableCell className="text-right font-mono text-xs tabular-nums">{r.actual}{r.unit}</TableCell>
+                          <TableCell className="text-right font-mono text-xs tabular-nums text-muted-foreground">{r.threshold}{r.unit}</TableCell>
+                          <TableCell className={cn('text-right font-mono text-xs', r.pass ? 'text-success' : 'text-destructive')}>
+                            {r.pass ? '✓ pass' : '✗ fail'}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Card>
+              )}
 
               <Card className="p-4">
                 <h2 className="mb-2 text-base font-medium">CẤU HÌNH RUN (snapshot)</h2>

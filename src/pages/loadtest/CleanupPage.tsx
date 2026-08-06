@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { StatCard } from '@/components/ui/stat-card';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { loadtestApi, toApiError } from '@/lib/loadtest-api';
+import { CleanupConfirmDialog } from '@/components/loadtest/confirm-dialogs';
 import { useLoadtestStore } from '@/store/loadtest.store';
 import { fmtNum } from '@/lib/loadtest-format';
 import type { CleanupResult } from '@/types/loadtest';
@@ -42,6 +43,7 @@ export default function CleanupPage() {
   const [mode, setMode] = useState<'dry' | 'exec'>('dry');
   const [scanning, setScanning] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const scan = async () => {
@@ -83,17 +85,25 @@ export default function CleanupPage() {
     }
   };
 
+  // Map per-step theo tên rõ ràng (backend cleanup.ts — 3 tầng): mỗi tile 1 nguồn,
+  // KHÔNG gán chung user=post từ cùng biểu thức hay để step sau đè step trước.
   const stepCounts = (() => {
     const s = result?.steps ?? [];
     const counts = { user: 0, post: 0, redis: 0, session: 0 };
     for (const step of s) {
-      if (step.name.includes('API')) counts.user = counts.post = step.count;
-      if (step.name.includes('Redis')) counts.redis = step.count;
+      if (step.name.startsWith('Tầng 1')) {
+        counts.user = step.count; // user test (DB script — author loadtest.{runId}.*)
+        counts.post = step.count; // post/comment test — cùng step API nghiệp vụ
+      } else if (step.name.startsWith('Tầng 2')) {
+        counts.redis = step.count; // Redis keys
+      } else if (step.name.startsWith('Tầng 3')) {
+        counts.session = step.count; // baseline leftover sau khi xóa
+      }
     }
     return counts;
   })();
 
-  const totalKeys = result?.steps.find((s) => s.name.includes('Redis'))?.count ?? 0;
+  const totalKeys = stepCounts.redis; // M5: 1 nguồn sự thật với tile (startsWith 'Tầng 2') — tránh lệch nếu tên step đổi format
   const isEmpty = result
     ? result.steps.every((s) => s.status !== 'fail') && totalKeys === 0 && result.baseline.userKeys === 0
     : false;
@@ -167,7 +177,7 @@ export default function CleanupPage() {
             <StatCard title="User" value={fmtNum(stepCounts.user)} hint={`email loadtest.${runId}.*`} />
             <StatCard title="Post/comment" value={fmtNum(stepCounts.post)} hint="prefix [lt]" />
             <StatCard title="Redis keys" value={fmtNum(stepCounts.redis)} hint="otp:register / match / chat" />
-            <StatCard title="Session/device" value={fmtNum(stepCounts.user)} />
+            <StatCard title="Session/device" value={fmtNum(stepCounts.session)} hint="baseline còn sót sau xóa" />
           </div>
 
           <Card className="p-4">
@@ -202,7 +212,7 @@ export default function CleanupPage() {
         </>
       )}
 
-      <div className="fixed inset-x-0 bottom-16 z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
+      <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
         <div className="flex gap-3">
           <Button variant="outline" className="min-h-12 flex-1" onClick={() => navigate(-1)}>
             Quay lại
@@ -211,12 +221,23 @@ export default function CleanupPage() {
             variant="destructive"
             className="min-h-12 flex-1"
             disabled={!result || executing || scanning || isEmpty}
-            onClick={() => void (mode === 'dry' ? scan() : execute())}
+            onClick={() => void (mode === 'dry' ? scan() : setConfirmOpen(true))}
           >
             {executing ? 'Đang xóa...' : mode === 'dry' ? 'Chạy dry-run' : 'Thực thi xóa'}
           </Button>
         </div>
       </div>
+
+      <CleanupConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        runId={runId}
+        redisKeys={totalKeys}
+        onConfirm={() => {
+          setConfirmOpen(false);
+          void execute();
+        }}
+      />
     </div>
   );
 }

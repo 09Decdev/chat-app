@@ -111,12 +111,15 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          # Smoke build — vite.config.ts throw nếu build production thiếu
+          # VITE_GATEWAY_URL; dùng dev default để CI không đỏ (deploy thật truyền
+          # qua docker --build-arg, xem docker/Dockerfile.frontend).
+          VITE_GATEWAY_URL: http://localhost:3000
 
       # G-1 — integration tests chạy thật trên ubuntu (service Postgres);
-      # windows skip-if-no-DB (không red).
-      - name: Test loadtest
-        run: npm run loadtest:test
-
+      # windows skip-if-no-DB (không red). Workspace `npm run test` (dưới) đã
+      # gồm loadtest suite qua vitest.workspace.ts — không chạy riêng nữa.
       # Workspace vitest (loadtest + frontend — T-09). Không có `--project`
       # filter vì vitest.workspace.ts không đặt tên project (chỉ path config).
       - name: "Test (workspace: loadtest + frontend)"

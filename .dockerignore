@@ -1,4 +1,6 @@
-# Docker build context — loại bỏ file không cần thiết + NGĂN secret vào image.
+# Docker build context (repo ROOT — Docker chỉ đọc .dockerignore ở context root;
+# build: `docker build -f docker/Dockerfile.frontend .` / `-f docker/Dockerfile.loadtest .`).
+# Loại bỏ file không cần thiết + NGĂN secret vào image.
 # BẮT BUỘC: `loadtest/.env` + `loadtest/data/*` chứa secret thật (T-01) — nếu
 # build context bỏ qua .env, `COPY . .` sẽ nướng secret vào image.
 

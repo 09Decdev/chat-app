@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from '@/components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -11,17 +11,20 @@ import { connectChatSocket, disconnectChatSocket, useChatStore } from '@/store/c
 import { routes } from '@/lib/env';
 import AppShell from '@/components/loadtest/app-shell';
 import { RequireLoadtestAuth } from '@/components/loadtest/require-auth';
-import LoadtestLoginPage from '@/pages/loadtest/LoginPage';
-import LoadtestRegisterPage from '@/pages/loadtest/RegisterPage';
-import ControlPanelPage from '@/pages/loadtest/ControlPanelPage';
-import LiveDashboardPage from '@/pages/loadtest/LiveDashboardPage';
-import UsersPage from '@/pages/loadtest/UsersPage';
-import ScenarioBuilderPage from '@/pages/loadtest/ScenarioBuilderPage';
-import ReportPage from '@/pages/loadtest/ReportPage';
-import SettingsPage from '@/pages/loadtest/SettingsPage';
-import CleanupPage from '@/pages/loadtest/CleanupPage';
-import HistoryPage from '@/pages/loadtest/HistoryPage';
-import RunDetailPage from '@/pages/loadtest/RunDetailPage';
+// Pages loadtest — React.lazy (FIX: tách khỏi bundle chính; vendor recharts/
+// framer-motion/axios chỉ tải khi mở page tương ứng — xem manualChunks vite.config.ts).
+const LoadtestLoginPage = lazy(() => import('@/pages/loadtest/LoginPage'));
+const LoadtestRegisterPage = lazy(() => import('@/pages/loadtest/RegisterPage'));
+const ControlPanelPage = lazy(() => import('@/pages/loadtest/ControlPanelPage'));
+const LiveDashboardPage = lazy(() => import('@/pages/loadtest/LiveDashboardPage'));
+const UsersPage = lazy(() => import('@/pages/loadtest/UsersPage'));
+const ScenarioBuilderPage = lazy(() => import('@/pages/loadtest/ScenarioBuilderPage'));
+const ReportPage = lazy(() => import('@/pages/loadtest/ReportPage'));
+const SettingsPage = lazy(() => import('@/pages/loadtest/SettingsPage'));
+const CleanupPage = lazy(() => import('@/pages/loadtest/CleanupPage'));
+const HistoryPage = lazy(() => import('@/pages/loadtest/HistoryPage'));
+const RunDetailPage = lazy(() => import('@/pages/loadtest/RunDetailPage'));
+const ComparePage = lazy(() => import('@/pages/loadtest/ComparePage'));
 
 /** Hydrate auth tu storage + ket noi/ngat socket theo trang thai dang nhap. */
 function AuthGate() {
@@ -52,29 +55,38 @@ export default function App() {
       <ErrorBoundary homePath={routes.chat}>
         <TooltipProvider delayDuration={300}>
           <AuthGate />
-          <Routes>
-            <Route path={routes.login} element={<LoginPage />} />
-            <Route element={<ProtectedRoute />}>
-              <Route path={routes.chat} element={<ChatPage />} />
-            </Route>
-            {/* LoadTest tool — gate admin auth (PRD C2): login/register public, /loadtest/* qua guard */}
-            <Route path={routes.loadtestLogin} element={<LoadtestLoginPage />} />
-            <Route path={routes.loadtestRegister} element={<LoadtestRegisterPage />} />
-            <Route element={<RequireLoadtestAuth />}>
-              <Route path={routes.loadtest} element={<AppShell />}>
-                <Route index element={<ControlPanelPage />} />
-                <Route path="live" element={<LiveDashboardPage />} />
-                <Route path="users" element={<UsersPage />} />
-                <Route path="scenario" element={<ScenarioBuilderPage />} />
-                <Route path="report" element={<ReportPage />} />
-                <Route path="settings" element={<SettingsPage />} />
-                <Route path="cleanup" element={<CleanupPage />} />
-                <Route path="history" element={<HistoryPage />} />
-                <Route path="history/:runId" element={<RunDetailPage />} />
+          <Suspense
+            fallback={
+              <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
+                Đang tải…
+              </div>
+            }
+          >
+            <Routes>
+              <Route path={routes.login} element={<LoginPage />} />
+              <Route element={<ProtectedRoute />}>
+                <Route path={routes.chat} element={<ChatPage />} />
               </Route>
-            </Route>
-            <Route path="*" element={<Navigate to={routes.chat} replace />} />
-          </Routes>
+              {/* LoadTest tool — gate admin auth (PRD C2): login/register public, /loadtest/* qua guard */}
+              <Route path={routes.loadtestLogin} element={<LoadtestLoginPage />} />
+              <Route path={routes.loadtestRegister} element={<LoadtestRegisterPage />} />
+              <Route element={<RequireLoadtestAuth />}>
+                <Route path={routes.loadtest} element={<AppShell />}>
+                  <Route index element={<ControlPanelPage />} />
+                  <Route path="live" element={<LiveDashboardPage />} />
+                  <Route path="users" element={<UsersPage />} />
+                  <Route path="scenario" element={<ScenarioBuilderPage />} />
+                  <Route path="report" element={<ReportPage />} />
+                  <Route path="settings" element={<SettingsPage />} />
+                  <Route path="cleanup" element={<CleanupPage />} />
+                  <Route path="history" element={<HistoryPage />} />
+                  <Route path="history/:runId" element={<RunDetailPage />} />
+                  <Route path="compare" element={<ComparePage />} />
+                </Route>
+              </Route>
+              <Route path="*" element={<Navigate to={routes.chat} replace />} />
+            </Routes>
+          </Suspense>
           <Toaster />
         </TooltipProvider>
       </ErrorBoundary>

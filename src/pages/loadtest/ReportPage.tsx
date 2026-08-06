@@ -23,6 +23,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { loadtestApi, toApiError } from '@/lib/loadtest-api';
 import { fmtClock, fmtCompact, fmtDateTime, fmtMs, fmtNum, fmtRange } from '@/lib/loadtest-format';
 import { routes } from '@/lib/env';
+import { CHAOS_ACTION_LABELS } from '@/types/loadtest';
 import type { BottleneckCandidate, RunReport } from '@/types/loadtest';
 import { cn } from '@/lib/utils';
 
@@ -235,6 +236,41 @@ export default function ReportPage() {
         <StatCard title="Throughput đỉnh" value={fmtCompact(summary.throughputPeak)} unit="act/s" />
       </div>
 
+      {(summary.reconnectCount > 0 ||
+        summary.usersLost > 0 ||
+        summary.reconcileCount > 0 ||
+        (report.chaosApplied?.length ?? 0) > 0) && (
+        <Card className="p-4">
+          <h2 className="mb-2 text-base font-medium">RECONNECT & CHAOS</h2>
+          <div className="space-y-1.5">
+            {(summary.reconnectCount > 0 || summary.usersLost > 0) && (
+              <p className="text-xs text-muted-foreground">
+                Reconnect: <span className="font-mono tabular-nums text-foreground">{fmtNum(summary.reconnectCount)}</span> lần · avg{' '}
+                <span className="font-mono tabular-nums text-foreground">{fmtMs(summary.avgReconnectMs)}</span> · max{' '}
+                <span className="font-mono tabular-nums text-foreground">{fmtMs(summary.maxReconnectMs)}</span> · Lost{' '}
+                <span className="font-mono tabular-nums text-foreground">{fmtNum(summary.usersLost)}</span> user (
+                <span className="font-mono tabular-nums text-foreground">{(summary.usersLostPct ?? 0).toFixed(1)}%</span>)
+              </p>
+            )}
+            {summary.reconcileCount > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Reconcile: <span className="font-mono tabular-nums text-foreground">{fmtNum(summary.reconcileCount)}</span> lần
+              </p>
+            )}
+            {(report.chaosApplied?.length ?? 0) > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {report.chaosApplied?.map((e) => (
+                  <span key={`${e.atSec}-${e.action}`} className="mr-3 font-mono tabular-nums text-foreground">
+                    @{e.atSec}s {CHAOS_ACTION_LABELS[e.action as keyof typeof CHAOS_ACTION_LABELS] ?? e.action}
+                    {e.action === 'block_reconnect' && e.durationSec != null ? ` (${e.durationSec}s)` : ''}
+                  </span>
+                ))}
+              </p>
+            )}
+          </div>
+        </Card>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-12">
         <Card className="p-4 lg:col-span-7">
           <h2 className="mb-2 text-base font-medium">LATENCY P50/P95/P99 THEO ACTION</h2>
@@ -297,6 +333,20 @@ export default function ReportPage() {
         </Card>
       </div>
 
+      {report.errorsByStage && Object.keys(report.errorsByStage).length > 0 && (
+        <Card className="p-4">
+          <h2 className="mb-2 text-base font-medium">LỖI THEO GIAI ĐOẠN</h2>
+          <div className="space-y-1">
+            {Object.entries(report.errorsByStage).map(([stage, buckets]) => (
+              <p key={stage} className="text-xs text-muted-foreground">
+                <span className="font-mono text-foreground">{stage}:</span>{' '}
+                {buckets.map((b) => `${b.code} ${fmtNum(b.count)}`).join(', ')}
+              </p>
+            ))}
+          </div>
+        </Card>
+      )}
+
       <Card className="p-4">
         <h2 className="mb-2 text-base font-medium">CẤU HÌNH RUN (snapshot)</h2>
         <dl className="grid gap-x-6 md:grid-cols-2">
@@ -330,7 +380,7 @@ export default function ReportPage() {
         </div>
       </Card>
 
-      <div className="fixed inset-x-0 bottom-16 z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
+      <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
         <Button variant="outline" className="w-full min-h-12" onClick={() => navigate(routes.loadtestCleanup)}>
           Dọn dẹp dữ liệu test &gt;
         </Button>

@@ -18,13 +18,14 @@ function fakeTick(workerId: number, over: Partial<WorkerTick['counters']> = {}):
       failTotal: 50, echoOk: 90, echoSent: 100, droppedOutbox: 0, reconnectCount: 2,
       rateLimitedNoEcho: 10, connectAttempts: 100, connectFails: 5,
       connectFailsByType: { timeout: 3, transport: 1, reject: 1, other: 0 },
-      usersFailed: 2, ...over,
+      usersFailed: 2, reconcileCount: 1, reconnectTotalMs: 3000, reconnectMaxMs: 2000, usersLost: 1, ...over,
     },
     actionsPerSec: { chat: 10, read: 20 },
     actionOk: { chat: 9, read: 19 },
     actionFail: { chat: 1, read: 1 },
     errors: { HTTP_429: 3 },
-    errorSamples: [{ ts: 1, action: 'chat', code: 'HTTP_429', message: 'x', userId: 'u' }],
+    errorsByStage: { chat: [{ code: 'HTTP_429', count: 3 }] },
+    errorSamples: [{ ts: 1, action: 'chat', stage: 'chat', code: 'HTTP_429', message: 'x', userId: 'u' }],
     histograms: { chat: [5, 10, 0] },
     histogramBucketCount: 3,
     cpuPct: 40,
@@ -414,7 +415,7 @@ describe('coordinator-state — aggregateTicks nhánh sâu (T-11)', () => {
   it('errorSamples: tick sau gộp trước tick cũ, cap 20', () => {
     const mk = (prefix: string, n: number) =>
       Array.from({ length: n }, (_, i) => ({
-        ts: i, action: 'chat' as const, code: `${prefix}${i}`, message: 'm', userId: 'u',
+        ts: i, action: 'chat' as const, stage: 'chat' as const, code: `${prefix}${i}`, message: 'm', userId: 'u',
       }));
     const t0 = { ...fakeTick(0), errorSamples: mk('E', 5) }; // 5 mẫu cũ
     const t1 = { ...fakeTick(1), errorSamples: mk('F', 25) }; // 25 mẫu mới

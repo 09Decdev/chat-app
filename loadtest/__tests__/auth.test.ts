@@ -3,15 +3,16 @@
  * scrypt hash/verify, password strength, session token HMAC (valid/tampered/expired).
  */
 import { describe, it, expect } from 'vitest';
+import * as crypto from 'node:crypto';
 import { hashPassword, verifyPassword, validatePasswordStrength } from '../db/password';
 import { createSessionToken, verifySessionToken, SESSION_TTL_MS } from '../auth';
 
 const SECRET = 'test-secret-0123456789abcdef';
 
 describe('password — hash/verify (scrypt)', () => {
-  it('hash đúng format scrypt$16384$8$1$salt$hash, không phải plaintext', () => {
+  it('hash đúng format scrypt$131072$8$1$salt$hash, không phải plaintext', () => {
     const h = hashPassword('Abc123!@');
-    expect(h).toMatch(/^scrypt\$16384\$8\$1\$[0-9a-f]{32}\$[0-9a-f]{128}$/);
+    expect(h).toMatch(/^scrypt\$131072\$8\$1\$[0-9a-f]{32}\$[0-9a-f]{128}$/);
     expect(h).not.toContain('Abc123!@');
   });
 
@@ -19,6 +20,15 @@ describe('password — hash/verify (scrypt)', () => {
     const h = hashPassword('Abc123!@');
     expect(verifyPassword('Abc123!@', h)).toBe(true);
     expect(verifyPassword('wrong-pass', h)).toBe(false);
+  });
+
+  it('verify hash cũ (N=16384, tạo bởi phiên bản trước) vẫn đúng — backward compat', () => {
+    // Format lưu N trong chuỗi: scrypt$16384$8$1$salt$hash — verify phải đọc N từ hash, không hardcode.
+    const salt = 'a'.repeat(32);
+    const hash = crypto.scryptSync('Abc123!@', salt, 64).toString('hex');
+    const oldHash = `scrypt$16384$8$1$${salt}$${hash}`;
+    expect(verifyPassword('Abc123!@', oldHash)).toBe(true);
+    expect(verifyPassword('wrong-pass', oldHash)).toBe(false);
   });
 
   it('verify hash hỏng/format lạ → false (không throw)', () => {

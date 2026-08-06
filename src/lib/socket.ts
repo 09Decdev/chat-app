@@ -5,6 +5,7 @@ import type {
   ChatMessagePayload,
   ChatSendPayload,
   MemberLeftPayload,
+  MemberJoinPayload,
   RoomClosedPayload,
   RoomExpiredPayload,
   ChatErrorPayload,
@@ -45,6 +46,19 @@ function genClientMsgId(): string {
   );
 }
 
+/** Decode JWT `sub` (userId) từ token — để log xem socket đang kết nối bằng tài khoản nào. */
+function decodeJwtSub(token: string | null): string | undefined {
+  if (!token) return undefined;
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return undefined;
+    const json = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    return json?.sub as string | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Cac event server → client (CHAT_API.md muc 5.2 + 10.6). */
 export interface SocketHandlers {
   onConnect?: () => void;
@@ -55,6 +69,7 @@ export interface SocketHandlers {
   onMessage?: Handler<ChatMessagePayload>;
   onTyping?: Handler<TypingPayload>;
   onMemberLeft?: Handler<MemberLeftPayload>;
+  onMemberJoin?: Handler<MemberJoinPayload>;
   onRoomClosed?: Handler<RoomClosedPayload>;
   onRoomExpired?: Handler<RoomExpiredPayload>;
   onLeft?: Handler<LeftRoomPayload>;
@@ -106,7 +121,7 @@ class SocketManager {
     const tag = (t: string, data?: unknown) =>
       console.log('%c[chat-socket] ' + t, 'color:#a855f7', data ?? '');
     socket.on('connect', () => {
-      tag('connected', socket.id);
+      tag('connected', { socketId: socket.id, tokenSub: decodeJwtSub(this.lastToken) });
       this.handlers.onConnect?.();
     });
     socket.on('disconnect', (reason: string) => {
@@ -128,7 +143,13 @@ class SocketManager {
     socket.on('chat:message', (p: ChatMessagePayload) => {
       // Echo có clientMsgId → xác nhận message đã tới server → xóa khỏi outbox (Risk 1)
       if (p?.clientMsgId) this.pendingChat.delete(p.clientMsgId);
-      tag('chat:message', p?.message?.id);
+      tag('chat:message', {
+        id: p?.message?.id,
+        userId: p?.message?.userId,
+        displayName: p?.message?.displayName,
+        content: p?.message?.content?.slice?.(0, 80),
+        clientMsgId: p?.clientMsgId,
+      });
       this.handlers.onMessage?.(p);
     });
     socket.on('chat:typing', (p: TypingPayload) => {
@@ -137,6 +158,10 @@ class SocketManager {
     socket.on('chat:member_left', (p: MemberLeftPayload) => {
       tag('chat:member_left', p);
       this.handlers.onMemberLeft?.(p);
+    });
+    socket.on('chat:member_join', (p: MemberJoinPayload) => {
+      tag('chat:member_join', p);
+      this.handlers.onMemberJoin?.(p);
     });
     socket.on('chat:room_closed', (p: RoomClosedPayload) => {
       tag('chat:room_closed', p);
@@ -178,6 +203,9 @@ class SocketManager {
       tag('chat:topic:deleted', p);
       this.handlers.onTopicDeleted?.(p);
     });
+    socket.on('star:received', (p: { fromUserId?: string; starCount?: number }) => {
+      console.log('%c[chat-socket] ⭐ star:received', 'color:#f59e0b', p);
+    });
   }
 
   disconnect() {
@@ -194,8 +222,9 @@ class SocketManager {
   /**
    * chat:send qua outbox (Risk 1): luôn gán clientMsgId + giữ lại cho đến khi có echo.
    * Gửi được ngay nếu socket đang connected; nếu không, chờ resend khi join lại room.
+   * Trả về clientMsgId để store khớp echo với temp message (Risk 1).
    */
-  sendChatMessage(payload: ChatSendPayload) {
+  sendChatMessage(payload: ChatSendPayload): string {
     const clientMsgId = genClientMsgId();
     this.pendingChat.set(clientMsgId, {
       clientMsgId,
@@ -205,8 +234,14 @@ class SocketManager {
       sentAt: Date.now(),
     });
     if (this.socket?.connected) {
+      console.log('%c[chat-socket] emit chat:send', 'color:#22d3ee', {
+        roomId: payload.roomId,
+        content: payload.content,
+        clientMsgId,
+      });
       this.socket.emit('chat:send', { ...payload, clientMsgId });
     }
+    return clientMsgId;
   }
 
   /** Resend toàn bộ pending của room (gọi từ store khi đã chat:joined — đã trong room). */

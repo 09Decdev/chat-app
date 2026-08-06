@@ -25,6 +25,7 @@ import {
   applyCors,
   BodyError,
   clientIp,
+  failJson,
   makeRequestId,
   makeRouteCtx,
   parseOrigins,
@@ -196,7 +197,15 @@ export class ApiServer {
       res.end();
       return;
     }
-    const url = this.url(req);
+    // FIX: path malformed (`GET /%zz`) → new URL() ném URIError TRƯỚC try/catch dưới →
+    // `void this.handle(...)` reject → unhandled rejection → crash process (DoS không cần auth).
+    let url: URL;
+    try {
+      url = this.url(req);
+    } catch {
+      toolMetrics.inc('apiErrors');
+      return failJson(res, 400, 'URL không hợp lệ', { error: 'MALFORMED_URL', requestId });
+    }
     const p = url.pathname;
     const method = req.method ?? 'GET';
     const ip = clientIp(req, this.env.trustProxy);

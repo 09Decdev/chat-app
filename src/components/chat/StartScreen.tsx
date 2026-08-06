@@ -21,6 +21,7 @@ function useCountdown(until: number | null) {
   }, [until]);
   if (!until) return null;
   const remain = Math.max(0, until - Date.now());
+  if (remain <= 0) return null; // timestamp đã qua → hết cooldown, không trả chuỗi "0:00" truthy
   const m = Math.floor(remain / 60000);
   const s = Math.floor((remain % 60000) / 1000);
   return `${m}:${s.toString().padStart(2, '0')}`;

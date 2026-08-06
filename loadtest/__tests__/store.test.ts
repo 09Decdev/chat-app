@@ -306,7 +306,7 @@ describeDb('store — pools + pool_accounts', () => {
     await store.disconnect();
   });
 
-  it('markPoolReused append runId idempotent + cập nhật per-account', async () => {
+  it('markPoolReused append runId idempotent + KHÔNG đụng per-account (login outcome ghi sau login thật)', async () => {
     const store = new LoadtestStore(TEST_DB_URL);
     await store.connect();
     await store.upsertPool({
@@ -316,15 +316,17 @@ describeDb('store — pools + pool_accounts', () => {
     await store.insertPoolAccounts([
       { poolId: 'lt-mr1', email: 'mr@test.vn', password: 'pw', userId: 'u', displayName: 'MR', deviceInfo: {}, dateOfBirth: '2000-01-01', country: 'VN', status: 'registered' },
     ]);
-    await store.markPoolReused('lt-mr1', 'lt-run-1', 1234);
-    await store.markPoolReused('lt-mr1', 'lt-run-1', 1235); // idempotent — không trùng
-    await store.markPoolReused('lt-mr1', 'lt-run-2', 1236);
+    await store.markPoolReused('lt-mr1', 'lt-run-1');
+    await store.markPoolReused('lt-mr1', 'lt-run-1'); // idempotent — không trùng
+    await store.markPoolReused('lt-mr1', 'lt-run-2');
     const p = expectOk(await store.getPool('lt-mr1'))[0];
     expect(JSON.parse(p!.reusedByRunIdsJson)).toEqual(['lt-run-1', 'lt-run-2']);
+    // markPoolReused chỉ đánh dấu reuse ở mức pool — KHÔNG ghi 'logged_in' giả cho
+    // account trước khi login thật (writePool ghi outcome sau login).
     const acc = expectOk(await store.listPoolAccounts('lt-mr1'))[0];
-    expect(acc?.lastUsedRunId).toBe('lt-run-2');
-    expect(acc?.lastLoginAt).toBe(1236);
-    expect(acc?.status).toBe('logged_in');
+    expect(acc?.status).toBe('registered');
+    expect(acc?.lastLoginAt).toBeNull();
+    expect(acc?.lastUsedRunId).toBeNull();
     const missing = await store.markPoolReused('lt-nonexistent', 'lt-run-x');
     expect(missing.ok).toBe(false);
     await store.disconnect();

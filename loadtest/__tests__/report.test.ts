@@ -46,13 +46,15 @@ function fakeTick(ts: number, over: Partial<LoadTestTick['counters']> = {}, late
       connectAttempts: 10_000, connectFails: 30,
       connectFailsByType: { timeout: 20, transport: 5, reject: 3, other: 2 },
       usersFailed: 0,
+      reconcileCount: 0, reconnectTotalMs: 15_000, reconnectMaxMs: 8_000, usersLost: 3,
     },
     rates: { successRate: 99, echoRate: 95, connectFailRate: 0 },
     actionsPerSec: { chat: 400, read: 300 },
     latency: { p50: 40, p95: latencyP95, p99: 300 },
     errors: [{ code: 'HTTP_429', count: 10 }],
+    errorsByStage: {},
     server: { wsConnections: 10_000, wsMessagesEmitted: 1_000_000, wsMessagesPerSec: 5_000 },
-    workers: { alive: 4, total: 4, cpuAvg: 50 },
+    workers: { alive: 4, total: 4, cpuAvg: 50, rssAvgMb: 800 },
     hasConnectData: true,
   };
   return { ...base, counters: { ...base.counters, ...over } };
@@ -361,7 +363,7 @@ describe('buildReport — nhánh sâu (T-11)', () => {
     expect(report.summary.failTotal).toBe(1_000);
     expect(report.summary.echoOk).toBe(950);
     expect(report.summary.queueCountPeak).toBe(300);
-    expect(report.summary.throughputAvg).toBe(50_000); // 100k actions / 2s
+    expect(report.summary.throughputAvg).toBe(100_000); // 100k actions / span tick đầu action → tick cuối = 1s (không tính provisioning)
   });
 
   it('successRate/echoRate CHÍNH XÁC 50/50 (diệt mutant làm tròn + bỏ /10)', () => {

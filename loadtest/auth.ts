@@ -29,6 +29,28 @@ export type TokenVerifyResult =
   | { ok: true; payload: SessionPayload }
   | { ok: false; reason: 'expired' | 'invalid' };
 
+/**
+ * Blacklist token đã logout — in-memory Map (token → exp), TTL theo exp của token.
+ * Giả định tool tự host 1 instance (multi-instance cần Redis — ghi chú nếu scale).
+ */
+const tokenBlacklist = new Map<string, number>();
+
+/** Đưa token vào blacklist (logout) — tự dọn khi hết hạn. */
+export function blacklistToken(token: string, expiresAt: number): void {
+  tokenBlacklist.set(token, expiresAt);
+}
+
+/** Token có trong blacklist và chưa hết hạn → session đã bị thu hồi. */
+export function isTokenBlacklisted(token: string): boolean {
+  const exp = tokenBlacklist.get(token);
+  if (exp === undefined) return false;
+  if (exp <= Date.now()) {
+    tokenBlacklist.delete(token);
+    return false;
+  }
+  return true;
+}
+
 /** Tạo session token HMAC-SHA256. */
 export function createSessionToken(
   user: SessionUser,
@@ -81,7 +103,8 @@ export function loadAuthSecret(dataDir: string): string {
     }
     const secret = crypto.randomBytes(32).toString('hex');
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ secret, createdAt: Date.now() }, null, 2), 'utf8');
+    // FIX: mode 0o600 — secret file mặc định 0666&umask → user khác trên máy đọc được → forge token
+    fs.writeFileSync(file, JSON.stringify({ secret, createdAt: Date.now() }, null, 2), { mode: 0o600, encoding: 'utf8' });
     return secret;
   } catch {
     return crypto.randomBytes(32).toString('hex');

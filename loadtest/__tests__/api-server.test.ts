@@ -161,10 +161,18 @@ describeDb('api-server — admin auth + gate + history', () => {
     expect(bad.status).toBe(401);
   });
 
-  it('logout cần token → 200; thiếu token → 401', async () => {
-    const ok = await request('POST', '/api/loadtest/auth/logout', { token });
+  it('logout cần token → 200; token đã logout → 401 (blacklist); thiếu token → 401', async () => {
+    // Dùng token RIÊNG cho logout — không blacklist token dùng chung (test sau còn dùng).
+    const fresh = await request('POST', '/api/loadtest/auth/login', {
+      body: { username: 'admin1', password: 'Abc123!@' },
+    });
+    expect(fresh.status).toBe(200);
+    const ok = await request('POST', '/api/loadtest/auth/logout', { token: fresh.body.data.token });
     expect(ok.status).toBe(200);
     expect(ok.body.data.loggedOut).toBe(true);
+    // Token đã logout → 401 (trước đây logout là no-op, token dùng được tới khi hết hạn)
+    const revoked = await request('GET', '/api/loadtest/auth/me', { token: fresh.body.data.token });
+    expect(revoked.status).toBe(401);
     const bad = await request('POST', '/api/loadtest/auth/logout');
     expect(bad.status).toBe(401);
   });

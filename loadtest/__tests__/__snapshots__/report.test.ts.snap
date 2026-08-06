@@ -15,9 +15,15 @@ exports[`reportToMarkdown — snapshot toàn bộ output (diệt string mutant) 
 | Active max | 9,500 |
 | Actions | 100,000 |
 | Success rate | 99% |
-| Throughput avg / peak | 50000/s · 900/s |
+| Throughput avg / peak | 100000/s · 900/s |
 | Chat echo rate | 95% (950/1000) |
 | Queue peak | 300 |
+| Reconnect | 5 lần · avg 3.00s · max 8.00s |
+| User mất kết nối (lost) | 3 (0% của tổng user tạo) |
+| Reconcile (đã ngồi phòng) | 0 |
+
+## Reconnect & lỗi theo giai đoạn
+
 
 ## Không có post fixture — bỏ qua bước đọc feed
 
@@ -82,9 +88,15 @@ exports[`reportToMarkdown — snapshot toàn bộ output (diệt string mutant) 
 | Active max | 9,500 |
 | Actions | 100,000 |
 | Success rate | 99% |
-| Throughput avg / peak | 50000/s · 900/s |
+| Throughput avg / peak | 100000/s · 900/s |
 | Chat echo rate | 95% (950/1000) |
 | Queue peak | 300 |
+| Reconnect | 5 lần · avg 3.00s · max 8.00s |
+| User mất kết nối (lost) | 3 (0% của tổng user tạo) |
+| Reconcile (đã ngồi phòng) | 0 |
+
+## Reconnect & lỗi theo giai đoạn
+
 
 ## Latency theo action
 

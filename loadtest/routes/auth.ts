@@ -6,7 +6,7 @@
 import * as http from 'node:http';
 import type { RouteCtx } from '../http-server';
 import { hashPassword, validatePasswordStrength, verifyPassword } from '../db/password';
-import { createSessionToken } from '../auth';
+import { createSessionToken, verifySessionToken, blacklistToken } from '../auth';
 import { ltLog } from '../util';
 
 export const authHandlers = {
@@ -56,8 +56,16 @@ export const authHandlers = {
     });
   },
 
-  logout: async (ctx: RouteCtx, _req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
-    // auth:true trong route table — dispatcher đã verify token.
+  logout: async (ctx: RouteCtx, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+    // Blacklist token hiện tại (in-memory Map, TTL theo exp token) — token bị đánh cắp
+    // sau logout không dùng được cho tới khi hết hạn. Giả định single-instance
+    // (tool tự host 1 máy); multi-instance cần blacklist chia sẻ (Redis).
+    const header = req.headers.authorization ?? '';
+    const m = /^Bearer\s+(.+)$/i.exec(header);
+    if (m) {
+      const result = verifySessionToken(m[1], ctx.authSecret);
+      if (result.ok) blacklistToken(m[1], result.payload.exp);
+    }
     return ctx.ok(res, { loggedOut: true });
   },
 

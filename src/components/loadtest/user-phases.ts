@@ -37,6 +37,7 @@ export const ACTION_STATE_LABELS: Record<UserActionState, string> = {
   post: 'Đăng bài',
   typing: 'Đang gõ',
   topic: 'Đổi chủ đề',
+  vote_kick: 'Vote kick',
   idle: 'Rảnh',
 };
 

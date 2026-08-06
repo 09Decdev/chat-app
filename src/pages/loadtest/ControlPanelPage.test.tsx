@@ -23,6 +23,9 @@ const storeState = vi.hoisted(() => ({
   stopRun: vi.fn(),
   pauseRun: vi.fn(),
   resumeRun: vi.fn(),
+  resetRun: vi.fn(),
+  requireEnvConfirm: true,
+  paused: false,
   loadConfig: vi.fn(),
 }));
 

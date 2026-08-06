@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, X } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 import { ChipGroup } from '@/components/ui/chip-group';
 import { AlertBanner } from '@/components/ui/alert-banner';
 import { StatCard } from '@/components/ui/stat-card';
@@ -22,12 +23,24 @@ import { StartRunConfirmDialog, StopRunConfirmDialog } from '@/components/loadte
 import { useLoadtestStore } from '@/store/loadtest.store';
 import { routes } from '@/lib/env';
 import { fmtClock, fmtNum, isProductionLikeGateway } from '@/lib/loadtest-format';
-import { TERMINAL_PHASES } from '@/types/loadtest';
-import type { StartRunRequest } from '@/types/loadtest';
+import { TERMINAL_PHASES, CHAOS_ACTION_LABELS } from '@/types/loadtest';
+import type { ChaosEvent, NetworkImpairment, StartRunRequest } from '@/types/loadtest';
 import { cn } from '@/lib/utils';
 
 const RAMP_RATES = [100, 200, 500, 1000];
 const DURATIONS = [5, 10, 15, 30, 45, 60];
+
+/** Draft event chaos — input là string (trống = chưa nhập), ép number khi gửi. */
+interface ChaosEventDraft {
+  atSec: string;
+  action: ChaosEvent['action'];
+  durationSec: string;
+}
+
+const CHAOS_ACTIONS = (Object.keys(CHAOS_ACTION_LABELS) as ChaosEvent['action'][]).map((value) => ({
+  value,
+  label: CHAOS_ACTION_LABELS[value],
+}));
 
 function profileLabel(p: { chat: number; read: number; comment: number; like: number; view: number }): string {
   const parts: string[] = [];
@@ -77,20 +90,42 @@ export default function ControlPanelPage() {
   const stopRun = useLoadtestStore((s) => s.stopRun);
   const pauseRun = useLoadtestStore((s) => s.pauseRun);
   const resumeRun = useLoadtestStore((s) => s.resumeRun);
+  const resetRun = useLoadtestStore((s) => s.resetRun);
+  const requireEnvConfirm = useLoadtestStore((s) => s.requireEnvConfirm);
+  const paused = useLoadtestStore((s) => s.paused);
 
   const [preset, setPreset] = useState('10k');
   const [targetUsers, setTargetUsers] = useState(10_000);
   const [rampRate, setRampRate] = useState(200);
-  const [rampMode, setRampMode] = useState<'rate' | 'minutes' | 'burst'>('rate');
+  const [rampMode, setRampMode] = useState<'rate' | 'minutes' | 'burst' | 'breakpoint'>('rate');
   const [durationMin, setDurationMin] = useState(30);
+  // Gateway chạy — editable (server chặn URL ngoài allowlist + warning production giữ nguyên).
+  const [gatewayInput, setGatewayInput] = useState('');
+  useEffect(() => {
+    if (config?.gatewayUrl && gatewayInput === '') setGatewayInput(config.gatewayUrl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config?.gatewayUrl]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
-  const [paused, setPaused] = useState(false);
   const [infraBannerDismissed, setInfraBannerDismissed] = useState(false);
   // 429 rate-limit cooldown (UI-SPEC §5.2) — disable nút + countdown "Thử lại sau Ns".
   const [startCooldown, setStartCooldown] = useState(0);
   const [stopCooldown, setStopCooldown] = useState(0);
+  // Kịch bản nâng cao (network impairment + chaos) — mặc định tắt; chỉ gửi lên khi bật.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [netEnabled, setNetEnabled] = useState(false);
+  const [latencyMs, setLatencyMs] = useState('');
+  const [jitterMs, setJitterMs] = useState('');
+  const [dropRate, setDropRate] = useState('');
+  const [chaosEnabled, setChaosEnabled] = useState(false);
+  const [chaosEvents, setChaosEvents] = useState<ChaosEventDraft[]>([]);
+
+  const addChaosEvent = () =>
+    setChaosEvents((evs) => [...evs, { atSec: '', action: 'disconnect_all', durationSec: '' }]);
+  const removeChaosEvent = (i: number) => setChaosEvents((evs) => evs.filter((_, idx) => idx !== i));
+  const updateChaosEvent = (i: number, patch: Partial<ChaosEventDraft>) =>
+    setChaosEvents((evs) => evs.map((e, idx) => (idx === i ? { ...e, ...patch } : e)));
 
   useEffect(() => {
     if (startCooldown <= 0) return;
@@ -107,7 +142,14 @@ export default function ControlPanelPage() {
   const running = ['provisioning', 'ramping', 'steady'].includes(phase);
   const formLocked = phase !== 'idle';
 
-  const gatewayUrl = config?.gatewayUrl ?? 'ws://test-01.mayogu.test';
+  const gatewayUrl = gatewayInput.trim() || config?.gatewayUrl || 'ws://test-01.mayogu.test';
+  // Dropdown từ allowlist (Settings) — luôn thêm gateway mặc định của server nếu chưa nằm trong list
+  const gatewayOptions = useMemo(() => {
+    const list = config?.allowlist ? [...config.allowlist] : [];
+    if (config?.gatewayUrl && !list.includes(config.gatewayUrl)) list.unshift(config.gatewayUrl);
+    if (list.length === 0) list.push('ws://test-01.mayogu.test');
+    return list;
+  }, [config?.allowlist, config?.gatewayUrl]);
   const productionTarget = isProductionLikeGateway(gatewayUrl);
   const allowlistFail = !!config && !config.allowlist.includes(gatewayUrl.replace(/^ws:\/\//, 'http://'));
   const hugePreset = preset === '1M' || preset === '10M';
@@ -143,8 +185,36 @@ export default function ControlPanelPage() {
       gatewayUrl,
       freshAccounts: false,
     };
+    // Network impairment — chỉ gửi field đã nhập khi bật mô phỏng.
+    if (netEnabled) {
+      const network: NetworkImpairment = {};
+      if (latencyMs.trim() !== '') network.latencyMs = Number(latencyMs);
+      if (jitterMs.trim() !== '') network.jitterMs = Number(jitterMs);
+      if (dropRate.trim() !== '') network.dropRate = Number(dropRate);
+      if (Object.keys(network).length > 0) req.network = network;
+    }
+    // Chaos — lọc event không hợp lệ (atSec rỗng/âm; block_reconnect thiếu durationSec > 0).
+    if (chaosEnabled) {
+      const events = chaosEvents
+        .map((e): ChaosEvent | null => {
+          const atSec = Number(e.atSec);
+          if (e.atSec.trim() === '' || !Number.isFinite(atSec) || atSec < 0) return null;
+          if (e.action === 'block_reconnect') {
+            const durationSec = Number(e.durationSec);
+            if (e.durationSec.trim() === '' || !Number.isFinite(durationSec) || durationSec <= 0) return null;
+            return { atSec, action: e.action, durationSec };
+          }
+          return { atSec, action: e.action };
+        })
+        .filter((e): e is ChaosEvent => e !== null);
+      if (events.length > 0) req.chaos = { events };
+    }
     const res = await startRun(req);
     if (res.ok && res.runId) {
+      // E7: server chấp nhận run nhưng có cảnh báo (vd target vượt năng lực máy) — hiện, không nuốt.
+      if (res.warnings && res.warnings.length > 0) {
+        toast.warning('Run bắt đầu — có cảnh báo từ server', { description: res.warnings.join('; ') });
+      }
       navigate(routes.loadtestLive);
     } else {
       const msg =
@@ -278,7 +348,7 @@ export default function ControlPanelPage() {
                   </Select>
                   <Select
                     value={rampMode}
-                    onValueChange={(v) => setRampMode(v as 'rate' | 'minutes' | 'burst')}
+                    onValueChange={(v) => setRampMode(v as 'rate' | 'minutes' | 'burst' | 'breakpoint')}
                   >
                     <SelectTrigger aria-label="Chế độ ramp">
                       <SelectValue />
@@ -287,6 +357,7 @@ export default function ControlPanelPage() {
                       <SelectItem value="rate">theo tốc độ</SelectItem>
                       <SelectItem value="minutes">trong X phút</SelectItem>
                       <SelectItem value="burst">toàn bộ cùng lúc</SelectItem>
+                      <SelectItem value="breakpoint">tìm điểm gãy (ramp tới gãy)</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -319,12 +390,189 @@ export default function ControlPanelPage() {
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="gateway-url">Gateway (test)</Label>
-                <Input id="gateway-url" readOnly value={gatewayUrl} aria-describedby="gateway-hint" />
+                <Select value={gatewayUrl} onValueChange={setGatewayInput} disabled={formLocked}>
+                  <SelectTrigger id="gateway-url" className="w-full" aria-label="Chọn gateway">
+                    <SelectValue placeholder="Chọn gateway" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {gatewayOptions.map((g) => (
+                      <SelectItem key={g} value={g}>
+                        {g}
+                        {g === config?.gatewayUrl && ' (mặc định)'}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <p id="gateway-hint" className="text-xs text-muted-foreground">
-                  Chỉnh sửa trong Cài đặt (allowlist)
+                  Chọn từ môi trường đã thêm trong Cài đặt (allowlist — chặn cứng SD-1)
                 </p>
               </div>
             </div>
+          </Card>
+
+          <Card className={cn('p-4', formLocked && 'pointer-events-none opacity-50')} aria-busy={formLocked}>
+            <button
+              type="button"
+              className="flex w-full items-center justify-between gap-2"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              aria-expanded={advancedOpen}
+              aria-controls="advanced-scenario-panel"
+            >
+              <h2 className="text-sm font-medium">KỊCH BẢN NÂNG CAO</h2>
+              <ChevronDown
+                className={cn('h-4 w-4 text-muted-foreground transition-transform', advancedOpen && 'rotate-180')}
+                aria-hidden
+              />
+            </button>
+            {advancedOpen && (
+              <div id="advanced-scenario-panel" className="mt-3 space-y-4">
+                {/* Network impairment */}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="net-enabled"
+                      checked={netEnabled}
+                      onCheckedChange={setNetEnabled}
+                      aria-label="Bật mô phỏng mạng yếu"
+                    />
+                    <Label htmlFor="net-enabled">Bật mô phỏng mạng yếu</Label>
+                  </div>
+                  {netEnabled && (
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="net-latency" className="text-xs">
+                          Latency thêm (ms)
+                        </Label>
+                        <Input
+                          id="net-latency"
+                          type="number"
+                          min={0}
+                          max={30000}
+                          placeholder="0–30000"
+                          value={latencyMs}
+                          onChange={(e) => setLatencyMs(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="net-jitter" className="text-xs">
+                          Jitter ± (ms)
+                        </Label>
+                        <Input
+                          id="net-jitter"
+                          type="number"
+                          min={0}
+                          max={10000}
+                          placeholder="0–10000"
+                          value={jitterMs}
+                          onChange={(e) => setJitterMs(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="net-drop" className="text-xs">
+                          Drop rate (%)
+                        </Label>
+                        <Input
+                          id="net-drop"
+                          type="number"
+                          min={0}
+                          max={100}
+                          placeholder="0–100"
+                          value={dropRate}
+                          onChange={(e) => setDropRate(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Chaos (failure injection) */}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="chaos-enabled"
+                      checked={chaosEnabled}
+                      onCheckedChange={setChaosEnabled}
+                      aria-label="Bật chaos (failure injection)"
+                    />
+                    <Label htmlFor="chaos-enabled">Bật chaos (failure injection)</Label>
+                  </div>
+                  {chaosEnabled && (
+                    <div className="space-y-2">
+                      {chaosEvents.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Chưa có event — thêm event để chèn lỗi trong lúc chạy (tối đa 20).
+                        </p>
+                      )}
+                      {chaosEvents.map((ev, i) => (
+                        <div key={i} className="space-y-2 rounded-lg border border-border p-2">
+                          <div className="flex items-start gap-2">
+                            <div className="min-w-0 flex-1 space-y-1.5">
+                              <Label htmlFor={`chaos-atsec-${i}`} className="text-xs">
+                                Thời điểm (giây)
+                              </Label>
+                              <Input
+                                id={`chaos-atsec-${i}`}
+                                type="number"
+                                min={0}
+                                placeholder="vd 30"
+                                value={ev.atSec}
+                                onChange={(e) => updateChaosEvent(i, { atSec: e.target.value })}
+                              />
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="mt-4 h-9 w-9"
+                              onClick={() => removeChaosEvent(i)}
+                              aria-label={`Xóa event ${i + 1}`}
+                            >
+                              <X className="h-4 w-4" aria-hidden />
+                            </Button>
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs">Hành động</Label>
+                            <Select
+                              value={ev.action}
+                              onValueChange={(v) => updateChaosEvent(i, { action: v as ChaosEvent['action'] })}
+                            >
+                              <SelectTrigger aria-label={`Hành động event ${i + 1}`}>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {CHAOS_ACTIONS.map((o) => (
+                                  <SelectItem key={o.value} value={o.value}>
+                                    {o.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          {ev.action === 'block_reconnect' && (
+                            <div className="space-y-1.5">
+                              <Label htmlFor={`chaos-duration-${i}`} className="text-xs">
+                                Thời gian chặn (giây)
+                              </Label>
+                              <Input
+                                id={`chaos-duration-${i}`}
+                                type="number"
+                                min={1}
+                                placeholder="vd 60"
+                                value={ev.durationSec}
+                                onChange={(e) => updateChaosEvent(i, { durationSec: e.target.value })}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      <Button type="button" variant="outline" size="sm" className="w-full" onClick={addChaosEvent}>
+                        + Thêm event
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </Card>
         </div>
 
@@ -415,13 +663,17 @@ export default function ControlPanelPage() {
       </div>
 
       {/* [bottom] CTA thumb-zone */}
-      <div className="fixed inset-x-0 bottom-16 z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
+      <div className="fixed inset-x-0 bottom-[calc(3.5rem+env(safe-area-inset-bottom))] z-30 border-t border-border bg-background/80 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:bottom-0">
         {phase === 'idle' && (
           <Button
             size="lg"
             className="w-full min-h-12"
             disabled={allowlistFail || targetInvalid || !config || startCooldown > 0}
-            onClick={() => setConfirmOpen(true)}
+            onClick={() => {
+              // requireEnvConfirm = off → bỏ qua confirm dialog môi trường (pref Settings > An toàn).
+              if (requireEnvConfirm) setConfirmOpen(true);
+              else void onConfirmStart();
+            }}
           >
             {startCooldown > 0 ? `Thử lại sau ${startCooldown}s` : 'BẮT ĐẦU'}
           </Button>
@@ -433,15 +685,7 @@ export default function ControlPanelPage() {
               <Button
                 variant="outline"
                 className="min-h-12 flex-1"
-                onClick={() => {
-                  if (paused) {
-                    void resumeRun();
-                    setPaused(false);
-                  } else {
-                    void pauseRun();
-                    setPaused(true);
-                  }
-                }}
+                onClick={() => (paused ? void resumeRun() : void pauseRun())}
               >
                 {paused ? 'Tiếp tục' : 'Tạm dừng'}
               </Button>
@@ -460,9 +704,14 @@ export default function ControlPanelPage() {
           <p className="py-3 text-center text-sm text-warning">Đang chốt số liệu...</p>
         )}
         {TERMINAL_PHASES.includes(phase) && (
-          <Button size="lg" variant="default" className="w-full min-h-12" onClick={() => navigate(routes.loadtestReport)}>
-            Xem báo cáo &gt;
-          </Button>
+          <div className="flex gap-3">
+            <Button size="lg" variant="outline" className="min-h-12 flex-1" onClick={() => resetRun()}>
+              Run mới
+            </Button>
+            <Button size="lg" variant="default" className="min-h-12 flex-1" onClick={() => navigate(routes.loadtestReport)}>
+              Xem báo cáo &gt;
+            </Button>
+          </div>
         )}
       </div>
 
