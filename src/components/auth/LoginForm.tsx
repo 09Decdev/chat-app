@@ -30,7 +30,7 @@ export function LoginForm() {
     const res = await login(email.trim(), password);
     setLoading(false);
     if (res.ok) {
-      navigate(routes.chat, { replace: true });
+      navigate(routes.home, { replace: true });
       return;
     }
     if (res.require2fa) {

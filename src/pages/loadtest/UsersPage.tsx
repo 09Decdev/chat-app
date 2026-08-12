@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ArrowDown, ArrowUp, RefreshCw, Search, Users, Wifi, WifiOff } from 'lucide-react';
+import { ArrowDown, ArrowUp, LogIn, RefreshCw, Search, Users, Wifi, WifiOff } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -46,7 +46,7 @@ const ROW_HEIGHT = 44;
  */
 export type UsersColumnKey =
   | 'index' | 'email' | 'phase' | 'currentAction'
-  | 'roomId' | 'socket' | 'reconnectCount' | 'outboxPending' | 'lastActionAt' | 'lastError';
+  | 'roomId' | 'socket' | 'reconnectCount' | 'outboxPending' | 'lastActionAt' | 'lastError' | 'actions';
 
 export const USERS_COLUMNS: readonly { key: UsersColumnKey; label: string; sortable?: UserSortField }[] = [
   { key: 'index', label: '#', sortable: 'index' },
@@ -59,9 +59,10 @@ export const USERS_COLUMNS: readonly { key: UsersColumnKey; label: string; sorta
   { key: 'outboxPending', label: 'Outbox', sortable: 'outboxPending' },
   { key: 'lastActionAt', label: 'Hoạt động', sortable: 'lastActionAt' },
   { key: 'lastError', label: 'Lỗi gần nhất' },
+  { key: 'actions', label: '' },
 ];
 
-const GRID_COLS = 'grid-cols-[56px_1.6fr_112px_104px_1fr_60px_80px_64px_110px_1.3fr]';
+const GRID_COLS = 'grid-cols-[56px_1.6fr_112px_104px_1fr_60px_80px_64px_110px_1.3fr_56px]';
 
 function badgeStyle(color: string): { color: string; backgroundColor: string } {
   return { color, backgroundColor: color.replace(')', ' / 0.15)') };
@@ -79,12 +80,14 @@ function UserRowCell({
   now,
   actionLabel,
   actionColor,
+  onImpersonate,
 }: {
   col: (typeof USERS_COLUMNS)[number];
   row: VirtualUserRow;
   now: number;
   actionLabel: string;
   actionColor: string | undefined;
+  onImpersonate?: (row: VirtualUserRow) => void;
 }) {
   switch (col.key) {
     case 'index':
@@ -160,10 +163,22 @@ function UserRowCell({
       ) : (
         <span className="text-muted-foreground">—</span>
       );
+    case 'actions':
+      return (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          aria-label={`Truy cập tài khoản ${row.email}`}
+          onClick={() => onImpersonate?.(row)}
+        >
+          <LogIn className="h-4 w-4" aria-hidden />
+        </Button>
+      );
   }
 }
 
-function UserRow({ row, now }: { row: VirtualUserRow; now: number }) {
+function UserRow({ row, now, onImpersonate }: { row: VirtualUserRow; now: number; onImpersonate?: (row: VirtualUserRow) => void }) {
   const actionLabel = row.currentAction ? ACTION_STATE_LABELS[row.currentAction] : '—';
   const actionColor = row.currentAction && row.currentAction !== 'idle' ? ACTION_COLORS[row.currentAction] : undefined;
   return (
@@ -173,7 +188,7 @@ function UserRow({ row, now }: { row: VirtualUserRow; now: number }) {
       role="row"
     >
       {USERS_COLUMNS.map((col) => (
-        <UserRowCell key={col.key} col={col} row={row} now={now} actionLabel={actionLabel} actionColor={actionColor} />
+        <UserRowCell key={col.key} col={col} row={row} now={now} actionLabel={actionLabel} actionColor={actionColor} onImpersonate={onImpersonate} />
       ))}
     </div>
   );
@@ -299,6 +314,14 @@ export default function UsersPage() {
 
   const donutSlices: PhaseSlice[] = useMemo(() => slicesFromPhaseCounts(phaseCounts), [phaseCounts]);
   const noRunYet = phase === 'idle' && !isRunning && rows.length === 0 && !loading;
+
+  // F-impersonate: click → mở console multi-pane với user đó ở ô 1.
+  const onImpersonate = useCallback(
+    (row: VirtualUserRow) => {
+      navigate(`/loadtest/console?email=${encodeURIComponent(row.email)}`);
+    },
+    [navigate],
+  );
 
   return (
     <div className="space-y-4">
@@ -476,7 +499,7 @@ export default function UsersPage() {
                       style={{ height: ROW_HEIGHT, transform: `translateY(${item.start}px)` }}
                       role="rowgroup"
                     >
-                      <UserRow row={rows[item.index]} now={nowRef.current} />
+                      <UserRow row={rows[item.index]} now={nowRef.current} onImpersonate={onImpersonate} />
                     </div>
                   ))}
                 </div>

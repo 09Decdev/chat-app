@@ -30,7 +30,8 @@ export const env = {
 
 export const routes = {
   login: '/login',
-  chat: '/',
+  home: '/',
+  chat: '/chat',
   // LoadTest tool (docs/UI-SPEC-loadtest-tool.md §2)
   loadtest: '/loadtest',
   loadtestLive: '/loadtest/live',
@@ -43,4 +44,5 @@ export const routes = {
   loadtestLogin: '/loadtest/login',
   loadtestRegister: '/loadtest/register',
   loadtestHistory: '/loadtest/history',
+  feed: '/feed',
 } as const;

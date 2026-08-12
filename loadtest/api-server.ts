@@ -80,6 +80,7 @@ const ROUTES: Route[] = [
   route('POST', '/api/loadtest/auth/logout', authHandlers.logout, { auth: true }),
   route('GET', '/api/loadtest/auth/me', authHandlers.me, { auth: true }),
   route('POST', '/api/loadtest/start', runHandlers.start, { auth: true, rate: 'start' }),
+  route('POST', '/api/loadtest/impersonate', runHandlers.impersonate, { auth: true, rate: 'write' }),
   route('POST', '/api/loadtest/stop', runHandlers.stop, { auth: true }),
   route('POST', '/api/loadtest/kill', runHandlers.kill, { auth: true }),
   route('POST', '/api/loadtest/pause', runHandlers.pause, { auth: true }),

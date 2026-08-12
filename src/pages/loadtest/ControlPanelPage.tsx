@@ -98,6 +98,7 @@ export default function ControlPanelPage() {
   const [targetUsers, setTargetUsers] = useState(10_000);
   const [rampRate, setRampRate] = useState(200);
   const [rampMode, setRampMode] = useState<'rate' | 'minutes' | 'burst' | 'breakpoint'>('rate');
+  const [stress, setStress] = useState(true); // F-stress: mặc định ồ ạt (bỏ pacing + burst connect).
   const [durationMin, setDurationMin] = useState(30);
   // Gateway chạy — editable (server chặn URL ngoài allowlist + warning production giữ nguyên).
   const [gatewayInput, setGatewayInput] = useState('');
@@ -184,6 +185,7 @@ export default function ControlPanelPage() {
       profile,
       gatewayUrl,
       freshAccounts: false,
+      stress,
     };
     // Network impairment — chỉ gửi field đã nhập khi bật mô phỏng.
     if (netEnabled) {
@@ -360,6 +362,10 @@ export default function ControlPanelPage() {
                       <SelectItem value="breakpoint">tìm điểm gãy (ramp tới gãy)</SelectItem>
                     </SelectContent>
                   </Select>
+                  <div className="flex items-center gap-2">
+                    <Switch id="stress" checked={stress} onCheckedChange={setStress} aria-label="ồ ạt (stress mode)" />
+                    <Label htmlFor="stress" className="text-xs">ồ ạt</Label>
+                  </div>
                 </div>
               </div>
               <div className="space-y-1.5">

@@ -5,10 +5,11 @@
 
 import * as http from 'node:http';
 import type { RouteCtx } from '../http-server';
-import type { StartRunRequest, UserPhase } from '../types';
+import type { StartRunRequest, TestAccount, UserPhase } from '../types';
 import { normalizeSort } from '../users-sort';
 import { PRESETS, validateRunRequest, estimateInfra, mergedAllowlist } from '../config';
-import { logHistory } from '../util';
+import { logHistory, ltLog, normalizeUrl } from '../util';
+import { loginOneAccount, decodeSub } from '../auth-factory';
 import { ticksToCsv, reportToMarkdown } from '../report';
 import { createHealthProbe, healthDepsFrom, type HealthReport } from '../health';
 import type { LoadTestCoordinator } from '../coordinator';
@@ -49,6 +50,7 @@ export const runHandlers = {
       network: (body.network as StartRunRequest['network']) ?? undefined,
       chaos: (body.chaos as StartRunRequest['chaos']) ?? undefined,
       thresholds: (body.thresholds as StartRunRequest['thresholds']) ?? undefined,
+      stress: body.stress === true,
     };
     const envForGuard = { ...ctx.env, allowlist: mergedAllowlist(ctx.env) };
     const v = validateRunRequest(startReq, envForGuard);
@@ -154,6 +156,59 @@ export const runHandlers = {
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="report-${r.runId}.json"` });
     res.end(JSON.stringify(r, null, 2));
+  },
+
+  /** F-impersonate: re-login 1 virtual user → trả fresh token để operator mở chat-app như user đó. */
+  impersonate: async (ctx: RouteCtx, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+    const body = await ctx.readBody(req, res);
+    if (body === undefined) return;
+    const email = String(body.email ?? '').trim().toLowerCase();
+    if (!email) return ctx.fail(res, 400, 'email bắt buộc');
+    // 1. Tìm account: memory (run active) → DB pool_accounts (run ended).
+    let acc: { email: string; password: string; displayName: string; deviceInfo: TestAccount['deviceInfo'] } | null = null;
+    let memUserId = '';
+    const mem = ctx.coordinator.findAccountInMemory(email);
+    if (mem) {
+      acc = { email: mem.email, password: mem.password, displayName: mem.displayName, deviceInfo: mem.deviceInfo };
+      memUserId = mem.userId;
+    } else if (ctx.store) {
+      const r = await ctx.store.findAccountByEmail(email);
+      if (!r.ok) return ctx.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+      const row = r.rows[0];
+      if (row) {
+        let deviceInfo: TestAccount['deviceInfo'] | null = null;
+        try {
+          deviceInfo = JSON.parse(row.deviceInfoJson) as TestAccount['deviceInfo'];
+        } catch {
+          deviceInfo = null;
+        }
+        if (!deviceInfo || !deviceInfo.installationId || !deviceInfo.deviceFingerprint) {
+          deviceInfo = { installationId: `imp-${email}`, deviceFingerprint: `imp-${email}`, platform: 'web', deviceName: 'loadtest-impersonate' };
+        }
+        acc = { email: row.email, password: row.password, displayName: row.displayName, deviceInfo };
+      }
+    }
+    if (!acc) return ctx.fail(res, 404, `Không tìm thấy account ${email}`, { error: 'NOT_FOUND' });
+    // 2. Re-login fresh (gateway multi-session OK — không đá user thật ra).
+    const gatewayUrl = ctx.coordinator.config?.gatewayUrl ?? ctx.env.gatewayUrl;
+    const login = await loginOneAccount(normalizeUrl(gatewayUrl), acc.email, acc.password, acc.deviceInfo);
+    if (!login.ok) {
+      const msg = login.require2fa ? 'Account yêu cầu 2FA — không impersonate được' : `Login fail (${login.code})`;
+      return ctx.fail(res, login.require2fa ? 409 : 502, msg, { error: login.code ?? 'LOGIN_FAIL' });
+    }
+    // 3. Decode userId + profile từ JWT (payload có sub/displayName/avatar).
+    const userId = decodeSub(login.accessToken) || memUserId;
+    let displayName = acc.displayName;
+    let avatar = '';
+    try {
+      const payload = JSON.parse(Buffer.from(login.accessToken.split('.')[1], 'base64url').toString('utf8')) as { displayName?: string; avatar?: string };
+      displayName = payload.displayName ?? displayName;
+      avatar = payload.avatar ?? '';
+    } catch {
+      // giữ default
+    }
+    ltLog.info(`[impersonate] mượn account ${email} (userId ${userId})`);
+    return ctx.ok(res, { accessToken: login.accessToken, refreshToken: login.refreshToken, user: { id: userId, email, displayName, avatar } });
   },
 };
 

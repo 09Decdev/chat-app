@@ -9,9 +9,13 @@ interface AuthState {
   accessToken: string | null;
   isAuthenticated: boolean;
   authReady: boolean;
+  /** F-impersonate: true khi đang truy cập 1 virtual user (thoát → clear + về loadtest). */
+  impersonating: boolean;
   hydrate: () => void;
   login: (email: string, password: string) => Promise<{ ok: boolean; require2fa?: boolean; error?: string }>;
   logout: () => void;
+  impersonate: (data: { accessToken: string; refreshToken: string; user: { id: string; email: string; displayName: string; avatar: string } }) => void;
+  exitImpersonate: () => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -19,6 +23,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   accessToken: null,
   isAuthenticated: false,
   authReady: false,
+  impersonating: false,
 
   hydrate: async () => {
     const access = tokenStorage.access;
@@ -85,6 +90,22 @@ export const useAuthStore = create<AuthState>((set) => ({
   logout: () => {
     tokenStorage.clear();
     set({ user: null, accessToken: null, isAuthenticated: false });
+  },
+
+  impersonate: ({ accessToken, refreshToken, user }) => {
+    tokenStorage.set(accessToken, refreshToken);
+    set({
+      accessToken,
+      isAuthenticated: true,
+      authReady: true,
+      impersonating: true,
+      user: { id: user.id, email: user.email, displayName: user.displayName, avatarUrl: user.avatar },
+    });
+  },
+
+  exitImpersonate: () => {
+    tokenStorage.clear();
+    set({ user: null, accessToken: null, isAuthenticated: false, impersonating: false });
   },
 }));
 

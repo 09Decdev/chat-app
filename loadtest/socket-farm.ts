@@ -315,6 +315,13 @@ export class VirtualUser {
       this.roomEndsAt = p.roomEndsAt ?? null;
       this.phase = 'in_room';
       this.lastSendAt = Date.now(); // tránh send ngay vừa vào phòng
+      // Telemetry (PERF-BASELINE): queue wait = matching:found arrival - enqueue time (queuedAt).
+      // Chỉ fire khi có queuedAt (enqueue thành công) — consume để không double-count nếu event đến 2 lần.
+      // KHÔNG đụng matching logic — chỉ đo.
+      if (this.queuedAt > 0) {
+        this.onMatchFound?.(Date.now() - this.queuedAt);
+        this.queuedAt = 0;
+      }
       // F1: capture members cho vote_kick targeting.
       const ids = (p.members ?? []).map((m) => m?.userId).filter((id): id is string => !!id);
       if (ids.length) this.members = ids;
@@ -387,6 +394,8 @@ export class VirtualUser {
   onError: ((code: string, message: string, action?: ErrorSample['action']) => void) | null = null;
   /** vote_kick vote (trên vote người khác start) — worker record action. */
   onVoteKickVote: (() => void) | null = null;
+  /** PERF-BASELINE: queue wait telemetry — fire khi matching:found đến (Date.now() - queuedAt). */
+  onMatchFound: ((waitMs: number) => void) | null = null;
   /** Stats rẻ tiền cho auto-stop (connect attempts/fails) — đọc trong emitTick. */
   readonly runtimeStats = {
     connectAttempts: 0,
@@ -437,6 +446,7 @@ export class VirtualUser {
 
   /** Scheduler 100ms — trả về 1 action cần chạy (null = chưa đến lúc). */
   tick(now: number, worker: WorkerRuntime): { action: 'send' | 'typing' | 'topic' | 'rest' | 'vote_kick' } | null {
+    const stress = !!worker.config?.stress; // F-stress: bỏ pacing → mọi user bắn action mỗi tick (100ms) + burst connect → sập server.
     // Timeout chờ matching (AC3.2): 60s không thấy matching:found → backoff 30s rồi thử lại.
     // queuedAt > 0 bắt buộc: queuedAt=0 = enqueue ĐANG in-flight (phase 'queued' set trước await
     // ở ensureChatCycle, queuedAt chỉ gán sau khi enqueue thành công). Nếu không guard, `now - 0`
@@ -453,22 +463,23 @@ export class VirtualUser {
     }
     if (this.phase === 'in_room') {
       if (
-        now - this.lastSendAt >= CHAT_SEND_MIN_MS + jitter(400, 0.5) &&
+        now - this.lastSendAt >= (stress ? 100 : CHAT_SEND_MIN_MS + jitter(400, 0.5)) &&
         this.outbox.size < worker.env.maxPendingOutbox
       ) {
         this.lastSendAt = now;
         return { action: 'send' };
       }
-      if (this.profile === 'chat' && now - this.lastTypingAt >= TYPING_DEBOUNCE_MS) {
+      if (this.profile === 'chat' && now - this.lastTypingAt >= (stress ? 100 : TYPING_DEBOUNCE_MS)) {
         this.lastTypingAt = now;
         return { action: 'typing' };
       }
-      if (this.profile === 'chat' && now - this.lastTopicAt >= TOPIC_MIN_MS && Math.random() < 0.2) {
+      if (!stress && this.profile === 'chat' && now - this.lastTopicAt >= TOPIC_MIN_MS && Math.random() < 0.2) {
         this.lastTopicAt = now;
         return { action: 'topic' };
       }
       // vote_kick (F1): paced 60s, 8% chance, ≥2 member, không active, hết cooldown.
       if (
+        !stress &&
         this.profile === 'chat' &&
         now - this.lastVoteKickAt >= VOTE_KICK_MIN_MS &&
         now >= this.voteKickCooldownUntil &&
@@ -481,8 +492,8 @@ export class VirtualUser {
       }
       return null;
     }
-    // REST pacing ngoài phòng (kể cả cooldown — giữ tải)
-    if ((this.phase === 'connected' || this.phase === 'cooldown' || this.phase === 'idle') && !this.restInFlight && now - this.lastRestAt >= this.restInterval()) {
+    // REST pacing ngoài phòng (kể cả cooldown — giữ tải). Stress → 100ms (mọi tick).
+    if ((this.phase === 'connected' || this.phase === 'cooldown' || this.phase === 'idle') && !this.restInFlight && now - this.lastRestAt >= (stress ? 100 : this.restInterval())) {
       this.lastRestAt = now;
       return { action: 'rest' };
     }
@@ -803,6 +814,8 @@ export class WorkerRuntime {
       u.onEchoOk = (latencyMs) => this.recordEchoOk(latencyMs);
       u.onError = (code, message, action) => this.recordError(code, message, u, action);
       u.onVoteKickVote = () => this.recordAction('vote_kick', 0, true, u, '');
+      // PERF-BASELINE: queue wait = enqueue → matching:found (chỉ telemetry — không bump success/fail/actionsTotal).
+      u.onMatchFound = (waitMs) => this.recordMatchFound(waitMs);
       // F3: KHÔNG connect ngay — scheduler connect theo rampRate (paced)
     }
     this.rampStartedAt = Date.now();
@@ -867,7 +880,7 @@ export class WorkerRuntime {
         this.config.rampRate / Math.max(1, this.config.workerCount),
       );
       const budget =
-        this.config.rampMode === 'burst'
+        this.config.rampMode === 'burst' || this.config.stress
           ? this.users.length
           : Math.floor(((now - this.rampStartedAt) / 1000) * ratePerWorker);
       while (this.connectStarted < Math.min(budget, this.users.length)) {
@@ -1026,6 +1039,16 @@ export class WorkerRuntime {
     this.actionOk.set('chat', (this.actionOk.get('chat') ?? 0) + 1);
     this.addLatency('chat', latencyMs);
     this.bumpPerSec('chat');
+  }
+
+  /**
+   * PERF-BASELINE: queue wait telemetry = enqueue (POST /chat/match) → matching:found arrival.
+   * Telemetry-ONLY: chỉ addLatency('match_wait') — KHÔNG bump actionsTotal/success/fail/echo
+   * (matching không phải "action attempt" — không phá success rate; matches/s suy ra từ count/duration).
+   * Histogram flows worker→coordinator→report perAction (p50/p95/p99/count tự xuất ở markdown).
+   */
+  recordMatchFound(waitMs: number) {
+    this.addLatency('match_wait', waitMs);
   }
 
   /** Không echo trong TTL — rate-limit silent drop / Kafka chậm (PRD §5.3 tách riêng). */

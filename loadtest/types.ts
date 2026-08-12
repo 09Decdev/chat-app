@@ -4,9 +4,10 @@
  */
 
 /** Action types đo trong kịch bản (ActionType trong UI-SPEC tick). */
-export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick';
+// 'match_wait' = telemetry-only (enqueue → matching:found latency); không bump actionsTotal/success/fail.
+export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick' | 'match_wait';
 
-export const ACTION_TYPES: ActionType[] = ['chat', 'read', 'comment', 'like', 'view', 'post', 'typing', 'topic', 'vote_kick'];
+export const ACTION_TYPES: ActionType[] = ['chat', 'read', 'comment', 'like', 'view', 'post', 'typing', 'topic', 'vote_kick', 'match_wait'];
 
 /** Trạng thái action hiện tại của 1 virtual user ('idle' = không làm gì, null = chưa hành động). */
 export type UserActionState = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick' | 'idle';
@@ -102,6 +103,8 @@ export interface RunConfig {
   chaos?: { events: ChaosEvent[] };
   /** F3: SLO/thresholds — optional, eval pass/fail sau run. */
   thresholds?: Thresholds;
+  /** F-stress: bỏ pacing → mọi user bắn action mỗi tick + burst connect (sập server). */
+  stress?: boolean;
 }
 
 /** Cấu hình tiêu chuẩn do UI bấm (trước khi server resolve runId/workerCount...). */
@@ -119,6 +122,8 @@ export interface StartRunRequest {
   chaos?: { events: ChaosEvent[] };
   /** F3: SLO/thresholds — optional. */
   thresholds?: Thresholds;
+  /** F-stress: bỏ pacing + burst connect. */
+  stress?: boolean;
 }
 
 /** 1 account test đã provision (AF-2 token pool). */

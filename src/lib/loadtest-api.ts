@@ -159,6 +159,10 @@ export const loadtestApi = {
     const res = await client.post('/start', req);
     return unwrap<{ runId: string; config: unknown; warnings: string[]; estimate: { workers: number; ramGB: number; seatMin: number } }>(res.data);
   },
+  impersonate: async (email: string) => {
+    const res = await client.post('/impersonate', { email });
+    return unwrap<{ accessToken: string; refreshToken: string; user: { id: string; email: string; displayName: string; avatar: string } }>(res.data);
+  },
   stop: async (force = false) => {
     const res = await client.post(force ? '/kill' : '/stop', force ? { force: true } : {});
     return unwrap<{ stopped: boolean; force: boolean }>(res.data);

@@ -467,6 +467,7 @@ export function buildRunConfig(req: StartRunRequest, env: LoadTestEnv): RunConfi
     network: req.network,
     chaos: req.chaos,
     thresholds: req.thresholds,
+    stress: req.stress,
   };
 }
 

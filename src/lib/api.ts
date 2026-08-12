@@ -15,6 +15,8 @@ import type {
   ChatMessage,
   SetMyTopicResult,
   DeleteMyTopicResult,
+  SearchMessagesPage,
+  RoomMediaPage,
 } from '@/types/chat';
 
 /**
@@ -169,6 +171,43 @@ function parseMessagesPage(body: unknown): MessagesPage {
   return { messages: arr, nextCursor };
 }
 
+/** Bỏ envelope `{success, data}` nếu có (gateway có thể wrap) — fallback raw. */
+function unwrapBody(body: unknown): unknown {
+  if (body && typeof body === 'object' && 'success' in (body as Record<string, unknown>)) {
+    return (body as { data: unknown }).data;
+  }
+  return body;
+}
+
+/** Parse search page defensive — đồng thời support envelope & raw shape. */
+function parseSearchPage(body: unknown): SearchMessagesPage {
+  const obj = unwrapBody(body) as Record<string, unknown> | null;
+  const arr = Array.isArray(obj?.data)
+    ? (obj!.data as SearchMessagesPage['data'])
+    : Array.isArray(obj)
+      ? (obj as unknown as SearchMessagesPage['data'])
+      : [];
+  const nextCursor = (obj?.nextCursor as string | undefined) ?? null;
+  const hasNextPage = (obj?.hasNextPage as boolean | undefined) ?? !!nextCursor;
+  return { data: arr, nextCursor, hasNextPage };
+}
+
+/** Parse media page (data + members) defensive. */
+function parseMediaPage(body: unknown): RoomMediaPage {
+  const obj = unwrapBody(body) as Record<string, unknown> | null;
+  const arr = Array.isArray(obj?.data)
+    ? (obj!.data as RoomMediaPage['data'])
+    : Array.isArray(obj)
+      ? (obj as unknown as RoomMediaPage['data'])
+      : [];
+  const nextCursor = (obj?.nextCursor as string | undefined) ?? null;
+  const membersRaw = (obj as Record<string, unknown> | null)?.members;
+  const members = Array.isArray(membersRaw)
+    ? (membersRaw as RoomMediaPage['members'])
+    : null;
+  return { data: arr, nextCursor, members };
+}
+
 export const chatApi = {
   login: (req: LoginRequest) => apiPost<LoginResponse>('/auth/login', req),
   enqueue: (topic?: string) =>
@@ -187,6 +226,22 @@ export const chatApi = {
     apiPut<SetMyTopicResult>(`/content-service/chat/rooms/${encodeURIComponent(roomId)}/my-topic`, { title }),
   removeMyTopic: (roomId: string) =>
     apiDelete<DeleteMyTopicResult>(`/content-service/chat/rooms/${encodeURIComponent(roomId)}/my-topic`),
+
+  // ─── Room search + media gallery (2026-08-07) ──────────────────────────
+  searchMessages: async (roomId: string, q: string, cursor?: string | null, limit = 20) => {
+    const res = await instance.get(
+      `/content-service/chat/rooms/${encodeURIComponent(roomId)}/messages/search`,
+      { params: { q, ...(cursor ? { cursor } : {}), limit } },
+    );
+    return parseSearchPage(res.data);
+  },
+  listRoomMedia: async (roomId: string, cursor?: string | null, limit = 20) => {
+    const res = await instance.get(
+      `/content-service/chat/rooms/${encodeURIComponent(roomId)}/media`,
+      { params: { ...(cursor ? { cursor } : {}), limit } },
+    );
+    return parseMediaPage(res.data);
+  },
 };
 
 export { instance as axiosInstance };

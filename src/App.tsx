@@ -9,6 +9,7 @@ import ChatPage from '@/pages/ChatPage';
 import { useAuthStore } from '@/store/auth.store';
 import { connectChatSocket, disconnectChatSocket, useChatStore } from '@/store/chat.store';
 import { routes } from '@/lib/env';
+import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 import AppShell from '@/components/loadtest/app-shell';
 import { RequireLoadtestAuth } from '@/components/loadtest/require-auth';
 // Pages loadtest — React.lazy (FIX: tách khỏi bundle chính; vendor recharts/
@@ -25,6 +26,9 @@ const CleanupPage = lazy(() => import('@/pages/loadtest/CleanupPage'));
 const HistoryPage = lazy(() => import('@/pages/loadtest/HistoryPage'));
 const RunDetailPage = lazy(() => import('@/pages/loadtest/RunDetailPage'));
 const ComparePage = lazy(() => import('@/pages/loadtest/ComparePage'));
+const ImpersonationConsolePage = lazy(() => import('@/pages/loadtest/ImpersonationConsolePage'));
+const FeedTestPage = lazy(() => import('@/pages/feed/FeedTestPage'));
+const HomePage = lazy(() => import('@/pages/HomePage'));
 
 /** Hydrate auth tu storage + ket noi/ngat socket theo trang thai dang nhap. */
 function AuthGate() {
@@ -52,9 +56,10 @@ export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       {/* Lớp 1 — app-level: bắt AuthGate, guard, router crash. KHÔNG resetKey (tránh crash-loop). */}
-      <ErrorBoundary homePath={routes.chat}>
+      <ErrorBoundary homePath={routes.home}>
         <TooltipProvider delayDuration={300}>
           <AuthGate />
+          <ImpersonationBanner />
           <Suspense
             fallback={
               <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
@@ -65,7 +70,9 @@ export default function App() {
             <Routes>
               <Route path={routes.login} element={<LoginPage />} />
               <Route element={<ProtectedRoute />}>
+                <Route path={routes.home} element={<HomePage />} />
                 <Route path={routes.chat} element={<ChatPage />} />
+                <Route path={routes.feed} element={<FeedTestPage />} />
               </Route>
               {/* LoadTest tool — gate admin auth (PRD C2): login/register public, /loadtest/* qua guard */}
               <Route path={routes.loadtestLogin} element={<LoadtestLoginPage />} />
@@ -82,9 +89,10 @@ export default function App() {
                   <Route path="history" element={<HistoryPage />} />
                   <Route path="history/:runId" element={<RunDetailPage />} />
                   <Route path="compare" element={<ComparePage />} />
+                  <Route path="console" element={<ImpersonationConsolePage />} />
                 </Route>
               </Route>
-              <Route path="*" element={<Navigate to={routes.chat} replace />} />
+              <Route path="*" element={<Navigate to={routes.home} replace />} />
             </Routes>
           </Suspense>
           <Toaster />

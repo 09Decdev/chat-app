@@ -26,6 +26,7 @@ export interface RoomMember {
   displayName: string | null;
   avatarUrl: string | null;
   isMe?: boolean;
+  starCount?: number | null;
 }
 
 /** Ket qua ghim: matching:found payload. */
@@ -159,6 +160,53 @@ export interface DeleteMyTopicResult {
 export interface MessagesPage {
   messages: ChatMessage[];
   nextCursor: string | null;
+}
+
+// ─── Room search + media gallery (2026-08-07) ─────────────────────────────
+
+/** 1 kết quả search tin nhắn (Postgres FTS). headline = '...<b>match</b>...' — client render bold. */
+export interface SearchResultItem {
+  id: string;
+  userId: string;
+  content: string | null;
+  displayName: string | null;
+  avatarUrl: string | null;
+  fileId: string | null;
+  fileType: FileType | null;
+  fileWidth: number | null;
+  fileHeight: number | null;
+  createdAt: string; // ISO
+  rank: number;
+  headline: string;
+}
+
+/** GET /chat/rooms/:roomId/messages/search response. */
+export interface SearchMessagesPage {
+  data: SearchResultItem[];
+  nextCursor: string | null;
+  hasNextPage: boolean;
+}
+
+/** 1 media item (ảnh/file) trong room — presignedUrl server-side enrich. */
+export interface RoomMediaItem {
+  messageId: string;
+  fileId: string | null;
+  fileType: FileType | null;
+  fileWidth: number | null;
+  fileHeight: number | null;
+  mimeType: string | null;
+  presignedUrl: string | null;
+  senderId: string;
+  senderDisplayName: string | null;
+  senderAvatarUrl: string | null;
+  createdAt: string; // ISO
+}
+
+/** GET /chat/rooms/:roomId/media response. */
+export interface RoomMediaPage {
+  data: RoomMediaItem[];
+  nextCursor: string | null;
+  members: RoomMember[] | null;
 }
 
 // ─── Vote Kick ──────────────────────────────────────────────────────────

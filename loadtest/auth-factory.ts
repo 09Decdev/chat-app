@@ -470,7 +470,7 @@ function persistPool(env: LoadTestEnv, runId: string, config: RunConfig, account
 }
 
 /** Lấy userId từ access token (payload.sub) — không verify (JWT middleware cùng cách). */
-function decodeSub(token: string): string {
+export function decodeSub(token: string): string {
   try {
     const payload = token.split('.')[1];
     const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
@@ -478,6 +478,27 @@ function decodeSub(token: string): string {
   } catch {
     return '';
   }
+}
+
+/**
+ * Login 1 account (cho impersonate — F: manual testing as virtual user).
+ * Multi-session OK: gateway không bump tokenVersion khi login → không đá user thật ra.
+ * Trả fresh {accessToken, refreshToken} hoặc lỗi (2FA / login fail).
+ */
+export async function loginOneAccount(
+  gateway: string,
+  email: string,
+  password: string,
+  deviceInfo: TestAccount['deviceInfo'],
+): Promise<{ ok: true; accessToken: string; refreshToken: string } | { ok: false; require2fa?: boolean; code?: string }> {
+  const res = await requestJson<{ accessToken: string; refreshToken: string; require2fa?: boolean }>(
+    gateway,
+    '/auth/login',
+    { method: 'POST', body: { email, password, deviceInfo } },
+  );
+  if (res.ok && res.data?.accessToken) return { ok: true, accessToken: res.data.accessToken, refreshToken: res.data.refreshToken ?? '' };
+  if (res.ok && res.data?.require2fa) return { ok: false, require2fa: true, code: 'TWO_FA_REQUIRED' };
+  return { ok: false, code: res.code || 'LOGIN_FAIL' };
 }
 
 /** Tạo Redis client riêng cho coordinator (ioredis). */

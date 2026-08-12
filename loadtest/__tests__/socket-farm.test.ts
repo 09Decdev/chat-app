@@ -926,6 +926,58 @@ describe('G2 — recordError cap errorSamples (745)', () => {
   });
 });
 
+// ─── PERF-BASELINE: match_wait telemetry (enqueue → matching:found latency) ──
+
+describe('PERF-BASELINE — onMatchFound queue-wait telemetry', () => {
+  it('matching:found fire onMatchFound(Date.now() - queuedAt); reset queuedAt (consume, không double-count)', () => {
+    const { u, handlers } = connectUser(0, 'mw1@test.local');
+    const onMatchFound = vi.fn();
+    u.onMatchFound = onMatchFound;
+    // enqueue thành công lúc T-2000ms → queuedAt set
+    (u as unknown as { queuedAt: number }).queuedAt = Date.now() - 2000;
+    handlers.get('matching:found')?.({ roomId: 'r-mw', roomEndsAt: 1234 });
+    expect(u.phase).toBe('in_room');
+    expect(onMatchFound).toHaveBeenCalledTimes(1);
+    const wait = onMatchFound.mock.calls[0][0] as number;
+    // wait ≈ 2000ms (cho phép dao động timer)
+    expect(wait).toBeGreaterThanOrEqual(1990);
+    expect(wait).toBeLessThan(60_000);
+    // consume → matching:found lần 2 KHÔNG fire lại (tránh double-count)
+    handlers.get('matching:found')?.({ roomId: 'r-mw2', roomEndsAt: 5678 });
+    expect(onMatchFound).toHaveBeenCalledTimes(1);
+  });
+
+  it('matching:found KHÔNG fire onMatchFound khi chưa enqueue (queuedAt=0) — không đo nhầm', () => {
+    const { u, handlers } = connectUser(0, 'mw2@test.local');
+    const onMatchFound = vi.fn();
+    u.onMatchFound = onMatchFound;
+    // queuedAt mặc định 0 (chưa enqueue thành công) — vd. reconcile room cũ
+    handlers.get('matching:found')?.({ roomId: 'r-recon', roomEndsAt: 1234 });
+    expect(u.phase).toBe('in_room');
+    expect(onMatchFound).not.toHaveBeenCalled();
+  });
+
+  it('recordMatchFound → histogram match_wait có latency; KHÔNG bump actionsTotal/success/fail', () => {
+    const u = makeUser(0, 'mw3@test.local');
+    const rt = new WorkerRuntime(0, getEnv());
+    rt.config = { targetUsers: 1 } as RunConfig;
+    rt.users = [u];
+    const beforeActions = (rt as unknown as { counters: { actionsTotal: number } }).counters.actionsTotal;
+    const beforeSuccess = (rt as unknown as { counters: { successTotal: number } }).counters.successTotal;
+    const beforeFail = (rt as unknown as { counters: { failTotal: number } }).counters.failTotal;
+    rt.recordMatchFound(1234);
+    rt.recordMatchFound(5678);
+    const msgs: unknown[] = [];
+    rt.onMessage = (m) => msgs.push(m);
+    (rt as unknown as { emitTick: () => void }).emitTick();
+    const tick = (msgs[0] as { tick: WorkerTick }).tick;
+    expect(tick.histograms.match_wait).toBeDefined();
+    expect(tick.counters.actionsTotal).toBe(beforeActions); // telemetry-only — không đếm action
+    expect(tick.counters.successTotal).toBe(beforeSuccess);
+    expect(tick.counters.failTotal).toBe(beforeFail);
+  });
+});
+
 describe('G2 — matching:found / chat:joined / room lifecycle handlers (231/240/266/267)', () => {
   it('matching:found → phase in_room + roomId + emit chat:join', () => {
     const { u, handlers, socket } = connectUser(0, 'g2mf@test.local');

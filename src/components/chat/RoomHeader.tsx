@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { LogOut, Wifi, WifiOff, Hash, Clock } from 'lucide-react';
+import { LogOut, Wifi, WifiOff, Hash, Clock, Search } from 'lucide-react';
 import { useChatStore } from '@/store/chat.store';
 import { Button } from '@/components/ui/button';
 import {
@@ -12,6 +12,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import { RoomSearchPanel } from './RoomSearchPanel';
 
 /** VÁ-4: countdown còn lại của phòng từ roomEndsAt (epoch ms) — không tính TTL, chống trôi đồng hồ. */
 function useRoomCountdown(endsAt: number | null) {
@@ -36,6 +37,7 @@ export function RoomHeader() {
   const memberCount = useChatStore((s) => s.members.length);
   const leave = useChatStore((s) => s.leaveRoom);
   const [open, setOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
   const roomRemaining = useRoomCountdown(roomEndsAt);
 
   return (
@@ -64,6 +66,17 @@ export function RoomHeader() {
           )}
         </p>
       </div>
+
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setPanelOpen(true)}
+        disabled={!roomId}
+        title="Tìm tin nhắn / xem ảnh & file trong phòng"
+      >
+        <Search className="h-4 w-4" /> Tìm / Ảnh
+      </Button>
+      <RoomSearchPanel open={panelOpen} onOpenChange={setPanelOpen} />
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>

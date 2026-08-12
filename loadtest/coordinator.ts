@@ -697,6 +697,11 @@ export class LoadTestCoordinator {
     }
   }
 
+  /** F-impersonate: tìm account trong memory (run active) theo email — null nếu run ended/không có. */
+  findAccountInMemory(email: string): TestAccount | null {
+    return this.accounts.find((a) => a.email === email) ?? null;
+  }
+
   private pushTick(tick: LoadTestTick) {
     this.tickHistory.push(tick);
     if (this.tickHistory.length > TICK_HISTORY_LIMIT) this.tickHistory.shift();

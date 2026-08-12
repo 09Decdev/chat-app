@@ -44,6 +44,7 @@ export const ACTION_COLORS: Record<ActionType, string> = {
   topic: CHART_COLORS[6],
   typing: CHART_COLORS[7],
   vote_kick: CHART_COLORS[8],
+  match_wait: 'hsl(280 70% 50%)', // queue-wait telemetry — tím
 };
 
 /** Màu percentile latency — khớp LATENCY_SERIES cũ. */

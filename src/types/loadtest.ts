@@ -3,7 +3,7 @@
  * KHÔNG tự đặt tên field khác — dùng đúng field/tên backend trả về.
  */
 
-export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick';
+export type ActionType = 'chat' | 'read' | 'comment' | 'like' | 'view' | 'post' | 'typing' | 'topic' | 'vote_kick' | 'match_wait';
 
 /** Loại lỗi connect — khớp loadtest/types.ts ConnectFailType (DESIGN §2.1, T1). */
 export type ConnectFailType = 'timeout' | 'transport' | 'reject' | 'other';
@@ -40,6 +40,7 @@ export const ACTION_LABELS: Record<ActionType, string> = {
   typing: 'typing',
   topic: 'topic',
   vote_kick: 'vote_kick',
+  match_wait: 'match_wait',
 };
 
 /** Trạng thái action hiện tại của 1 virtual user — khớp loadtest/types.ts (2-chiều contract). */
@@ -128,6 +129,8 @@ export interface StartRunRequest {
   chaos?: { events: ChaosEvent[] };
   /** F3: SLO/thresholds — optional. */
   thresholds?: Thresholds;
+  /** F-stress: bỏ pacing + burst connect. */
+  stress?: boolean;
 }
 
 export interface RunConfig {
@@ -150,6 +153,8 @@ export interface RunConfig {
   chaos?: { events: ChaosEvent[] };
   /** F3: SLO/thresholds — optional. */
   thresholds?: Thresholds;
+  /** F-stress: bỏ pacing + burst connect. */
+  stress?: boolean;
 }
 
 export interface LoadTestConfig {

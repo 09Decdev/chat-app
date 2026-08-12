@@ -607,6 +607,18 @@ export class LoadtestStore {
     );
   }
 
+  /** F-impersonate: tra 1 account theo email (không cần poolId — query toàn pool_accounts). */
+  async findAccountByEmail(email: string): Promise<QueryResult<PoolAccountRow>> {
+    return this.query<PoolAccountRow>(
+      `SELECT id, pool_id AS "poolId", email, password, user_id AS "userId", display_name AS "displayName",
+              device_info_json AS "deviceInfoJson", date_of_birth AS "dateOfBirth", country,
+              registered_at AS "registeredAt", status, last_error_code AS "lastErrorCode",
+              last_used_run_id AS "lastUsedRunId", last_login_at AS "lastLoginAt"
+       FROM pool_accounts WHERE email = $1 LIMIT 1`,
+      [email],
+    );
+  }
+
   async listPoolAccounts(poolId: string, opts?: { limit?: number; offset?: number; status?: string }): Promise<QueryResult<PoolAccountRow>> {
     const where: string[] = [`pool_id = $1`];
     const params: unknown[] = [poolId];

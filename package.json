@@ -25,6 +25,7 @@
     "loadtest:db:cleanup": "tsx loadtest/db/cleanup.ts",
     "loadtest:seed-accounts": "tsx loadtest/db/seed-accounts.ts",
     "loadtest:register-pool": "tsx scripts/register-pool-to-gateway.ts",
+    "loadtest:join-community": "tsx scripts/join-community.ts",
     "secret:scan": "gitleaks detect --source . --no-banner --log-opts=--all && gitleaks detect --source . --no-banner --no-git",
     "secret:scan:tree": "gitleaks detect --source . --no-banner --no-git"
   },
