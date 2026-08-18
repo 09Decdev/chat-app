@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useChatStore } from '@/store/chat.store';
 import { useAuthStore } from '@/store/auth.store';
+import type { VoteKickChoice } from '@/types/chat';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -22,13 +23,14 @@ export function VoteKickDialog() {
 
   const [remaining, setRemaining] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  const [voted, setVoted] = useState(false);
+  // null = chưa vote; đã vote thì khóa cả 2 nút (for/against) theo lựa chọn của mình
+  const [myVote, setMyVote] = useState<VoteKickChoice | null>(null);
 
   // Reset local state khi vote kết thúc (active → false)
   useEffect(() => {
     if (!voteKick.active) {
       setDismissed(false);
-      setVoted(false);
+      setMyVote(null);
     }
   }, [voteKick.active]);
 
@@ -51,7 +53,13 @@ export function VoteKickDialog() {
   const isInitiator = !!voteKick.initiatorId && !!me?.id && me.id === voteKick.initiatorId;
   const targetMember = members.find((m) => m.userId === voteKick.targetUserId);
   const targetName = targetMember?.displayName ?? 'Thanh vien';
-  const canVote = !isTarget && !isInitiator && !voted && voteKick.currentVotes < voteKick.requiredVotes;
+  const canVote =
+    !isTarget && !isInitiator && myVote === null && voteKick.currentVotes < voteKick.requiredVotes;
+
+  const cast = (choice: VoteKickChoice) => {
+    castVoteKick(choice);
+    setMyVote(choice);
+  };
 
   return (
     <Dialog
@@ -88,7 +96,13 @@ export function VoteKickDialog() {
               <span className="font-mono">
                 {voteKick.currentVotes}/{voteKick.requiredVotes}
               </span>{' '}
-              phiếu
+              phiếu thuận
+              {voteKick.againstVotes > 0 && (
+                <>
+                  {' · '}
+                  <span className="font-mono">{voteKick.againstVotes}</span> không đồng ý
+                </>
+              )}
             </p>
           </div>
           <span className="font-mono text-xs text-muted-foreground">{remaining}s</span>
@@ -99,16 +113,19 @@ export function VoteKickDialog() {
             Để sau
           </Button>
           {canVote && (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => {
-                castVoteKick();
-                setVoted(true);
-              }}
-            >
-              Bỏ phiếu kick
-            </Button>
+            <>
+              <Button variant="secondary" size="sm" onClick={() => cast('against')}>
+                Không đồng ý
+              </Button>
+              <Button variant="destructive" size="sm" onClick={() => cast('for')}>
+                Bỏ phiếu kick
+              </Button>
+            </>
+          )}
+          {myVote && (
+            <span className="text-xs text-muted-foreground self-center">
+              Đã bỏ phiếu: {myVote === 'for' ? 'Đồng ý kick' : 'Không đồng ý'}
+            </span>
           )}
         </DialogFooter>
       </DialogContent>

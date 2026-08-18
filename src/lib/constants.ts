@@ -47,6 +47,7 @@ export const errorMessageVi: Record<string, string> = {
 /** Socket chat:error codes (CHAT_API.md muc 5.2). */
 export const SocketChatErrorCode = {
   FORBIDDEN: 'FORBIDDEN',
+  ROOM_EXPIRED: 'ROOM_EXPIRED',
   BAD_REQUEST: 'BAD_REQUEST',
   LEAVE_FAILED: 'LEAVE_FAILED',
 } as const;

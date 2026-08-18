@@ -21,6 +21,7 @@ import type {
   VoteKickStartedPayload,
   VoteKickVotedPayload,
   VoteKickResultPayload,
+  VoteKickChoice,
   TopicDto,
   TopicCreatedPayload,
   TopicUpdatedPayload,
@@ -34,6 +35,7 @@ export interface VoteKickState {
   targetUserId: string | null;
   initiatorId: string | null;
   currentVotes: number;
+  againstVotes: number;
   requiredVotes: number;
   expiresAt: number | null;
 }
@@ -43,6 +45,7 @@ const idleVoteKick: VoteKickState = {
   targetUserId: null,
   initiatorId: null,
   currentVotes: 0,
+  againstVotes: 0,
   requiredVotes: 0,
   expiresAt: null,
 };
@@ -88,7 +91,7 @@ interface ChatState {
   loadOlder: () => Promise<void>;
   reset: () => void;
   startVoteKick: (targetUserId: string) => void;
-  castVoteKick: () => void;
+  castVoteKick: (vote: VoteKickChoice) => void;
   resetVoteKick: () => void;
 
   // topic actions
@@ -654,6 +657,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       clearAllTyping();
       set({ ...idleState });
       toast.error(message || 'Ban khong con nam trong phong.');
+    } else if (code === SocketChatErrorCode.ROOM_EXPIRED) {
+      clearAllTyping();
+      set({ ...idleState });
+      toast.error(message || 'Phong da het han.');
     } else if (code === SocketChatErrorCode.LEAVE_FAILED) {
       toast.error(message || 'Roi phong that bai, thu lai.');
     } else if (code.startsWith('VOTE_')) {
@@ -669,10 +676,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     socketManager.emit('chat:vote_kick:start', { roomId, targetUserId });
   },
 
-  castVoteKick: () => {
+  castVoteKick: (vote: VoteKickChoice) => {
     const roomId = get().roomId;
     if (!roomId) return;
-    socketManager.emit('chat:vote_kick:vote', { roomId });
+    socketManager.emit('chat:vote_kick:vote', { roomId, vote });
   },
 
   resetVoteKick: () => {
@@ -809,6 +816,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         targetUserId: p.targetUserId,
         initiatorId: p.initiatorId,
         currentVotes: p.currentVotes,
+        againstVotes: p.currentAgainstVotes ?? 0,
         requiredVotes: p.requiredVotes,
         expiresAt: p.expiresAt,
       },
@@ -824,7 +832,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   onVoteKickVoted: (p) => {
     if (get().roomId !== p.roomId) return;
     set((st) => ({
-      voteKick: { ...st.voteKick, currentVotes: p.currentVotes, requiredVotes: p.requiredVotes },
+      voteKick: {
+        ...st.voteKick,
+        currentVotes: p.currentVotes,
+        againstVotes: p.currentAgainstVotes ?? st.voteKick.againstVotes,
+        requiredVotes: p.requiredVotes,
+      },
     }));
   },
 
@@ -847,7 +860,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else if (p.result === 'TIMEOUT') {
       toast('Vote kick het han, khong du phieu.', { icon: '⏰' });
     } else if (p.result === 'CANCELLED') {
-      toast('Vote kick da bi huy.', { icon: '❌' });
+      toast(
+        p.reason === 'OPPOSE' ? 'Vote kick da bi huy — co thanh vien khong dong y.' : 'Vote kick da bi huy.',
+        { icon: '❌' },
+      );
     }
   },
 

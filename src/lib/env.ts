@@ -4,13 +4,14 @@
  */
 
 const gatewayUrl = (
-  import.meta.env.VITE_GATEWAY_URL ?? "http://localhost:3000"
+  import.meta.env.VITE_GATEWAY_URL ?? "http://192.168.0.165:3000"
 ).replace(/\/+$/, "");
 
 export const env = {
   gatewayUrl,
   socketPath: import.meta.env.VITE_SOCKET_PATH ?? "/socket.io/",
-  refreshEndpoint: import.meta.env.VITE_REFRESH_ENDPOINT ?? "/auth/refresh-token",
+  refreshEndpoint:
+    import.meta.env.VITE_REFRESH_ENDPOINT ?? "/auth/refresh-token",
 
   // Business rules (CHAT_API.md - muc 7 & 9)
   maxMembers: 6,
@@ -29,20 +30,20 @@ export const env = {
 } as const;
 
 export const routes = {
-  login: '/login',
-  home: '/',
-  chat: '/chat',
+  login: "/login",
+  home: "/",
+  chat: "/chat",
   // LoadTest tool (docs/UI-SPEC-loadtest-tool.md §2)
-  loadtest: '/loadtest',
-  loadtestLive: '/loadtest/live',
-  loadtestUsers: '/loadtest/users',
-  loadtestScenario: '/loadtest/scenario',
-  loadtestReport: '/loadtest/report',
-  loadtestSettings: '/loadtest/settings',
-  loadtestCleanup: '/loadtest/cleanup',
+  loadtest: "/loadtest",
+  loadtestLive: "/loadtest/live",
+  loadtestUsers: "/loadtest/users",
+  loadtestScenario: "/loadtest/scenario",
+  loadtestReport: "/loadtest/report",
+  loadtestSettings: "/loadtest/settings",
+  loadtestCleanup: "/loadtest/cleanup",
   // LoadTest admin auth + history (PRD-loadtest-admin-auth)
-  loadtestLogin: '/loadtest/login',
-  loadtestRegister: '/loadtest/register',
-  loadtestHistory: '/loadtest/history',
-  feed: '/feed',
+  loadtestLogin: "/loadtest/login",
+  loadtestRegister: "/loadtest/register",
+  loadtestHistory: "/loadtest/history",
+  feed: "/feed",
 } as const;

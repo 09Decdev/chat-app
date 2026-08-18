@@ -212,6 +212,8 @@ export interface RoomMediaPage {
 // ─── Vote Kick ──────────────────────────────────────────────────────────
 
 export type VoteKickResult = 'KICKED' | 'TIMEOUT' | 'CANCELLED';
+/** Lựa chọn phiếu kick: 'for' = đồng ý kick, 'against' = không đồng ý (phủ quyết). */
+export type VoteKickChoice = 'for' | 'against';
 
 export interface VoteKickStartedPayload {
   roomId: string;
@@ -219,6 +221,7 @@ export interface VoteKickStartedPayload {
   initiatorId: string;
   requiredVotes: number;
   currentVotes: number;
+  currentAgainstVotes?: number;
   expiresAt: number;
 }
 
@@ -227,6 +230,7 @@ export interface VoteKickVotedPayload {
   targetUserId: string;
   voterId: string;
   currentVotes: number;
+  currentAgainstVotes?: number;
   requiredVotes: number;
 }
 
@@ -235,6 +239,7 @@ export interface VoteKickResultPayload {
   targetUserId: string;
   result: VoteKickResult;
   currentVotes: number;
+  currentAgainstVotes?: number;
   requiredVotes: number;
   reason?: string;
 }

@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vector Database — Hiểu từ gốc (cho dự án MAYogu)</title>
+<style>
+  :root{
+    --bg:#0e1117; --bg2:#161b26; --panel:#1c2230; --panel2:#232a3b;
+    --line:#2c3450; --text:#e6e9f2; --muted:#9aa4bd; --dim:#6b7590;
+    --acc:#7c5cff; --acc2:#00d2ff; --good:#2ecc71; --warn:#ffb020; --bad:#ff5c5c; --pink:#ff5c8a;
+    --code:#0a0d13;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.7 "Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px 80px}
+  header.hero{padding:56px 0 30px;border-bottom:1px solid var(--line);margin-bottom:30px}
+  .hero h1{font-size:34px;line-height:1.2;margin:0 0 8px}
+  .hero h1 .grad{background:linear-gradient(90deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p.sub{color:var(--muted);font-size:16px;max-width:760px}
+  a.pill{display:inline-block;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:999px;padding:4px 14px;text-decoration:none;font-size:13px;margin:4px 6px 0 0}
+  a.pill:hover{background:var(--panel2)}
+  .toc{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 22px;margin:26px 0}
+  .toc b{color:var(--muted);font-weight:600}
+  .toc ol{margin:8px 0 0;padding-left:20px}
+  .toc a{color:var(--acc2);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  section{margin:54px 0}
+  h2{font-size:24px;border-bottom:1px solid var(--line);padding-bottom:10px;margin:0 0 18px}
+  h2 .num{color:var(--acc);font-size:16px;vertical-align:super;margin-right:6px}
+  h3{font-size:18px;margin:26px 0 8px}
+  p{color:var(--text)}
+  .muted{color:var(--muted)}
+  .dim{color:var(--dim)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 22px;margin:14px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .sample{background:var(--code);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;padding:14px 16px;overflow-x:auto;font:13px/1.65 Consolas,"Cascadia Code",monospace}
+  .sample .cm{color:var(--dim)}
+  .sample .kw{color:var(--acc2)}
+  .sample .st{color:var(--good)}
+  .sample .nu{color:var(--warn)}
+  .note{background:rgba(124,92,255,.08);border:1px solid rgba(124,92,255,.3);border-radius:12px;padding:12px 16px;margin:14px 0;font-size:14px}
+  .warnbox{background:rgba(255,176,32,.07);border:1px solid rgba(255,176,32,.35);border-radius:12px;padding:12px 16px;margin:14px 0;font-size:14px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:12px 0}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;background:var(--panel2)}
+  tr:hover td{background:rgba(0,210,255,.04)}
+  .vectordisp{font-family:Consolas,monospace;color:var(--acc2);background:var(--code);border:1px solid var(--line);border-radius:8px;padding:8px 12px;display:inline-block}
+  .formula{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px 18px;font:17px Consolas,"Cambria Math",Georgia,serif;text-align:center;margin:14px 0}
+  .badge{display:inline-block;border-radius:6px;padding:1px 8px;font-size:12px;font-weight:600;margin-right:6px}
+  .b-game{background:rgba(124,92,255,.18);color:#a78bff}
+  .b-food{background:rgba(255,82,157,.16);color:#ff6aa0}
+  .b-music{background:rgba(255,92,138,.16);color:#ff8ba8}
+  .b-travel{background:rgba(46,204,113,.16);color:#5fdc9a}
+  .b-tech{background:rgba(0,210,255,.16);color:#4fdcff}
+  .pipeline{display:flex;flex-direction:column;gap:8px}
+  .pnode{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:14px}
+  .pnode .ic{width:34px;height:34px;flex:0 0 34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;background:var(--panel2)}
+  .pnode .tt{font-weight:600}
+  .pnode .dd{color:var(--muted);font-size:12.5px}
+  .parrow{text-align:center;color:var(--dim);font-size:18px;line-height:1;padding:2px 0}
+  .demo{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin:16px 0}
+  .demoscrolly{display:grid;grid-template-columns:420px 1fr;gap:18px;align-items:start}
+  @media(max-width:820px){.demoscrolly{grid-template-columns:1fr}}
+  canvas{width:100%;height:auto;background:#0b0f16;border:1px solid var(--line);border-radius:12px;display:block;touch-action:none}
+  .ctrl{display:flex;align-items:center;gap:12px;margin:10px 0 4px;font-size:13px;color:var(--muted)}
+  .ctrl input{flex:1;accent-color:var(--acc)}
+  .rankbox h4{margin:14px 0 8px;color:var(--muted);font-weight:600;font-size:13px;text-transform:uppercase;letter-spacing:.4px}
+  .rankrow{display:flex;align-items:center;gap:12px;padding:8px 12px;border:1px solid var(--line);border-radius:9px;margin:6px 0;background:var(--panel2);font-size:13.5px}
+  .rankrow.hot{border-color:var(--acc);background:rgba(124,92,255,.1)}
+  .rankrow .set{width:26px;height:26px;border-radius:8px;flex:0 0 26px;display:flex;align-items:center;justify-content:center;font-size:13px}
+  .rankrow .top1{background:var(--warn);color:#000}
+  .rankrow .top2{background:#c8c8d6;color:#000}
+  .rankrow .top3{background:#b0763a;color:#fff}
+  .rankrow .topn{background:var(--panel);color:var(--dim);border:1px solid var(--line)}
+  .rankrow .lb{flex:1;font-weight:600}
+  .rankrow .topic{font-size:12px;color:var(--muted)}
+  .rankrow .sc{font-family:Consolas,monospace;font-size:12.5px;color:var(--acc2)}
+  .vecdetail{font-family:Consolas,monospace;font-size:12px;color:var(--muted);background:var(--code);border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:10px;min-height:64px;word-break:break-all}
+  .vecdetail b{color:var(--acc2)}
+  .gloss dt{font-weight:700;margin-top:12px}
+  .gloss dd{margin:2px 0 4px;color:var(--muted);font-size:14px}
+  .footer{margin-top:60px;border-top:1px solid var(--line);padding-top:18px;color:var(--dim);font-size:13px}
+  .swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  .dotgame{background:#7c5cff}.dotfood{background:#ff5276}.dotmusic{background:#ff5c8a}.dottravel{background:#2ecc71}.dottech{background:#00d2ff}
+  .pa{border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:12px;background:var(--panel);padding:14px 18px;margin:14px 0}
+  .pa h4{margin:0 0 6px;font-size:16px;color:var(--acc2)}
+  .pa-trade{font-size:13px;color:var(--muted);margin:8px 0 0}
+  .mini{font-size:12.5px;color:var(--muted)}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  @media(max-width:760px){.grid3{grid-template-columns:1fr}}
+  .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+  .flowtag{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 8px;margin:2px 4px 2px 0;font:12px Consolas,monospace;color:var(--acc2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>Vector Database — <span class="grad">hiểu từ gốc</span></h1>
+  <p class="sub">Tài liệu giải thích <b>tại sao</b> và <b>như thế nào</b> máy tính hiểu "ý nghĩa" của văn bản, dùng ngay dựa trên dữ liệu thật của <b>content-service</b> (Post, Event, Hashtag, UserInterest). Demo bên dưới chạy trực tiếp trong trình duyệt — kéo thử để thấy cơ chế.</p>
+  <div>
+    <a class="pill" href="#p1">1. Vector là gì</a>
+    <a class="pill" href="#p2">2. Embedding</a>
+    <a class="pill" href="#p3">3. Cosine similarity (demo)</a>
+    <a class="pill" href="#p4">4. Nhiều chiều hơn</a>
+    <a class="pill" href="#p5">5. Pipeline thật trong dự án</a>
+    <a class="pill" href="#p6">6. HNSW index</a>
+    <a class="pill" href="#p7">7. Hybrid search</a>
+    <a class="pill" href="#p8">8. Nên dùng ở đâu (không)</a>
+    <a class="pill" href="#p9">9. Áp vào dự án (search + feed)</a>
+    <a class="pill" href="#gloss">Thuật ngữ</a>
+  </div>
+</header>
+
+<div class="toc">
+  <b>Bản đồ tư duy:</b>
+  <ol>
+    <li><a href="#p1">Chữ trong máy tính là số</a> → 2) <a href="#p2">Embedding: chữ → điểm trong không gian</a> → 3) <a href="#p3">"Gần" = "cùng nghĩa" (cosine)</a> → 4) <a href="#p4">Không gian 1024 chiều</a> → 5) <a href="#p5">Data đi vào & được xử lý thành 2 pipeline (ghi/đọc)</a> → 6) <a href="#p6">Index để tìm nhanh (HNSW)</a> → 7) <a href="#p7">Kết hợp với full-text</a> → 8) <a href="#p8">Áp cho dự án của anh</a></li>
+  </ol>
+</div>
+
+<!-- ═══════════ 1. VECTOR ═══════════ -->
+<section id="p1">
+  <h2><span class="num">1</span>Vector là gì? — "Chữ" trong máy tính chỉ là dãy số</h2>
+
+  <p>Máy tính không hiểu chữ. Nó chỉ hiểu <b>số</b>. Câu <span class="badge b-game">Tìm team LMHT tối nay</span> trong database thực chất là một chuỗi byte. Nhưng chuỗi byte đó không mang <b>ý nghĩa</b> — tách biệt nó với câu <span class="badge b-game">Cần 2 người đi rank Liên Quân</span>, máy tính không biết hai câu này "cùng chủ đề game".</p>
+
+  <p>Vector là một mảng số có thứ tự. Ví dụ một vector 3 chiều:</p>
+  <div class="vectordisp">[0.42,&nbsp;&nbsp;-0.18,&nbsp;&nbsp;0.95]</div>
+  <p style="margin-top:8px">Mỗi vector có <b>số chiều (dimension)</b>. Một vector 3 chiều có thể được "vẽ" trong không gian XYZ — nó là một <b>điểm</b> (hoặc một mũi tên từ gốc tọa độ đến điểm đó). Hai điểm <b>gần nhau</b> trong không gian này = hai mũi tên <b>gần giống nhau</b>.</p>
+
+  <div class="card">
+    <h3>Nhìn bằng mắt: 3 vector trong không gian 2D</h3>
+    <p class="muted">Quy ước: mỗi vector 2 chiều = 1 điểm. <b>Gần nhau về hướng và độ lớn → "giống nhau".</b></p>
+    <svg viewBox="0 0 420 240" width="100%" style="border:1px solid var(--line);border-radius:12px;background:#0b0f16">
+      <line x1="40" y1="200" x2="400" y2="200" stroke="#2c3450" stroke-width="1.5"/>
+      <line x1="40" y1="200" x2="40" y2="20"  stroke="#2c3450" stroke-width="1.5"/>
+      <text x="12" y="24" fill="#5a6378" font-size="11">chiều 2 (y)</text>
+      <text x="392" y="218" fill="#5a6378" font-size="11">chiều 1 (x)</text>
+      <!-- Vector A - game -->
+      <line x1="40" y1="200" x2="300" y2="120" stroke="#7c5cff" stroke-width="2.5"/>
+      <circle cx="300" cy="120" r="6" fill="#7c5cff"/>
+      <text x="308" y="112" fill="#a78bff" font-size="13">A (game)  [0.8, 0.5]</text>
+      <!-- Vector B - game gần A -->
+      <line x1="40" y1="200" x2="330" y2="95" stroke="#a78bff" stroke-width="2" stroke-dasharray="4 3"/>
+      <circle cx="330" cy="95" r="5" fill="#a78bff"/>
+      <text x="336" y="86" fill="#a78bff" font-size="12">B (game)  [0.9, 0.6]</text>
+      <!-- Vector C - food xa A -->
+      <line x1="40" y1="200" x2="90" y2="60" stroke="#ff5276" stroke-width="2.5"/>
+      <circle cx="90" cy="60" r="6" fill="#ff5276"/>
+      <text x="16" y="50" fill="#ff6aa0" font-size="13">C (food)  [0.1, 0.9]</text>
+      <g font-size="11" fill="#5a6378">
+        <text x="110" y="120">A và B cùng chủ đề → cùng một vùng không gian</text>
+        <text x="110" y="140">→ "khoảng cách" nhỏ → nội dung giống nhau</text>
+        <text x="110" y="190">C lệch hướng → xa → chủ đề khác</text>
+      </g>
+    </svg>
+  </div>
+
+  <div class="note"><b>Trọng tâm:</b> bài toán "tìm nội dung liên quan" trong vector DB đơn giản là bài toán hình học: <b>tìm các điểm gần nhất với điểm truy vấn</b>. Để biến chữ thành điểm, ta dùng <a href="#p2">embedding model</a> (phần tiếp theo).</div>
+</section>
+
+<!-- ═══════════ 2. EMBEDDING ═══════════ -->
+<section id="p2">
+  <h2><span class="num">2</span>Embedding — biến văn bản thành vector bằng mô hình</h2>
+
+  <p><b>Embedding model</b> (ví dụ <code>BAAI/bge-m3</code>, chạy local qua TEI) là một mạng neural nhận vào đoạn text, và xuất ra một vector <b>có nghĩa</b>: hai câu cùng chủ đề sẽ ra hai vector nằm gần nhau.</p>
+
+  <div class="grid2">
+    <div class="card">
+      <h3>Input → Output</h3>
+      <div class="sample">
+"Tìm team LMHT tối nay"<br>
+<span class="cm">→ normalize (chữ thường, ...)</span><br>
+<span class="cm">→ tokenize: [tìm, team, lmht, tối, nay]</span><br>
+<span class="cm">→ qua mô hình bge-m3</span><br>
+→ <span class="nu">[0.021, −0.113, 0.876, ..., 0.064]</span> <span class="cm">(1024 con số)</span>
+      </div>
+      <p class="muted" style="font-size:13px">Câu ngắn "Tìm team", câu dài cả đoạn Event.Description cũng đều trả về <b>đúng 1 vector 1024 chiều</b> (mô hình ép cả câu thành 1 con số tổng hợp — gọi là <b>pooling</b>).</p>
+    </div>
+    <div class="card">
+      <h3>Ý tưởng cốt lõi</h3>
+      <p style="font-size:14px">Mô hình được huấn luyện trên hàng trăm triệu câu để sao cho:</p>
+      <p style="font-size:14px"><span class="badge b-game">"Tìm team LMHT"</span> gần <span class="badge b-game">"Cần 2 người đi rank"</span> <span class="muted">(cùng context)</span></p>
+      <p style="font-size:14px">nhưng <b>xa</b> <span class="badge b-food">"Cách nấu phở bò"</span>.</p>
+      <p style="font-size:14px">Mô hình học được ngữ nghĩa — không cần từ trùng. Từ khác nhau ("rank" vs "leo hạng") vẫn ra vector gần nhau nếu cùng ý.</p>
+    </div>
+  </div>
+
+  <h3>Điểm đáng chú ý với data của content-service</h3>
+  <table>
+    <tr><th>Bảng / field</th><th>Embed được</th><th>Ghi chú</th></tr>
+    <tr><td><code>Post.content</code></td><td>✅ <span class="swatch dotgame"></span></td><td>Field text chính, phi cấu trúc — embed tự nhiên nhất</td></tr>
+    <tr><td><code>Event.title</code> + <code>Event.description</code></td><td>✅</td><td>Ghép hai field thành 1 chuỗi rồi embed</td></tr>
+    <tr><td><code>Hashtag.name</code></td><td>✅</td><td>Embed từng tag → nhóm tag theo nghĩa</td></tr>
+    <tr><td><code>UserInterest</code></td><td>✅</td><td>Đã có lúc signup → vector hóa để so với Post</td></tr>
+    <tr><td><code>ChatMessage.content</code></td><td>⚠️ Không khuyến khích</td><td>Chat realtime latency-critical — vẫn dùng GIN full-text như hiện tại</td></tr>
+  </table>
+
+  <div class="warnbox"><b>Ràng buộc pgvector:</b> index chỉ nhận vector tối đa <b>2000 chiều</b> (bge-m3 = 1024 ✅ vừa khít). Model 3072 chiều (vd OpenAI text-3-large) thì KHÔNG index được trực tiếp — phải cắt dim hoặc dùng halfvec.</div>
+</section>
+
+<!-- ═══════════ 3. COSINE ═══════════ -->
+<section id="p3">
+  <h2><span class="num">3</span>Đo độ "gần" — Cosine similarity (demo kéo-slider bên dưới)</h2>
+
+  <p>Có nhiều cách đo khoảng cách 2 vector. Phổ biến nhất trong semantic search là <b>cosine similarity</b>: đo <b>góc</b> giữa 2 mũi tên (bỏ qua độ dài). Hai vector cùng hướng → cosine = 1 (giống nhất). Vuông góc → 0. Ngược hướng → −1.</p>
+
+  <div class="formula">cos(θ) = (A·B) / (|A|·|B|)</div>
+  <p class="muted" style="text-align:center;font-size:13px">A·B = tích vô hướng (cộng tích từng cặp số của A và B). |A| = độ dài vector = √(Σ ai²). Dễ viết trong SQL.</p>
+
+  <div class="note">Trong pgvector, <code>A &lt;=&gt; B</code> là <b>cosine distance</b> = 1 − cos(θ). <b>Càng nhỏ càng gần.</b> Query đơn giản là <code>ORDER BY vec &lt;=&gt; $1 LIMIT 10</code>.</div>
+
+  <div class="warnbox" id="warnbox-45"><b>Khi nào góc là "không gian ý nghĩa"?</b> Demo dưới đây dùng tọa độ 2 chiều <i>tự đặt tay</i> cho dễ nhìn. Ngoài đời, 1024 con số đến từ embedding model — nhưng nguyên tắc hình học <b>giống hệt</b>. Kéo slider để di chuyển điểm truy vấn, quan sát thứ hạng đổi.</div>
+
+  <div class="demo">
+    <div class="demoscrolly">
+      <div>
+        <div class="ctrl">
+          <label>🔍 vị trí ngang (x)</label>
+          <input type="range" id="sqx" min="0" max="100" value="80">
+          <output id="ovx" style="width:34px;text-align:right">0.80</output>
+        </div>
+        <div class="ctrl">
+          <label>🔍 vị trí dọc (y)</label>
+          <input type="range" id="sqy" min="0" max="100" value="65">
+          <output id="ovy" style="width:34px;text-align:right">0.65</output>
+        </div>
+        <canvas id="cv" width="840" height="500"></canvas>
+        <div class="muted" style="font-size:12px;margin-top:6px">➡ postulate: query "Tìm bạn chơi game tối nay". Chấm bạn bấm chuột vào bất kỳ post nào để xem "vector thật".</div>
+      </div>
+      <div class="rankbox">
+        <h4>Kết quả xếp hạng theo cosine distance</h4>
+        <div id="ranklists"></div>
+        <div id="vecdetail" class="vecdetail">Bấm chọn một điểm trên canvas để xem vector 8 chiều của nó (minh họa).</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ 4. NHIỀU CHIỀU ═══════════ -->
+<section id="p4">
+  <h2><span class="num">4</span>Vì sao cần 1024 chiều — không vẽ được nhưng hiểu được</h2>
+  <p>2 chiều chỉ phân biệt nổi 2 "nhánh" chủ đề. Với app của anh có tới hàng trăm nghìn chủ đề (game, food, music, travel, tech, film, thể thao, thời trang...), 2D không đủ chỗ "tách" các chủ đề ra xa nhau. Mỗi chiều thêm vào = một "khía cạnh" ngữ nghĩa mới (hàng trăm khía cạnh tiềm ẩn do mô hình tự học, không ai đặt tên).</p>
+  <ul class="muted" style="font-size:14px">
+    <li><b>2D</b>: phân biệt ~vài cụm chủ đề</li>
+    <li><b>1024D</b>: đủ để câu "phở bò" và "bún bò Huế" gần nhau (cùng món ăn), nhưng xa "phở bò" ↔ "máy tính" — điều full-text không làm được.</li>
+    <li>Máy tính xử lý 1024 số chẳng nặng nề gì hơn 2 số — chỉ là vòng lặp cộng nhân.</li>
+  </ul>
+  <p>Trong phiếu đánh giá benchmark, mô hình <code>bge-m3</code> (1024D) đánh bại nhiều model lớn hơn trên tiếng Việt vì siêu đa ngữ 100+ ngôn ngữ, tokenizer 8192 từ.</p>
+</section>
+
+<!-- ═══════════ 5. PIPELINE ═══════════ -->
+<section id="p5">
+  <h2><span class="num">5</span>Data vào & xử lý ra sao — 2 pipeline trong dự án thật</h2>
+  <p>Khi áp vào content-service, có <b>2 luồng</b> hoàn toàn tách biệt: <b>ghi</b> (lúc post được tạo) và <b>đọc</b> (lúc user tìm kiếm/recommend).</p>
+
+  <h3>Pipeline 1 — GHI (write path): post mới phải "học nghĩa" ngay khi vào hệ thống</h3>
+  <div class="pipeline">
+    <div class="pnode"><div class="ic">📝</div><div><div class="tt">User tạo Post (spring)</div><div class="dd">Dữ liệu text đã rõ: <code>Post.content</code></div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🔌</div><div><div class="tt">Hook sau khi lưu DB (<i>Prisma afterWrite / Kafka event</i>)</div><div class="dd">content-service nhận biết post mới → gọi embed service</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🤖</div><div><div class="tt">Embedding service (bge-m3 qua TEI trong docker-compose)</div><div class="dd">"layoutType" + content + hashtag (cộng chuỗi, tối thiểu) → ra vector <b>float[1024]</b></div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🗄️</div><div><div class="tt">PostgreSQL + pgvector</div><div class="dd">INSERT vector vào bảng <code>PostEmbedding(post_id PK, content_vector vector(1024), updated_at)</code> → đồng bộ với post</div></div></div>
+  </div>
+
+  <div class="sample">
+<span class="cm">-- migration (prisma .sql hoặc migration add):</span><br>
+<span class="kw">CREATE EXTENSION</span> <span class="st">vector</span>; <span class="cm">-- bật pgvector</span><br>
+<span class="kw">CREATE TABLE</span> post_embedding (<br>
+&nbsp; <span class="st">"postId"</span> <span class="kw">text</span> <span class="kw">PRIMARY KEY</span> <span class="kw">REFERENCES</span> posts(<span class="st">"id"</span>),<br>
+&nbsp; content_vector <span class="st">vector(1024)</span>,<span class="cm">   -- hạn chế dim ≤ 1024 để khớp bge-m3</span><br>
+&nbsp; updated_at <span class="kw">timestamptz</span> <span class="kw">DEFAULT now</span>()<br>
+);<br>
+<span class="kw">CREATE</span> <span class="kw">INDEX</span> post_emb_idx <span class="kw">ON</span> post_embedding<br>
+&nbsp; <span class="kw">USING</span> hnsw (content_vector <span class="st">vector_cosine_ops</span>) <span class="cm">-- HNSW, xem phần 6</span><br>
+<span class="cm">  WITH (m = 16, ef_construction = 64);</span>
+  </div>
+
+  <h3>Pipeline 2 — ĐỌC (read path): search/recommend — "tìm điểm gần nhất"</h3>
+  <div class="pipeline">
+    <div class="pnode"><div class="ic">🔍</div><div><div class="tt">Query text từ client: "/post/search?q=phở bò ngon chỗ nào"</div><div class="dd">FE proxy qua gateway; nâng cấp endpoint hiện có <code>post-search.helper.ts</code></div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🤖</div><div><div class="tt">Cùng embedding model → vector query</div><div class="dd"><b>Bắt buộc dùng đúng model đã embed dữ liệu</b>, nếu không toàn bộ phép đo vô nghĩa</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🗄️</div><div><div class="tt">SQL tìm top-K gần nhất</div><div class="dd">Chạy HNSW index → chỉ duyệt ~vài trăm node thay vì quét toàn bộ triệu post</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">📊</div><div><div class="tt">Trả Top-K + meta score → merge với filter (status published, ban group, ...)</div><div class="dd">Kết quả cuối: ví dụ 20 post "hợp nghĩa" nhất round-robin vào feed/recommend</div></div></div>
+  </div>
+
+  <div class="sample">
+<span class="kw">SELECT</span> p.<span class="st">"id"</span>, p.content,<br>
+&nbsp;&nbsp; pe.content_vector <span class="kw">&lt;=&gt;</span> $1::vector <span class="kw">AS</span> cosine_distance <span class="cm">-- $1 = vector query</span><br>
+<span class="kw">FROM</span> post_embedding pe<br>
+<span class="kw">JOIN</span> posts p <span class="kw">ON</span> p.<span class="st">"id"</span> = pe.<span class="st">"postId"</span><br>
+<span class="kw">WHERE</span> p.status = <span class="st">'published'</span> <span class="cm">-- vẫn lọc nghiệp vụ bình thường</span><br>
+<span class="kw">ORDER BY</span> pe.content_vector <span class="kw">&lt;=&gt;</span> $1::vector<br>
+<span class="kw">LIMIT</span> <span class="nu">20</span>;
+  </div>
+  <p class="muted" style="font-size:13px">※ pgvector lọc 10+% dữ liệu bằng WHERE sau index vẫn ổn; nếu lọc nặng hơn thì phân partition theo <code>status</code>/<code>layoutType</code>. Chi tiết phần 6.</p>
+</section>
+
+<!-- ═══════════ 6. HNSW ═══════════ -->
+<section id="p6">
+  <h2><span class="num">6</span>Tìm nhanh nhờ index HNSW — "skip list trong không gian nhiều chiều"</h2>
+  <p>Không index, mỗi query tính cosine với <b>toàn bộ</b> triệu post (brute-force, chậm). <b>HNSW (Hierarchical Navigable Small World)</b> dựng mạng đồ thị nhiều tầng:</p>
+  <ul style="font-size:14px">
+    <li><b>Tầng cao (mỏng, ít node):</b> đi nhanh đến vùng đúng.</li>
+    <li><b>Tầng thấp (dày, mọi node):</b> lan gần từng bước tới điểm gần nhất.</li>
+    <li>Tìm = "restart từ vài entry + tham lam đi xuống" — tương tự cách index b-tree nhảy theo nhánh thay vì quét hết bảng.</li>
+  </ul>
+
+  <h3>Minh họa 3 tầng</h3>
+  <svg viewBox="0 0 720 300" width="100%" style="border:1px solid var(--line);border-radius:12px;background:#0b0f16">
+    <!-- Layer 1 -->
+    <g>
+      <text x="20" y="30" fill="#7c5cff" font-size="12">Tầng 1 (thô)</text>
+      <circle cx="120" cy="70" r="8" fill="#7c5cff" opacity=".85"/><circle cx="300" cy="50" r="8" fill="#7c5cff" opacity=".85"/><circle cx="480" cy="80" r="8" fill="#7c5cff" opacity=".85"/><circle cx="620" cy="60" r="8" fill="#7c5cff" opacity=".85"/>
+      <line x1="120" y1="70" x2="300" y2="50" stroke="#7c5cff" stroke-width="1.5" opacity=".5"/>
+      <line x1="300" y1="50" x2="480" y2="80" stroke="#7c5cff" stroke-width="1.5" opacity=".5"/>
+      <line x1="480" y1="80" x2="620" y2="60" stroke="#7c5cff" stroke-width="1.5" opacity=".5"/>
+    </g>
+    <!-- Layer 2 -->
+    <g>
+      <text x="20" y="110" fill="#9aa4bd" font-size="12">Tầng 2 (trung)</text>
+      <circle cx="90" cy="150" r="6" fill="#4fdcff" opacity=".7"/><circle cx="170" cy="140" r="6" fill="#4fdcff" opacity=".7"/><circle cx="260" cy="160" r="6" fill="#4fdcff" opacity=".7"/><circle cx="360" cy="135" r="6" fill="#4fdcff" opacity=".7"/><circle cx="470" cy="165" r="6" fill="#4fdcff" opacity=".7"/><circle cx="560" cy="140" r="6" fill="#4fdcff" opacity=".7"/><circle cx="650" cy="160" r="6" fill="#4fdcff" opacity=".7"/>
+      <line x1="90" y1="150" x2="170" y2="140" stroke="#4fdcff" stroke-width="1" opacity=".4"/>
+      <line x1="170" y1="140" x2="260" y2="160" stroke="#4fdcff" stroke-width="1" opacity=".4"/>
+      <line x1="260" y1="160" x2="360" y2="135" stroke="#4fdcff" stroke-width="1" opacity=".4"/>
+      <line x1="360" y1="135" x2="470" y2="165" stroke="#4fdcff" stroke-width="1" opacity=".4"/>
+      <line x1="470" y1="165" x2="560" y2="140" stroke="#4fdcff" stroke-width="1" opacity=".4"/>
+      <line x1="560" y1="140" x2="650" y2="160" stroke="#4fdcff" stroke-width="1" opacity=".4"/>
+    </g>
+    <!-- Layer 3 -->
+    <g>
+      <text x="20" y="192" fill="#5fdc9a" font-size="12">Tầng 3 (dày, mọi node)</text>
+      <circle cx="60" cy="235" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="120" cy="225" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="180" cy="245" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="240" cy="230" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="300" cy="250" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="360" cy="228" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="420" cy="248" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="480" cy="232" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="540" cy="250" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="600" cy="230" r="4" fill="#5fdc9a" opacity=".55"/><circle cx="660" cy="246" r="4" fill="#5fdc9a" opacity=".55"/>
+      <line x1="60" y1="235" x2="120" y2="225" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="120" y1="225" x2="180" y2="245" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="180" y1="245" x2="240" y2="230" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="240" y1="230" x2="300" y2="250" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="300" y1="250" x2="360" y2="228" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="360" y1="228" x2="420" y2="248" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="420" y1="248" x2="480" y2="232" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="480" y1="232" x2="540" y2="250" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="540" y1="250" x2="600" y2="230" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+      <line x1="600" y1="230" x2="660" y2="246" stroke="#5fdc9a" stroke-width=".8" opacity=".3"/>
+    </g>
+    <path d="M 300 50 L 360 135" stroke="#5a6378" stroke-dasharray="3 3"/>
+    <path d="M 470 165 L 480 232" stroke="#5a6378" stroke-dasharray="3 3"/>
+    <g font-size="11" fill="#9aa4bd">
+      <text x="330" y="275">Query bắt đầu từ node "mỏng" → nhảy sang tầng dày → luồn dần về vùng gần nhất. Không cần quét toàn bộ 1 triệu node.</text>
+    </g>
+  </svg>
+
+  <div class="card">
+    <h3>Tuning chính (3 knob duy nhất cần nhớ)</h3>
+    <table>
+      <tr><th>Tham số</th><th>Vai trò</th><th>Mặc định</th><th>Khuyến nghị</th></tr>
+      <tr><td><code>m</code></td><td>Số nhánh mỗi node trong đồ thị — nhỉ: nhiều cạnh, memory cao hơn, tìm nhanh hơn</td><td>16</td><td>16–32</td></tr>
+      <tr><td><code>ef_construction</code></td><td>Độ kỹ lúc build index (chất lượng đồ thị)</td><td>64</td><td>64–200 (build lâu hơn chút)</td></tr>
+      <tr><td><code>hnsw.ef_search</code></td><td>Bán kính tìm kiếm lúc query — <b>tăng = chất lượng hơn, chậm hơn</b></td><td>40</td><td>≥ query top-K × 2, <b>set per-query</b> <code>SET LOCAL hnsw.ef_search = 100</code></td></tr>
+    </table>
+    <p class="muted" style="font-size:13px">▸ Memory: float32 1024-dim ≈ <b>4 KB / vector</b>. 1 triệu post ≈ 4 GB dữ liệu thô + index. PostgreSQL self-host để được trong RAM → tầm <b>1–10 triệu vector</b> là vùng pgvector làm tốt nhất.</p>
+  </div>
+</section>
+
+<!-- ═══════════ 7. HYBRID ═══════════ -->
+<section id="p7">
+  <h2><span class="num">7</span>Hybrid — vì sao không "chỉ vector"? Kết hợp với full-text</h2>
+  <p>Vector xuất sắc ở <b>ngữ nghĩa</b>: "phở bò" ↔ "bún bò Huế". Nhưng kém ở <b>từ khóa chính xác</b>: hash tag <code>#qn5</code>, username, mã ID, tên riêng… Embedding gom chung "Q5" và "quận 5, TP.HCM" — đôi khi user muốn đúng chuỗi.</p>
+  <table>
+    <tr><th></th><th>Full-text (to_tsvector — anh đang có)</th><th>Vector (cosine)</th></tr>
+    <tr><td>Mát khớp từ chính xác</td><td class="good">✅ mạnh</td><td class="bad">❌ yếu</td></tr>
+    <tr><td>Tìm theo ý nghĩa, từ đồng nghĩa</td><td class="bad">❌ kém</td><td class="good">✅ mạnh</td></tr>
+    <tr><td>Từ khóa mã/tag chính xác</td><td class="good">✅</td><td class="bad">❌</td></tr>
+  </table>
+  <p class="muted" style="font-size:13px">📌 Postgres full-text đã có sẵn ở [post-search.helper.ts](content-service/src/core/helper/post-search.helper.ts#L228) — hybrid = chạy <b>cả 2</b> rồi <b>gộp điểm</b>. Phương pháp đơn giản và hiệu quả nhất là <b>RRF</b>:</p>
+  <div class="formula" style="font-size:15px">score = Σ<sub>list</sub> 1 / (60 + rank)  — rank của post trong mỗi danh sách kết quả riêng</div>
+  <div class="sample">
+<span class="kw">-- Ý tưởng RRF trong SQL (kết hợp 2 query thành 1)</span><br>
+<span class="kw">WITH</span> fulltext_k <span class="kw">AS</span> (<span class="kw">SELECT</span> <span class="st">"id"</span>, rank() <span class="kw">OVER</span> (<span class="kw">ORDER BY</span> ts_rank_cd(...) <span class="kw">::float DESC</span>) r <span class="kw">FROM</span> (...) ),
+vector_k   <span class="kw">AS</span> (<span class="kw">SELECT</span> <span class="st">"id"</span>, rank() <span class="kw">OVER</span> (<span class="kw">ORDER BY</span> content_vector <span class="kw">&lt;=&gt;</span> $v) r <span class="kw">FROM</span> (...) )
+<span class="kw">SELECT</span> <span class="st">"id"</span>, 1.0/(<span class="nu">60</span>+fk.r) + 1.0/(<span class="nu">60</span>+vk.r) rrf
+<span class="kw">FROM</span> fulltext_k fk <span class="kw">FULL JOIN</span> vector_k vk <span class="kw">USING</span> (<span class="st">"id"</span>)
+<span class="kw">ORDER BY</span> rrf <span class="kw">DESC</span> <span class="kw">LIMIT</span> <span class="nu">20</span>;
+  </div>
+  <p class="muted" style="font-size:13px">RRF merge có thể viết trong Postgres hoặc ở service (NestJS) — với top-50 mỗi bên, làm ở service đơn giản & dễ test hơn.</p>
+</section>
+
+<!-- ═══════════ 8. ĐẶT VÀO DỰ ÁN ═══════════ -->
+<section id="p8">
+  <h2><span class="num">8</span>Đặt vào dự án — use case nào "xứng", nào "không"</h2>
+
+  <div class="grid2">
+    <div class="card">
+      <h3 class="good" style="color:var(--good)">✅ Nên dùng</h3>
+      <ul style="font-size:14px;margin-top:8px">
+        <li><b>Semantic search post</b> — nâng cấp <code>/post/search</code>: "tìm bài về du lịch biển" tìm được bài không chứa chữ "biển"</li>
+        <li><b>Recommend chủ đề feed</b> — lấy <code>UserInterest</code> làm vector chủ đề → so với <code>Post.content</code> → feed có "ngụ ý" hơn (hiện chỉ so hashtag trùng)</li>
+        <li><b>"Similar posts"</b> — nút xem thêm bài tương tự ngay dưới 1 post</li>
+        <li><b>Phát hiện nội dung trùng/đạo văn</b> — khá giống làm community-moderation</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--bad)">❌ Không nên dùng</h3>
+      <ul style="font-size:14px;margin-top:8px">
+        <li><b>Match queue phòng chat</b> (<code>matching-tick.service.ts</code>) — là thuật toán thời gian chờ + backfill phòng trong Redis, cần quyết định trong <b>ms</b>. Embedding không thêm lợi ích, chỉ thêm latency + phức tạp. Giữ nguyên.</li>
+        <li><b>Chat realtime search</b> — tin nhắn là timing-critical; GIN full-text hiện tại đã đủ nhanh và chính xác.</li>
+        <li><b>Dữ liệu key chính xác</b> — mã đơn hàng, id, tên tài khoản → <code>ILIKE</code> như hiện tại.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Lộ trình gợi ý (từng bước, mỗi bước có thể ngắt an toàn)</h3>
+  <table>
+    <tr><th>Bước</th><th>Làm gì</th><th>Khối lượng</th></tr>
+    <tr><td>0</td><td>Thêm <code>pgvector</code> vào docker-compose (image postgres đã kèm sẵn — chỉ chạy CREATE EXTENSION)</td><td>5 phút</td></tr>
+    <tr><td>1</td><td>Migration: bảng <code>PostEmbedding</code> + HNSW index như phần 5</td><td>Vài giờ</td></tr>
+    <tr><td>2</td><td>Chạy embed service (bge-m3 qua TEI — 1 container mới) + backfill net số post cũ (batch, không chặn)</td><td>Vài giờ</td></tr>
+    <tr><td>3</td><td>Hook ghi: post mới → gọi embed async (Kafka nếu cần)</td><td>Nửa ngày</td></tr>
+    <tr><td>4</td><td>Nâng endpoint search thành hybrid RRF — rollback an toàn (chỉ khi nào cần)</td><td>1 ngày</td></tr>
+    <tr><td>5</td><td>UserInterest → vector → recommend feed</td><td>1 ngày</td></tr>
+  </table>
+  <div class="warnbox"><b>Khi nào nên chuyển sang Qdrant:</b> chỉ khi >10 triệu vector, cần hybrid ranking native và filter payload nặng — lúc đó mới có lý do thêm 1 container nữa. Trước ngưỡng đó pgvector đủ dùng và đơn giản hơn nhiều.</div>
+</section>
+
+<!-- ═══════════ 9. ÁP VÀO DỰ ÁN THỰC TẾ ═══════════ -->
+<section id="p9">
+  <h2><span class="num">9</span>Áp vào dự án của anh — 2 use case với code thật của content-service</h2>
+  <p>Đây là phần dành riêng cho việc <b>tích hợp thực tế</b>. Anh đã chốt dùng vector DB cho <b>(A) tìm kiếm bài viết</b> và <b>(B) feed bài viết theo các community đã tham gia</b>. Tôi đã đọc code thật của 2 API này; dưới đây là hiện trạng + các phương án kèm trade-off, chưa code gì cả.</p>
+
+  <div class="note"><b>Nguyên tắc xuyên suốt:</b> cả 2 API này <b>đã có sẵn ranking hoạt động tốt</b> (FTS, scorer weights, diversity, cursor). Vector DB là <b>một tín hiệu bổ sung</b> — chèn vào như một thành phần, KHÔNG thay thế luồng hiện tại. Điều này giữ tính toàn vẹn của logic đã test và giảm rủi ro regression.</div>
+
+  <!-- ─── Use case A: Search ─── -->
+  <h3>9.1 · Use case A — Tìm kiếm bài viết <code>GET /post/search</code></h3>
+
+  <h4>A.0 — Hiện trạng (đọc từ code):</h4>
+  <div class="pipeline">
+    <div class="pnode"><div class="ic">🔍</div><div><div class="tt">GET /post/search?keyword=...&amp;sortBy=relevance</div><div class="dd"><code>post.controller.ts:504</code></div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🛡️</div><div><div class="tt">Biên giới truy cập</div><div class="dd"><code>fetchApprovedCommunityIds</code> — chỉ search trong community đã approved; loại hidden/user-blocked</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">⚙️</div><div><div class="tt">repo.searchSmart()</div><div class="dd">Full-text: <code>to_tsvector('simple', unaccent(...)) @@ to_tsquery</code> + ts_rank — <code>post-search.helper.ts:228,255</code></div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">💎</div><div><div class="tt">Enrich/privilege: mask premium</div><div class="dd">Kiểm tra quyền manager/unlock, ẩn content khi chưa mua</div></div></div>
+  </div>
+  <p class="muted" style="font-size:13px">FTS hiện tại chỉ khớp <b>từ (token)</b>: "tìm team" hits post có chữ đúng. <b>Không hiểu ngữ nghĩa</b>: "team" ≠ "đồng đội", "rank" ≠ "leo hạng". Vector lấp chính xác lỗ hổng này.</p>
+
+  <!-- Phương án A1 -->
+  <div class="pa">
+    <h4>A1 · Hybrid — giữ FTS + thêm vector, merge bằng RRF <span class="badge" style="background:rgba(46,204,113,.15);color:#5fdc9a;margin-left:6px">khuyến nghị</span></h4>
+    <p style="font-size:14px">Chạy <b>2 truy vấn song song</b> trong 1 request, rồi gộp bằng <b>RRF (Reciprocal Rank Fusion)</b> ở service. Không phải chọn một cái bỏ một.</p>
+    <div class="sample">
+<span class="cm">-- Truy vấn 1 (giữ nguyên): top-50 full-text</span><br>
+<span class="kw">SELECT</span> p.<span class="st">"id"</span>, ts_rank_cd(p.content_tsv, query) <span class="kw">AS</span> r<br>
+<span class="kw">WHERE</span> p.content_tsv @@ websearch_to_tsquery(<span class="st">'simple'</span>, <span class="st">$keyword</span>)<br>
+<span class="kw">ORDER BY</span> r <span class="kw">DESC LIMIT</span> <span class="nu">50</span>;  <span class="cm">-- $keyword = query tự nhiên</span><br><br>
+<span class="cm">-- Truy vấn 2 (mới): top-50 vector</span><br>
+<span class="kw">SELECT</span> <span class="st">"postId"</span><br>
+<span class="kw">FROM</span> post_embedding<br>
+<span class="kw">ORDER BY</span> content_vector <span class="kw">&lt;=&gt;</span> $1::vector <span class="kw">LIMIT</span> <span class="nu">50</span>;  <span class="cm">-- $1 = embed(keyword)</span>
+    </div>
+    <p style="font-size:14px">Sau đó <b>node code (NestJS)</b> gộp:</p>
+    <div class="sample">
+<span class="cm">// rrf.ts — khoảng 30 dòng, top-50 mỗi bên là đủ (không cần quét hết DB)</span><br>
+score(id) = <span class="nu">1</span>/(<span class="nu">60</span> + rank_fts) + <span class="nu">1</span>/(<span class="nu">60</span> + rank_vector)<br>
+<span class="cm">// post xuất hiện CẢ HAI bên → cộng dồn → bay lên đầu<br>// post chỉ hit 1 bên → vẫn được giữ</span>
+    </div>
+    <table>
+      <tr><th>Tiêu chí</th><th>A1 Hybrid RRF</th><th>A2 Vector thuần</th><th>A3 FTS + rerank</th></tr>
+      <tr><td>Key-match "#tag/tên/id"</td><td class="good">✅ giữ nguyên FTS</td><td class="bad">❌ mất hẳn</td><td class="good">✅ giữ FTS</td></tr>
+      <tr><td>Hiểu ngữ nghĩa </td><td class="good">✅ tốt</td><td class="good">✅ tốt nhất</td><td class="warn">⚠️ 1 phần (chỉ đổi thứ tự trong top FTS)</td></tr>
+      <tr><td>Latency</td><td>≈ max(FTS, vec) — 2 query song song</td><td>1 query</td><td>như cũ</td></tr>
+      <tr><td>Code thêm</td><td>Sửa service + 1 hàm RRF</td><td>Nhiều nhất</td><td>Ít nhất</td></tr>
+      <tr><td>Rủi ro regression</td><td>Thấp (giữ FTS củ)</td><td>Cao (bỏ FTS = mất #tag)</td><td>Thấp nhất</td></tr>
+      <tr><td>Đạt được mục tiêu</td><td class="good">✅ Đúng ý</td><td class="bad">Sa đà, mất use case #tag</td><td class="warn">Nửa vời (không ra bài "cùng nghĩa" chưa từng match từ)</td></tr>
+    </table>
+    <p class="pa-trade">
+      ⊕ Bảo toàn toàn bộ logic search hiện tại (approved communities, cursor, premium mask) — chỉ thêm 1 bước merge cuối.<br>
+      ⊖ Cần rửa ngữ nghĩa để biết khi nào RRF cho kết quả "xấu" so với FTS thuần (A/B test nhỏ). Chi phí: 1 hàm merge + 1 SQL mới, ~vài giờ.
+    </p>
+  </div>
+
+  <!-- Phương án A2 -->
+  <div class="pa">
+    <h4>A2 · Vector thuần — bỏ FTS, chỉ query vector</h4>
+    <p style="font-size:14px">Thay toàn bộ search bằng <code>ORDER BY content_vector &lt;=&gt; $1 LIMIT 50</code>. Hấp dẫn vì đơn giản, nhưng <b>mất khả năng search "#qn5", "phở", "Hà Nội"</b> — vector không khớp chuỗi chính xác, chỉ "gần nghĩa". App có search hashtag (<code>hashtag</code> endpoint riêng) và search community theo tên — nếu gộp vào vector thuần sẽ giảm chất lượng rõ.</p>
+    <p class="pa-trade">⊕ 1 query duy nhất, ít code nhất.<br>⊖ Đánh mất key-value match vốn là sức mạnh app. <b>Không khuyến nghị.</b></p>
+  </div>
+
+  <!-- Phương án A3 -->
+  <div class="pa">
+    <h4>A3 · Giữ FTS, chỉ "rerank" lại top-100 trong bộ nhớ</h4>
+    <p style="font-size:14px">Giữ nguyên <code>searchSmart</code> → sau khi có top-100 FTS, dùng embedding của từng post đó rerank lại theo độ gần ngữ nghĩa với query. Đỡ phải viết RRF, nhưng <b>giới hạn hard:</b> post nào FTS không tìm ra (không chứa từ nào) thì vector cũng không bao giờ thấy — vô dụng đúng vai trò vector đáng giải quyết.</p>
+    <p class="pa-trade">⊕ Nhẹ nhất, gần như không đổi luồng.<br>⊖ Không giải quyết đúng bài toán (tìm bài "cùng nghĩa không trùng từ"). Chỉ cải thiện thứ tự trong 100 kết quả FTS.<br>→ Nên coi là <b>bước đệm** nếu chưa muốn làm hẳn kèm A1.</p>
+  </div>
+
+  <!-- ─── Use case B: Member feed ─── -->
+  <h3 style="margin-top:46px">9.2 · Use case B — Feed bài viết theo community đã tham gia <code>GET /post/member-feed</code> + <code>/post/getPostByCommunityId</code></h3>
+
+  <h4>B.0 — Hiện trạng (đọc từ code <code>post-feed.service.ts:360</code>):</h4>
+  <div class="pipeline">
+    <div class="pnode"><div class="ic">🗃️</div><div><div class="tt">1. Lấy các community user đã join</div><div class="dd"><code>fetchJoinedCommunityIds(userId)</code> — giới hạn phạm vi feed</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">👤</div><div><div class="tt">2. buildUserProfile(userId)</div><div class="dd">topHashtagIds, topAuthorIds, topCommunityIds — từ lịch sử tương tác</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🧾</div><div><div class="tt">3. Lấy 200 candidate</div><div class="dd"><code>findMemberPostsByCommunityIds(..., take:200)</code> + loại hidden/blocked</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">⚖️</div><div><div class="tt">4. scoreAndRank(..., 'MEMBER')</div><div class="dd">Trọng số hiện tại — <code>recommendation-scorer.helper.ts:10</code>: <b>hashtag 30 + author 25 + engagement 20 + community 15 + recency 10</b> (+ view penalty −50, + rating bonus)</div></div></div>
+    <div class="parrow">↓</div>
+    <div class="pnode"><div class="ic">🔀</div><div><div class="tt">5. Diversity + cursor + cache</div><div class="dd"><code>diversifyByAuthorHashtag</code> — không 2 bài cùng tác giả/hashtag liên tiếp · cursor (score, id) · Redis 45s</div></div></div>
+  </div>
+
+  <div class="note">Đọc kỹ thành phần điểm: hiện tại score = <b>hành vi + metadata</b> (tác giả bạn follow, hashtag bạn hay tương tác, engagement cao, community quen). <b>Chưa có yếu tố "nội dung bài này có hợp gu ngữ nghĩa của bạn không"</b>. Đây chính là chỗ vector DB lấp được.</div>
+
+  <!-- Phương án B1 -->
+  <div class="pa">
+    <h4>B1 · Thêm 1 "semantic term" vào hàm score <span class="badge" style="background:rgba(46,204,113,.15);color:#5fdc9a;margin-left:6px">khuyến nghị</span></h4>
+    <p style="font-size:14px"><b>Ý tưởng đơn giản:</b> tạo <b>1 vector đại diện cho gu người dùng</b> (embed gộp top hashtag + UserInterest những cái user signup chọn), rồi trong <code>scoreAndRank</code> thêm 1 thành phần điểm mới:</p>
+    <div class="sample">
+<span class="cm">// score = 30 + 25 + 20 + 15 + 10 (như cũ) + semanticScore (mới)</span><br><br>
+<span class="cm">// 1. Trước khi score: 1 lần embed gu user (cache 30–60 phút):</span><br>
+userVec = embed(<span class="st">"game, e-sport, LMHT, ...top hashtags"</span>)  <span class="cm">// vector(1024)</span><br><br>
+<span class="cm">// 2. Trong scoreCandidate(), thêm sau communityScore:</span><br>
+semanticScore = <span class="nu">20</span> * cosine(userVec, candidate.contentVector)   <span class="cm">// 0→20</span><br>
+total = hashtag + author + engagement + community + recency<br>
+      + viewedPenalty + ratingBonus + <b>semanticScore</b>
+    </div>
+    <p style="font-size:14px">Ví dụ con số với weight semantic = 20:</p>
+    <table>
+      <tr><th>Post (trong 1 community đã join)</th><th>Nội dung</th><th>hashtag</th><th>engagement</th><th>community</th><th>semantic (20×cos)</th><th>Tổng mới</th></tr>
+      <tr><td>P1</td><td>"Team mình cần support đi rank"</td><td>30</td><td>15</td><td>15</td><td><b>18</b> (cos≈0.9)</td><td class="good"><b>78</b></td></tr>
+      <tr><td>P2</td><td>"Tuyển dev NodeJS"</td><td>30</td><td>20</td><td>15</td><td><b>2</b> (cos≈0.1)</td><td>67</td></tr>
+      <tr><td>P3</td><td>"Review quán phở mới"</td><td>0</td><td>25</td><td>15</td><td><b>1</b> (cos≈0.05)</td><td>41</td></tr>
+    </table>
+    <p class="mini" style="font-size:13px">User gu = <b>game/e-sport</b> → P1 được đẩy lên nhờ semantics, dù engagement thấp hơn P3. Cursor (score,id) vẫn hợp lệ vì score chỉ + thêm 1 hằng số term. Diversity vẫn không đổi hành vi.</p>
+    <table>
+      <tr><th>Tiêu chí</th><th>B1 Thêm term</th><th>B2 Thay toàn bộ score</th><th>B3 Chỉ feed community mới join</th></tr>
+      <tr><td>Bảo toàn curation hiện tại</td><td class="good">✅ giữ 5 thành phần cũ</td><td class="bad">❌ bỏ hết</td><td class="good">✅</td></tr>
+      <tr><td>Cold-start (user mới, profile rỗng)</td><td class="good">✅ semantic = 0 → tự fallback cũ</td><td class="bad">❌ về 0 → feed rỗng</td><td class="warn">chỉ giúp chỗ mới</td></tr>
+      <tr><td>Đúng bài toán "feed hợp gu"</td><td class="good">✅</td><td>✅ nhưng hỏng phần khác</td><td>⚠️ nửa vời</td></tr>
+      <tr><td>Latency</td><td>+1 phép cosine/post (rất rẻ)</td><td>giảm</td><td>+1 phép cosine</td></tr>
+      <tr><td>Rủi ro regression</td><td>Thấp — weight semantic bắt đầu nhỏ</td><td class="bad">Cao</td><td>Thấp</td></tr>
+    </table>
+    <p class="pa-trade">⊕ Đúng trọng tâm: giữ tangential ranking đã test, thêm đúng "gu ngữ nghĩa" mà không có gì thay thế. Cold-start tự fallback. Cache 45s giữ nguyên.<br>⊖ Cần chọn cân nặng (20?) & A/B để đảm bảo không át engagement/recency. Thêm <b>1 query batch</b> lấy embeddings 200 candidate (hoặc JOIN vào query hiện tại).</p>
+  </div>
+
+  <!-- Phương án B2 -->
+  <div class="pa">
+    <h4>B2 · Thay toàn bộ score = semantic thuần</h4>
+    <p style="font-size:14px">Bỏ hashtag/author/engagement/community/recency, chỉ sort theo <code>cosine(userVec, postVec)</code>. Đơn giản nhưng phá bỏ mọi lý do người ta thấy feed hiện tại "sống" (hot posts, bạn quen, trong cộng đồng bạn ở). Feed sẽ thành "20 bài giống nhau về chủ đề" — nhàm, và mất hoàn toàn tín hiệu social.</p>
+    <p class="pa-trade">⊕ Code ít nhất.<br>⊖ Like-for-like mất curation; cold-start feed trống tịnh. <b>Không khuyến nghị.</b></p>
+  </div>
+
+  <!-- Phương án B3 -->
+  <div class="pa">
+    <h4>B3 · Chỉ áp vector cho feed community "mới join" (user chưa có profile)</h4>
+    <p style="font-size:14px">Khi user vừa join 1 community và chưa có đủ tương tác (cold-start), hiện feed rơi về chronological/engagement. Dùng vector: embed <b>nội dung community đó</b> → so với UserInterest đã chọn lúc signup → ưu tiên bài trong community đó hợp gu. Đây là cách dùng vector tinh gọn nhất, ít đụng luồng chính.</p>
+    <p class="pa-trade">⊕ Không đụng member-feed hot. Giải quyết đúng vấn đề "người mới chưa biết xem gì".<br>⊖ Phạm vi hẹp — vẫn cần B1 nếu muốn feed chính cũng hợp gu.<br>→ Có thể làm <b>B1 + B3</b> cùng lúc.</p>
+  </div>
+
+  <!-- ─── Chia sẻ chung ─── -->
+  <h3 style="margin-top:46px">9.3 · Cái giá phải trả — chung cho cả A & B</h3>
+  <table>
+    <tr><th>Khoản</th><th>Chi tiết</th><th>Ước lượng</th></tr>
+    <tr><td>Embedding service</td><td>1 container mới trong docker-compose: <b>TEI chạy bge-m3</b> (dùng RAM ~2-4GB, chạy CPU cũng được)</td><td>Thêm 1 service</td></tr>
+    <tr><td>Migration</td><td><code>CREATE EXTENSION vector</code> + bảng <code>PostEmbedding</code> + HNSW index</td><td>1 migration Prisma</td></tr>
+    <tr><td>Backfill</td><td>Embed lại toàn bộ post cũ (batch, ngoài giờ cao điểm, ~100k post/1h tùy GPU/CPU)</td><td>vài giờ chạy 1 lần</td></tr>
+    <tr><td>Lưu trữ</td><td>vector(1024) float ≈ <b>4 KB/vector</b> → 1 triệu post ≈ 4GB</td><td>nhẹ</td></tr>
+    <tr><td>Đồng bộ</td><td>Post mới/sửa → embed lại (hook async, dùng Kafka như đã quen)</td><td>1 consumer</td></tr>
+  </table>
+
+  <div class="warnbox"><b>Checklist để anh quyết:</b> ① Search chọn <b>A1</b> hay chỉ làm A3 trước? ② Feed chọn <b>B1</b>, B3, hay cả hai? ③ Weight semantic tạm để 15–20 và đo sau? Anh đọc kỹ xong, trả lời 3 điểm này là tôi đưa ra DESIGN doc cụ thể (không code).</div>
+</section>
+
+<!-- ═══════════ GLOSSARY ═══════════ -->
+<section id="gloss">
+  <h2>Thuật ngữ trong 1 hơi</h2>
+  <dl class="gloss">
+    <dt>Vector / Embedding</dt>
+    <dd>Mảng số (vd 1024 con số) đại diện cho nghĩa của một đoạn text. "Embed" = ép text vào vector.</dd>
+    <dt>Dimension (chiều)</dt>
+    <dd>Số con số trong vector. 1024 chiều = mô hình phân biệt được rất nhiều sắc thái.</dd>
+    <dt>Cosine similarity</dt>
+    <dd>Đo cosin góc giữa 2 vector. 1 = cùng hướng (giống), 0 = vuông góc, −1 = đối nghịch. Bỏ qua độ dài.</dd>
+    <dt>Cosine distance</dt>
+    <dd>Trong pgvector: <code>1 − cosine</code>, ký hiệu <code>&lt;=&gt;</code>. Càng nhỏ càng gần → <code>ORDER BY ... LIMIT</code>.</dd>
+    <dt>ANN / Approximate Nearest Neighbor</dt>
+    <dd>Tìm "xấp xỉ" điểm gần nhất — trả về top-K gần đúng, nhanh hơn nhiều so với quét toàn bộ, đủ tốt cho semantic search.</dd>
+    <dt>HNSW</dt>
+    <dd>Thuật toán index ANN phổ biến nhất: đồ thị nhiều tầng (hình ở phần 6). Không cần train, vô index ngay từ bảng rỗng.</dd>
+    <dt>IVFFlat</dt>
+    <dd>Index ANN kiểu cũ: chia không gian thành các "cell" rồi chỉ tìm trong cell gần — cần dữ liệu trước để phân cụm, chất lượng kém hơn HNSW. Nên dùng HNSW.</dd>
+    <dt><code>ef_search</code></dt>
+    <dd>Bán kính tìm kiếm của HNSW lúc query. Lớn = recall cao hơn, chậm hơn.</dd>
+    <dt>RRF</dt>
+    <dd>Reciprocal Rank Fusion — cách gộp 2 danh sách xếp hạng (full-text + vector) thành 1 bằng công thức <code>1/(k+rank)</code>.</dd>
+    <dt>TEI</dt>
+    <dd>text-embeddings-inference — dịch vụ chạy embedding model, expose REST, phù hợp docker. Serve <code>bge-m3</code>.</dd>
+    <dt>MRL (Matryoshka)</dt>
+    <dd>Model có thể cắt bớt chiều mà không giảm chất lượng nhiều — tiện khi muốn ép dưới 2000 dim của pgvector.</dd>
+  </dl>
+</section>
+
+<div class="footer">
+  Tài liệu học tập — vector-db-guide.html · khớp với content-service (Post/Event/Hashtag/UserInterest) · Embedding đề xuất: BAAI/bge-m3 (1024D, local).
+</div>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var cv = document.getElementById('cv');
+  var ctx = cv.getContext('2d');
+  var W = cv.width, H = cv.height;
+
+  var COLOR = {GAME:'#7c5cff', FOOD:'#ff5276', MUSIC:'#ff5c8a', TRAVEL:'#2ecc71', TECH:'#00d2ff'};
+  var LABEL = {GAME:'game', FOOD:'food', MUSIC:'music', TRAVEL:'travel', TECH:'tech'};
+  var TOPICS = Object.keys(COLOR);
+
+  var posts = [
+    {x:.78,y:.72,label:'Tìm team LMHT tối nay',        topic:'GAME',   v:[.81,.22,.05,.60,.12,.10,.55,.30]},
+    {x:.86,y:.62,label:'Cần 2 người đi rank Liên Quân',topic:'GAME',   v:[.77,.25,.02,.58,.15,.08,.51,.34]},
+    {x:.70,y:.80,label:'Lập team squad 5 người',        topic:'GAME',   v:[.84,.18,.04,.55,.10,.12,.60,.22]},
+    {x:.18,y:.22,label:'Quán phở ngon Q5',              topic:'FOOD',   v:[.10,.55,.60,.05,.80,.70,.15,.12]},
+    {x:.28,y:.14,label:'Cách nấu bún bò Huế',           topic:'FOOD',   v:[.12,.60,.58,.08,.76,.74,.12,.10]},
+    {x:.14,y:.30,label:'Review quán cà phê view đẹp',   topic:'FOOD',   v:[.08,.50,.55,.12,.70,.66,.20,.15]},
+    {x:.55,y:.88,label:'Nhạc acoustic tối thứ 7',       topic:'MUSIC',  v:[.30,.80,.10,.70,.30,.20,.70,.25]},
+    {x:.45,y:.82,label:'Album hay cho chuyến đi',       topic:'MUSIC',  v:[.28,.76,.14,.66,.35,.25,.68,.20]},
+    {x:.12,y:.84,label:'Top check-in Đà Lạt',           topic:'TRAVEL', v:[.22,.70,.45,.40,.20,.15,.30,.80]},
+    {x:.25,y:.80,label:'Cẩm nang du lịch Phú Quốc',     topic:'TRAVEL', v:[.20,.72,.40,.42,.22,.12,.28,.76]},
+    {x:.90,y:.18,label:'Hướng dẫn setup PostgreSQL',    topic:'TECH',   v:[.60,.10,.70,.05,.10,.05,.45,.65]},
+    {x:.84,y:.28,label:'So sánh HNSW vs IVFFlat',       topic:'TECH',   v:[.64,.08,.74,.06,.12,.04,.48,.68]}
+  ];
+
+  var PAD = 46;
+  function sx(v){ return PAD + v*(W-2*PAD); }
+  function sy(v){ return PAD + v*(H-2*PAD); }
+
+  var qx = .80, qy = .65;
+  var qLabel = 'Tìm bạn chơi game tối nay';
+  var sel = -1;
+
+  var sqx = document.getElementById('sqx'), sqy = document.getElementById('sqy');
+  var ovx = document.getElementById('ovx'), ovy = document.getElementById('ovy');
+
+  function cosSim(ax,ay,bx,by){
+    var d = ax*bx + ay*by;
+    var ma = Math.hypot(ax,ay), mb = Math.hypot(bx,by);
+    if(ma===0||mb===0) return 0;
+    return Math.max(-1, Math.min(1, d/(ma*mb)));
+  }
+  function euc(ax,ay,bx,by){ return Math.hypot(ax-bx, ay-by); }
+
+  function rankList(){
+    return posts.map(function(p,i){
+      var cos = cosSim(qx,qy,p.x,p.y);
+      return {i:i, cos:cos, dist:1-cos, euc:euc(qx,qy,p.x,p.y)};
+    }).sort(function(a,b){ return a.dist - b.dist; });
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    // grid
+    ctx.strokeStyle='#161c29'; ctx.lineWidth=1;
+    for(var g=0; g<=5; g++){
+      var t = g/5;
+      ctx.beginPath(); ctx.moveTo(PAD, sy(t)); ctx.lineTo(W-PAD, sy(t)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx(t), PAD); ctx.lineTo(sx(t), H-PAD); ctx.stroke();
+    }
+    // axes
+    ctx.strokeStyle='#2c3450'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(PAD,H-PAD); ctx.lineTo(W-PAD,H-PAD); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD,H-PAD); ctx.lineTo(PAD,PAD); ctx.stroke();
+    ctx.fillStyle='#5a6378'; ctx.font='11px Consolas,monospace';
+    ctx.textAlign='left';
+    ctx.fillText('chiều 1 →', W-PAD-60, H-14);
+    ctx.fillText('chiều 2 →', 2, PAD+8);
+
+    var ranked = rankList();
+
+    // connection lines
+    for(var i=0;i<posts.length;i++){
+      var r = ranked.indexOf(posts.indexOf(posts[i]) >= 0 ? ranked[ranked.findIndex(function(o){return o.i===i;})] : {i:-1});
+      var rr = ranked.findIndex(function(o){ return o.i === i; });
+      var hot = rr < 3;
+      ctx.strokeStyle = hot ? 'rgba(0,210,255,.55)' : 'rgba(90,99,120,.22)';
+      ctx.lineWidth = hot ? 1.6 : 1; ctx.setLineDash(hot?[]:[3,4]);
+      ctx.beginPath(); ctx.moveTo(sx(qx),sy(qy)); ctx.lineTo(sx(posts[i].x),sy(posts[i].y)); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // draw posts
+    for(var j=0;j<posts.length;j++){
+      var rank = ranked.findIndex(function(o){ return o.i===j; });
+      var hot = rank<3;
+      var x=sx(posts[j].x), y=sy(posts[j].y);
+      ctx.beginPath(); ctx.arc(x,y,8,0,6.2832);
+      ctx.fillStyle = COLOR[posts[j].topic];
+      ctx.fill();
+      ctx.strokeStyle = hot ? '#fff' : 'rgba(255,255,255,.25)';
+      ctx.lineWidth = hot?2:1; ctx.stroke();
+      // label
+      ctx.font='11px Segoe UI,Arial';
+      ctx.fillStyle = hot ? '#e6e9f2' : '#9aa4bd';
+      ctx.textAlign='left';
+      ctx.fillText(posts[j].label, x+11, y+3);
+      ctx.font='10px Consolas,monospace';
+      ctx.fillStyle='#6b7590';
+      ctx.fillText(LABEL[posts[j].topic], x+11, y+16);
+    }
+
+    // query
+    var qxc=sx(qx), qyc=sy(qy);
+    ctx.beginPath(); ctx.arc(qxc,qyc,10,0,6.2832);
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2.5; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(qxc-14,qyc); ctx.lineTo(qxc+14,qyc);
+    ctx.moveTo(qxc,qyc-14); ctx.lineTo(qxc,qyc+14);
+    ctx.strokeStyle='#00d2ff'; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle='#00d2ff';
+    ctx.font='bold 13px Segoe UI,Arial'; ctx.textAlign='left';
+    ctx.fillText(qLabel, qxc+18, qyc-10);
+  }
+
+  function renderRanks(){
+    var ranked = rankList();
+    var box = document.getElementById('ranklists');
+    box.innerHTML='';
+    ranked.forEach(function(o, idx){
+      var p = posts[o.i];
+      var cls = idx===0?'top1':(idx===1?'top2':(idx===2?'top3':'topn'));
+      var hot = idx<3;
+      var row=document.createElement('div');
+      row.className='rankrow'+(hot?' hot':'');
+      row.innerHTML='<div class="set '+cls+'">'+ (idx+1) +'</div>'+
+        '<div class="lb" style="color:'+COLOR[p.topic]+'">'+escapeHTML(p.label)+'</div>'+
+        '<div class="topic">'+LABEL[p.topic]+'</div>'+
+        '<div class="sc">cos '+o.cos.toFixed(3)+'</div>'+
+        '<div class="sc" style="color:#2ecc71">d '+(1-o.cos).toFixed(3)+'</div>';
+      row.onclick=function(){ showVec(o.i); };
+      box.appendChild(row);
+    });
+  }
+
+  function showVec(i){
+    sel=i;
+    var p=posts[i];
+    var box=document.getElementById('vecdetail');
+    box.innerHTML='<b style="color:'+COLOR[p.topic]+'">'+escapeHTML(p.label)+'</b><br>vector('+p.v.length+'D): <span style="color:#e6e9f2">['+p.v.map(function(n){return n.toFixed(2);}).join(', ')+']</span> — con số này chính là thứ được lưu vào cột <code style="color:#00d2ff">vector(1024)</code> (đây là minh họa 8D cho dễ đọc).';
+  }
+
+  function escapeHTML(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function update(which){
+    if(which!=='y'){ qx=+sqx.value/100; ovx.textContent=qx.toFixed(2); }
+    if(which!=='x'){ qy=+sqy.value/100; ovy.textContent=qy.toFixed(2); }
+    draw(); renderRanks();
+  }
+
+  sqx.addEventListener('input', function(){ update('x'); });
+  sqy.addEventListener('input', function(){ update('y'); });
+  cv.addEventListener('click', function(ev){
+    var rect=cv.getBoundingClientRect();
+    var mx=(ev.clientX-rect.left)*(W/rect.width);
+    var my=(ev.clientY-rect.top)*(H/rect.height);
+    // nearest post
+    var best=-1, bd=1e9;
+    for(var j=0;j<posts.length;j++){
+      var x=sx(posts[j].x), y=sy(posts[j].y);
+      var d=Math.hypot(mx-x,my-y);
+      if(d<bd){bd=d;best=j;}
+    }
+    if(bd<28) showVec(best); else sel=-1;
+  });
+
+  update('both');
+})();
+</script>
+</body>
+</html>
