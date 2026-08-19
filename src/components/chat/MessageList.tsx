@@ -34,20 +34,39 @@ export function MessageList() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const prevLen = useRef(0);
   const nearBottomRef = useRef(true);
+  const readTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastReadSentId = useRef('');
 
-  // scroll listener for load-older + near-bottom tracking
+  // Read receipt: khi ở đáy (đang xem tin mới) → debounce 1.2s gửi mốc đọc = createdAt tin mới nhất.
+  function scheduleSendRead() {
+    const room = useChatStore.getState().roomId;
+    if (!room || !useChatStore.getState().joined) return;
+    const msgs = useChatStore.getState().messages.filter((m) => m.userId && !m.isDeleted);
+    if (msgs.length === 0) return;
+    const newest = msgs[msgs.length - 1];
+    if (!newest || newest.id === lastReadSentId.current) return;
+    lastReadSentId.current = newest.id;
+    if (readTimer.current) clearTimeout(readTimer.current);
+    readTimer.current = setTimeout(() => {
+      useChatStore.getState().sendRead(room, newest.createdAt);
+    }, 1200);
+  }
+
+  // scroll listener for load-older + near-bottom tracking + send-read
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
     const handler = () => {
-      nearBottomRef.current = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 160;
+      const near = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 160;
+      nearBottomRef.current = near;
       if (vp.scrollTop < 60 && nextCursor && !loadingOlder) void loadOlder();
+      if (near) scheduleSendRead();
     };
     vp.addEventListener('scroll', handler, { passive: true });
     return () => vp.removeEventListener('scroll', handler);
   }, [nextCursor, loadingOlder, loadOlder]);
 
-  // auto-scroll to bottom on new message (when near bottom)
+  // auto-scroll to bottom on new message (when near bottom) + send-read
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
@@ -55,9 +74,13 @@ export function MessageList() {
       requestAnimationFrame(() => {
         if (viewportRef.current) viewportRef.current.scrollTop = viewportRef.current.scrollHeight;
       });
+      scheduleSendRead();
     }
     prevLen.current = messages.length;
   }, [messages]);
+
+  // cleanup timer
+  useEffect(() => () => { if (readTimer.current) clearTimeout(readTimer.current); }, []);
 
   if (loadingHistory && messages.length === 0) {
     return (

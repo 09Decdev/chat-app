@@ -16,6 +16,9 @@ import type {
   TopicCreatedPayload,
   TopicUpdatedPayload,
   TopicDeletedPayload,
+  ChatReadUpdatePayload,
+  ChatTimChangedPayload,
+  ReadReceipts,
 } from '@/types/chat';
 
 type Handler<T> = (payload: T) => void;
@@ -33,6 +36,9 @@ interface PendingChatMessage {
   content: string;
   fileId?: string | null;
   sentAt: number;
+  /** Reply — giữ để resend đúng bản chất (KHÔNG để mất reply khi resend). */
+  replyToId?: string | null;
+  mentions?: string[];
 }
 
 /** Tu bo sau TTL — tranh resend vinh vien khi server silent-skip (rate-limit/too-long). */
@@ -65,7 +71,7 @@ export interface SocketHandlers {
   onDisconnect?: (reason: string) => void;
   onConnectError?: (err: Error) => void;
   onMatchingFound?: Handler<MatchingFoundPayload>;
-  onJoined?: Handler<{ roomId: string; roomEndsAt?: number | null }>;
+  onJoined?: Handler<{ roomId: string; roomEndsAt?: number | null; readReceipts?: ReadReceipts }>;
   onMessage?: Handler<ChatMessagePayload>;
   onTyping?: Handler<TypingPayload>;
   onMemberLeft?: Handler<MemberLeftPayload>;
@@ -77,6 +83,8 @@ export interface SocketHandlers {
   onVoteKickStarted?: Handler<VoteKickStartedPayload>;
   onVoteKickVoted?: Handler<VoteKickVotedPayload>;
   onVoteKickResult?: Handler<VoteKickResultPayload>;
+  onReadReceiptsUpdate?: Handler<ChatReadUpdatePayload>;
+  onTimChanged?: Handler<ChatTimChangedPayload>;
   // Topic realtime (CHAT_API.md §10.6)
   onTopicCreated?: Handler<TopicCreatedPayload>;
   onTopicUpdated?: Handler<TopicUpdatedPayload>;
@@ -191,6 +199,14 @@ class SocketManager {
       tag('chat:vote_kick:result', p);
       this.handlers.onVoteKickResult?.(p);
     });
+    socket.on('chat:read:update', (p: ChatReadUpdatePayload) => {
+      tag('chat:read:update', p);
+      this.handlers.onReadReceiptsUpdate?.(p);
+    });
+    socket.on('chat:tim:changed', (p: ChatTimChangedPayload) => {
+      tag('chat:tim:changed', p);
+      this.handlers.onTimChanged?.(p);
+    });
     socket.on('chat:topic:created', (p: TopicCreatedPayload) => {
       tag('chat:topic:created', p);
       this.handlers.onTopicCreated?.(p);
@@ -232,12 +248,16 @@ class SocketManager {
       content: payload.content,
       fileId: payload.fileId ?? null,
       sentAt: Date.now(),
+      replyToId: payload.replyToId ?? null,
+      mentions: payload.mentions,
     });
     if (this.socket?.connected) {
       console.log('%c[chat-socket] emit chat:send', 'color:#22d3ee', {
         roomId: payload.roomId,
         content: payload.content,
         clientMsgId,
+        replyToId: payload.replyToId,
+        mentionsCount: payload.mentions?.length ?? 0,
       });
       this.socket.emit('chat:send', { ...payload, clientMsgId });
     }
@@ -258,10 +278,19 @@ class SocketManager {
           roomId: p.roomId,
           content: p.content,
           fileId: p.fileId,
+          replyToId: p.replyToId ?? undefined,
+          mentions: p.mentions,
           clientMsgId,
         });
       }
     }
+  }
+
+  /** Read receipt: báo đã đọc tới createdAt (ISO) của tin mới nhất — debounce ở caller. */
+  sendRead(roomId: string, lastReadAt: string) {
+    if (!this.socket?.connected) return;
+    console.log('%c[chat-socket] emit chat:read', 'color:#22d3ee', { roomId, lastReadAt });
+    this.socket.emit('chat:read', { roomId, lastReadAt });
   }
 
   emit(event: string, payload: unknown) {

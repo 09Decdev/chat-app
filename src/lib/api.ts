@@ -17,6 +17,8 @@ import type {
   DeleteMyTopicResult,
   SearchMessagesPage,
   RoomMediaPage,
+  RoomMembersResult,
+  ChatBookmark,
 } from '@/types/chat';
 
 /**
@@ -208,6 +210,17 @@ function parseMediaPage(body: unknown): RoomMediaPage {
   return { data: arr, nextCursor, members };
 }
 
+/** Parse GET /chat/bookmarks — response {data: ChatBookmark[], nextCursor}. */
+function parseBookmarksPage(obj: unknown): { bookmarks: ChatBookmark[]; nextCursor: string | null } {
+  const o = (obj ?? {}) as Record<string, unknown>;
+  const list = Array.isArray(o.data)
+    ? (o.data as ChatBookmark[])
+    : Array.isArray(obj)
+      ? (obj as ChatBookmark[])
+      : [];
+  return { bookmarks: list, nextCursor: typeof o.nextCursor === 'string' ? o.nextCursor : null };
+}
+
 export const chatApi = {
   login: (req: LoginRequest) => apiPost<LoginResponse>('/auth/login', req),
   enqueue: (topic?: string) =>
@@ -241,6 +254,36 @@ export const chatApi = {
       { params: { ...(cursor ? { cursor } : {}), limit } },
     );
     return parseMediaPage(res.data);
+  },
+
+  // ─── @mention members + Bookmark (tim tin) — 2026-08-18 ───────────────
+  members: async (roomId: string, q?: string) => {
+    const res = await instance.get(`/content-service/chat/rooms/${encodeURIComponent(roomId)}/members`, {
+      params: q ? { q } : {},
+    });
+    return Array.isArray(res.data) ? (res.data as RoomMembersResult) : [];
+  },
+  /** Tim 1 tin (luôn +1, không toggle — user có thể tim nhiều lần). */
+  timMessage: (roomId: string, messageId: string) =>
+    apiPost<{ liked: boolean; likeCount: number }>(
+      `/content-service/chat/messages/${encodeURIComponent(messageId)}/tim`,
+      { roomId },
+    ),
+  /** Bỏ tim 1 lần (DELETE 1 like, count -1). */
+  untimMessage: (roomId: string, messageId: string) =>
+    apiPost<{ liked: boolean; likeCount: number }>(
+      `/content-service/chat/messages/${encodeURIComponent(messageId)}/untim`,
+      { roomId },
+    ),
+  createBookmark: (roomId: string, messageId: string) =>
+    apiPost<{ id: string }>('/content-service/chat/bookmarks', { roomId, messageId }),
+  deleteBookmark: (bookmarkId: string) =>
+    apiDelete<{ deleted: boolean }>(`/content-service/chat/bookmarks/${encodeURIComponent(bookmarkId)}`),
+  listBookmarks: async (cursor?: string | null, limit = 20) => {
+    const res = await instance.get('/content-service/chat/bookmarks', {
+      params: { ...(cursor ? { cursor } : {}), limit },
+    });
+    return parseBookmarksPage(res.data);
   },
 };
 

@@ -15,6 +15,20 @@ export interface ChatMessage {
   fileHeight: number | null;
   moderationStatus: ModerationStatus;
   createdAt: string; // ISO 8601
+
+  // Reply (quote) — snapshot lúc reply; replyToId bất biến, sống sót khi tin gốc bị xóa
+  replyToId?: string | null;
+  replyToContent?: string | null;
+  replyToUserId?: string | null;
+  replyToSenderName?: string | null;
+  // @mention — [userId] được tag (server validate thành viên phòng)
+  mentionedUserIds?: string[];
+  // soft-delete (server trả isDeleted+deletedAt) — dùng để chặn reply vào tin đã xóa
+  isDeleted?: boolean;
+  deletedAt?: string | null;
+  // Tim/like: tổng lượt tim + trạng thái "mình đã tim" (likedByMe chỉ có trong GET history)
+  timCount?: number;
+  likedByMe?: boolean;
 }
 
 /** Trang thai phong cua nguoi dung. */
@@ -29,6 +43,26 @@ export interface RoomMember {
   starCount?: number | null;
 }
 
+/** Read receipt: bản đồ {userId: lastReadAt-ISO} — watermark thời gian (so sánh message.createdAt <= lastReadAt). */
+export type ReadReceipts = Record<string, string>;
+
+/** chat:read:update payload — server broadcast bản đồ đầy đủ. */
+export interface ChatReadUpdatePayload {
+  roomId: string;
+  readReceipts: ReadReceipts;
+  roomEndsAt?: number | null;
+}
+
+/** chat:tim:changed payload (like/unlike 1 tin) — client tự update count/liked trong list. */
+export interface ChatTimChangedPayload {
+  roomId: string;
+  messageId: string;
+  userId: string;
+  liked: boolean;
+  likeCount: number;
+  roomEndsAt?: number | null;
+}
+
 /** Ket qua ghim: matching:found payload. */
 export interface MatchingFoundPayload {
   roomId: string;
@@ -37,6 +71,8 @@ export interface MatchingFoundPayload {
   topics?: TopicDto[];
   /** VÁ-4: absolute room end time (epoch ms) — countdown = roomEndsAt - Date.now(). */
   roomEndsAt?: number | null;
+  /** Read receipt initial state (best-effort — rỗng nếu chưa ai đọc). */
+  readReceipts?: ReadReceipts;
 }
 
 /** Topic cua 1 thanh vien trong phong (CHAT_API.md §10). */
@@ -76,6 +112,10 @@ export interface ChatSendPayload {
   content: string;
   fileId?: string | null;
   clientMsgId?: string;
+  /** Reply: id tin bị reply — server tự resolve snapshot (replyToId bất biến). */
+  replyToId?: string | null;
+  /** @mention: [userId] — server validate từng id là thành viên phòng. */
+  mentions?: string[];
 }
 
 /** chat:message payload (echo kèm clientMsgId khi client gửi kèm — Risk 1). */
@@ -243,3 +283,17 @@ export interface VoteKickResultPayload {
   requiredVotes: number;
   reason?: string;
 }
+
+// ─── Bookmark (tim tin) + @mention members (2026-08-18) ────────────────────
+
+/** Bookmark pointer-only — message null = tin gốc đã bị xóa/purge (hiện placeholder). */
+export interface ChatBookmark {
+  id: string;
+  roomId: string;
+  messageId: string;
+  createdAt: string;
+  message: Pick<ChatMessage, 'id' | 'userId' | 'content' | 'displayName' | 'avatarUrl' | 'fileId' | 'fileType' | 'createdAt'> | null;
+}
+
+/** GET /chat/rooms/:roomId/members — gợi ý @mention. */
+export type RoomMembersResult = RoomMember[];

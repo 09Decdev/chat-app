@@ -26,6 +26,7 @@
     "loadtest:seed-accounts": "tsx loadtest/db/seed-accounts.ts",
     "loadtest:register-pool": "tsx scripts/register-pool-to-gateway.ts",
     "loadtest:join-community": "tsx scripts/join-community.ts",
+    "smoke:chat-features": "tsx loadtest/smoke-chat-features.ts",
     "secret:scan": "gitleaks detect --source . --no-banner --log-opts=--all && gitleaks detect --source . --no-banner --no-git",
     "secret:scan:tree": "gitleaks detect --source . --no-banner --no-git"
   },

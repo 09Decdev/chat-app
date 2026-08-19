@@ -26,6 +26,9 @@ import type {
   TopicCreatedPayload,
   TopicUpdatedPayload,
   TopicDeletedPayload,
+  ChatReadUpdatePayload,
+  ChatTimChangedPayload,
+  ReadReceipts,
 } from '@/types/chat';
 
 export type LocalMessage = ChatMessage & { _local?: 'pending' | 'failed'; clientMsgId?: string };
@@ -69,6 +72,8 @@ interface ChatState {
   pendingTemp: string[];
   typingUsers: string[];
   voteKick: VoteKickState;
+  readReceipts: ReadReceipts; // {userId: lastReadAt-ISO} — watermark thời gian
+  replyTarget: LocalMessage | null; // tin đang được reply (input hiện preview)
 
   // Topic (per-member topic trong phong chat — CHAT_API.md §10)
   topics: TopicDto[];
@@ -84,7 +89,9 @@ interface ChatState {
   startMatching: (topic?: string) => Promise<void>;
   cancelMatching: () => Promise<void>;
   leaveRoom: () => void;
-  sendMessage: (content: string) => void;
+  sendMessage: (content: string, opts?: { mentions?: string[] }) => void;
+  sendRead: (roomId: string, lastReadAt: string) => void;
+  setReplyTarget: (msg: LocalMessage | null) => void;
   emitTyping: () => void;
   enterRoom: () => void;
   loadHistory: () => Promise<void>;
@@ -106,6 +113,7 @@ interface ChatState {
     roomId: string;
     roomEndsAt?: number | null;
     members?: { userId: string; displayName?: string | null; avatarUrl?: string | null }[];
+    readReceipts?: ReadReceipts;
   }) => void;
   onMessage: (p: ChatMessagePayload) => void;
   onTyping: (p: TypingPayload) => void;
@@ -118,6 +126,10 @@ interface ChatState {
   onVoteKickStarted: (p: VoteKickStartedPayload) => void;
   onVoteKickVoted: (p: VoteKickVotedPayload) => void;
   onVoteKickResult: (p: VoteKickResultPayload) => void;
+  onReadReceiptsUpdate: (p: ChatReadUpdatePayload) => void;
+  onTimChanged: (p: ChatTimChangedPayload) => void;
+  timMessage: (messageId: string) => void;
+  untimMessage: (messageId: string) => void;
   onTopicCreated: (p: TopicCreatedPayload) => void;
   onTopicUpdated: (p: TopicUpdatedPayload) => void;
   onTopicDeleted: (p: TopicDeletedPayload) => void;
@@ -175,6 +187,8 @@ const idleState = {
   pendingTemp: [] as string[],
   typingUsers: [] as string[],
   voteKick: idleVoteKick,
+  readReceipts: {} as ReadReceipts,
+  replyTarget: null as LocalMessage | null,
   topics: [] as TopicDto[],
   topicDraft: '',
   topicSheetOpen: false,
@@ -357,7 +371,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     toast('Ban da roi phong. Khoa 15 phut truoc khi ghép lai.', { icon: '🔒' });
   },
 
-  sendMessage: (content) => {
+  sendMessage: (content, opts) => {
     const s = get();
     const me = meId();
     const roomId = s.roomId;
@@ -369,8 +383,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       toast.warning('Dang gui qua nhanh, vui long cho 2 giay.');
       return;
     }
+    // Reply: id tin đang trả lời — server tự resolve snapshot (replyToId bất biến).
+    // Tin gốc đã bị xóa (isDeleted) → bỏ reply, gửi thường (đúng yêu cầu product).
+    const target = s.replyTarget;
+    const replyToId = target && !target.isDeleted && target.id ? target.id : undefined;
+    const payload = {
+      roomId,
+      content: trimmed,
+      replyToId,
+      mentions: opts?.mentions,
+    };
     const tempId = `local:${now}:${Math.floor(now / 1000) % 1000}`;
-    const clientMsgId = socketManager.sendChatMessage({ roomId, content: trimmed });
+    const clientMsgId = socketManager.sendChatMessage(payload);
     const tempMsg: LocalMessage = {
       id: tempId,
       roomId,
@@ -384,6 +408,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       fileHeight: null,
       moderationStatus: 'ACTIVE',
       createdAt: new Date(now).toISOString(),
+      replyToId,
+      replyToContent: target?.content ?? undefined,
+      replyToUserId: target?.userId ?? undefined,
+      replyToSenderName: target?.displayName ?? undefined,
+      mentionedUserIds: opts?.mentions,
       _local: 'pending',
       clientMsgId, // khớp echo (Risk 1) — onMessage replace đúng temp, không quét theo vị trí
     };
@@ -391,6 +420,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: dedupeById([...st.messages, tempMsg]),
       lastSentAt: now,
       pendingTemp: [...st.pendingTemp, tempId],
+      replyTarget: null,
     }));
     const timer = setTimeout(() => {
       pendingTempTimers.delete(tempId);
@@ -407,6 +437,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }, 10000);
     pendingTempTimers.set(tempId, timer);
   },
+
+  sendRead: (roomId, lastReadAt) => {
+    if (!roomId) return;
+    socketManager.sendRead(roomId, lastReadAt);
+  },
+
+  setReplyTarget: (msg) => set({ replyTarget: msg }),
 
   loadHistory: async () => {
     const roomId = get().roomId;
@@ -494,9 +531,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ ...idleState, loadingHistory: false, loadingOlder: false, cooldownUntil: null, lastSentAt: null });
   },
 
-  onMatchingFound: ({ roomId, members, topics, roomEndsAt }) => {
+  onMatchingFound: ({ roomId, members, topics, roomEndsAt, readReceipts }) => {
     const me = meId();
-    console.log('%c[chat] matching:found', 'color:#22d3ee', { roomId, membersCount: members.length, members, topicsCount: topics?.length ?? 0 });
+    console.log('%c[chat] matching:found', 'color:#22d3ee', { roomId, membersCount: members.length, members, topicsCount: topics?.length ?? 0, readReceipts });
     matchingFlag.set(false);
     stopQueueCountPoll();
     clearAllTyping();
@@ -507,6 +544,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       roomId,
       roomEndsAt: roomEndsAt ?? null,
       joined: false,
+      readReceipts: readReceipts ?? {},
+      replyTarget: null,
       members: members.map((m) => ({
         userId: m.userId,
         displayName: m.displayName ?? null,
@@ -531,14 +570,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  onJoined: ({ roomId, members, roomEndsAt }) => {
-    console.log('%c[chat] chat:joined', 'color:#22d3ee', { roomId, membersCount: members?.length, members });
+  onJoined: ({ roomId, members, roomEndsAt, readReceipts }) => {
+    console.log('%c[chat] chat:joined', 'color:#22d3ee', { roomId, membersCount: members?.length, members, readReceipts });
     if (get().roomId !== roomId) return;
     const me = meId();
     set((st) => ({
       joined: true,
       // VÁ-4: chat:joined có thể mang roomEndsAt (gateway đọc expiresAt) — làm mới countdown phòng
       ...(typeof roomEndsAt === 'number' ? { roomEndsAt } : {}),
+      ...(readReceipts ? { readReceipts } : {}),
       members:
         members && members.length
           ? members.map((m) => ({
@@ -898,6 +938,104 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ topicSheetOpen: false, topicDraft: '', topicSaving: false, topicError: null });
     }
   },
+
+  // ─── Read receipt (chat:read:update — watermark theo thời gian) ──────
+  onReadReceiptsUpdate: ({ readReceipts }) => {
+    if (!readReceipts) return;
+    // Server gửi bản đồ đầy đủ → replace (tối giản; merge cũng an toàn).
+    set({ readReceipts });
+  },
+
+  // ─── Tim/like (chat:tim:changed — delta từ server) ───────────────────
+  onTimChanged: ({ messageId, userId, liked, likeCount }) => {
+    const me = meId();
+    set((st) => {
+      const msg = st.messages.find((m) => m.id === messageId);
+      if (!msg) return st;
+      // userId trùng mình → người toggle là mình → update likedByMe (phòng khi response mất);
+      // ngược lại chỉ đổi count. (bubble cũng tự update local sau toggle API.)
+      return {
+        messages: st.messages.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                timCount: likeCount,
+                // likedByMe đúng nhất khi server echo chính mình
+                ...(userId === me ? { likedByMe: liked } : {}),
+              }
+            : m,
+        ),
+      };
+    });
+  },
+
+  timMessage: (messageId) => {
+    const s = get();
+    const roomId = s.roomId;
+    if (!roomId || !messageId) return;
+    // Optimistic: luôn +1 (tim là cộng dồn, không toggle)
+    set((st) => ({
+      messages: st.messages.map((m) =>
+        m.id === messageId
+          ? { ...m, likedByMe: true, timCount: (m.timCount ?? 0) + 1 }
+          : m,
+      ),
+    }));
+    void chatApi
+      .timMessage(roomId, messageId)
+      .then(({ likeCount }) => {
+        set((st) => ({
+          messages: st.messages.map((m) =>
+            m.id === messageId ? { ...m, likedByMe: true, timCount: likeCount } : m,
+          ),
+        }));
+      })
+      .catch(() => {
+        // Rollback optimistic khi API lỗi
+        set((st) => ({
+          messages: st.messages.map((m) =>
+            m.id === messageId
+              ? { ...m, likedByMe: false, timCount: Math.max((m.timCount ?? 0) - 1, 0) }
+              : m,
+          ),
+        }));
+        toast.error('Tim that bai, thu lai.');
+      });
+  },
+
+  untimMessage: (messageId) => {
+    const s = get();
+    const roomId = s.roomId;
+    if (!roomId || !messageId) return;
+    // Optimistic: giảm 1
+    set((st) => ({
+      messages: st.messages.map((m) =>
+        m.id === messageId
+          ? { ...m, timCount: Math.max((m.timCount ?? 0) - 1, 0) }
+          : m,
+      ),
+    }));
+    void chatApi
+      .untimMessage(roomId, messageId)
+      .then(({ liked, likeCount }) => {
+        set((st) => ({
+          messages: st.messages.map((m) =>
+            m.id === messageId ? { ...m, likedByMe: liked, timCount: likeCount } : m,
+          ),
+        }));
+      })
+      .catch(() => {
+        // Rollback
+        set((st) => ({
+          messages: st.messages.map((m) =>
+            m.id === messageId
+              ? { ...m, timCount: (m.timCount ?? 0) + 1, likedByMe: true }
+              : m,
+          ),
+        }));
+        toast.error('Bo tim that bai.');
+      });
+  },
 }));
 
 /** Gan socket handlers + connect (goi tu App khi co accessToken). */
@@ -968,6 +1106,8 @@ function buildHandlers(): SocketHandlers {
     onVoteKickStarted: (p) => useChatStore.getState().onVoteKickStarted(p),
     onVoteKickVoted: (p) => useChatStore.getState().onVoteKickVoted(p),
     onVoteKickResult: (p) => useChatStore.getState().onVoteKickResult(p),
+    onReadReceiptsUpdate: (p) => useChatStore.getState().onReadReceiptsUpdate(p),
+    onTimChanged: (p) => useChatStore.getState().onTimChanged(p),
     onTopicCreated: (p) => useChatStore.getState().onTopicCreated(p),
     onTopicUpdated: (p) => useChatStore.getState().onTopicUpdated(p),
     onTopicDeleted: (p) => useChatStore.getState().onTopicDeleted(p),

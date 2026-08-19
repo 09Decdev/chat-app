@@ -4,7 +4,7 @@
  */
 
 const gatewayUrl = (
-  import.meta.env.VITE_GATEWAY_URL ?? "http://192.168.0.165:3000"
+  import.meta.env.VITE_GATEWAY_URL ?? "http://localhost:3000"
 ).replace(/\/+$/, "");
 
 export const env = {
