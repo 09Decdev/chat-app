@@ -16,8 +16,8 @@ export const MessageBubble = memo(function MessageBubble({ message, showHeader }
   const me = useAuthStore((s) => s.user?.id);
   const readReceipts = useChatStore((s) => s.readReceipts);
   const setReplyTarget = useChatStore((s) => s.setReplyTarget);
-  const timMessage = useChatStore((s) => s.timMessage);
-  const untimMessage = useChatStore((s) => s.untimMessage);
+  const likeMessage = useChatStore((s) => s.likeMessage);
+  const unlikeMessage = useChatStore((s) => s.unlikeMessage);
 
   const isMe = message.userId === me;
   const name = isMe && !message.displayName ? 'Ban' : message.displayName ?? 'Thanh vien';
@@ -80,7 +80,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showHeader }
             <button
               type="button"
               title="Tim tin nhan"
-              onClick={() => timMessage(message.id)}
+              onClick={() => likeMessage(message.id)}
               className={cn(
                 'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] hover:bg-accent',
                 liked ? 'text-rose-500 hover:text-rose-600' : 'text-muted-foreground hover:text-foreground',
@@ -92,7 +92,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showHeader }
               <button
                 type="button"
                 title="Bo tim"
-                onClick={() => untimMessage(message.id)}
+                onClick={() => unlikeMessage(message.id)}
                 className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               >
                 <Heart className="h-3 w-3" /> Bo tim

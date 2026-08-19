@@ -50,6 +50,13 @@ export type ReadReceipts = Record<string, string>;
 export interface ChatReadUpdatePayload {
   roomId: string;
   readReceipts: ReadReceipts;
+  /** Enrich: tên + avatar cho từng user (để client render avatar tick, không cần tra member list). */
+  readReceiptDetails?: Array<{
+    userId: string;
+    lastReadAt: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+  }>;
   roomEndsAt?: number | null;
 }
 

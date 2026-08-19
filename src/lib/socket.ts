@@ -203,8 +203,8 @@ class SocketManager {
       tag('chat:read:update', p);
       this.handlers.onReadReceiptsUpdate?.(p);
     });
-    socket.on('chat:tim:changed', (p: ChatTimChangedPayload) => {
-      tag('chat:tim:changed', p);
+    socket.on('chat:like:changed', (p: ChatTimChangedPayload) => {
+      tag('chat:like:changed', p);
       this.handlers.onTimChanged?.(p);
     });
     socket.on('chat:topic:created', (p: TopicCreatedPayload) => {

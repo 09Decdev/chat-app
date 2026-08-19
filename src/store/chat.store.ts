@@ -128,8 +128,8 @@ interface ChatState {
   onVoteKickResult: (p: VoteKickResultPayload) => void;
   onReadReceiptsUpdate: (p: ChatReadUpdatePayload) => void;
   onTimChanged: (p: ChatTimChangedPayload) => void;
-  timMessage: (messageId: string) => void;
-  untimMessage: (messageId: string) => void;
+  likeMessage: (messageId: string) => void;
+  unlikeMessage: (messageId: string) => void;
   onTopicCreated: (p: TopicCreatedPayload) => void;
   onTopicUpdated: (p: TopicUpdatedPayload) => void;
   onTopicDeleted: (p: TopicDeletedPayload) => void;
@@ -969,7 +969,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
-  timMessage: (messageId) => {
+  likeMessage: (messageId) => {
     const s = get();
     const roomId = s.roomId;
     if (!roomId || !messageId) return;
@@ -982,7 +982,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     }));
     void chatApi
-      .timMessage(roomId, messageId)
+      .likeMessage(roomId, messageId)
       .then(({ likeCount }) => {
         set((st) => ({
           messages: st.messages.map((m) =>
@@ -1003,7 +1003,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
   },
 
-  untimMessage: (messageId) => {
+  unlikeMessage: (messageId) => {
     const s = get();
     const roomId = s.roomId;
     if (!roomId || !messageId) return;
@@ -1016,7 +1016,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     }));
     void chatApi
-      .untimMessage(roomId, messageId)
+      .unlikeMessage(roomId, messageId)
       .then(({ liked, likeCount }) => {
         set((st) => ({
           messages: st.messages.map((m) =>

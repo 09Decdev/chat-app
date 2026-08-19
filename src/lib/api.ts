@@ -263,16 +263,16 @@ export const chatApi = {
     });
     return Array.isArray(res.data) ? (res.data as RoomMembersResult) : [];
   },
-  /** Tim 1 tin (luôn +1, không toggle — user có thể tim nhiều lần). */
-  timMessage: (roomId: string, messageId: string) =>
+  /** Like 1 tin (luôn +1, upsert count — user có thể like nhiều lần). */
+  likeMessage: (roomId: string, messageId: string) =>
     apiPost<{ liked: boolean; likeCount: number }>(
-      `/content-service/chat/messages/${encodeURIComponent(messageId)}/tim`,
+      `/content-service/chat/messages/${encodeURIComponent(messageId)}/like`,
       { roomId },
     ),
-  /** Bỏ tim 1 lần (DELETE 1 like, count -1). */
-  untimMessage: (roomId: string, messageId: string) =>
+  /** Unlike 1 tin (xóa hết like của user, giảm count tương ứng). */
+  unlikeMessage: (roomId: string, messageId: string) =>
     apiPost<{ liked: boolean; likeCount: number }>(
-      `/content-service/chat/messages/${encodeURIComponent(messageId)}/untim`,
+      `/content-service/chat/messages/${encodeURIComponent(messageId)}/unlike`,
       { roomId },
     ),
   createBookmark: (roomId: string, messageId: string) =>

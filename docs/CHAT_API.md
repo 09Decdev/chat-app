@@ -118,10 +118,10 @@ GET /chat/rooms/:roomId/members?q=<prefix>
 - `starCount` = Sao Uy Tín (nullable — fail-open khi user-community không trả).
 - **Khuyến nghị client:** dùng luôn member có trong `chat:joined` để filter local (không cần gọi API từng phím); API này là nguồn chính thống + dùng khi cần search.
 
-### 2.2 Tim tin nhắn (luôn +1, user có thể tim nhiều lần)
+### 2.2 Like tin nhắn (luôn +1, user có thể like nhiều lần)
 
 ```
-POST /chat/messages/:messageId/tim
+POST /chat/messages/:messageId/like
 Content-Type: application/json
 ```
 
@@ -132,17 +132,17 @@ Content-Type: application/json
 
 **Gate:** phải là thành viên phòng (403); tin phải tồn tại + cùng room + chưa bị xóa (404 `CHAT_MESSAGE_NOT_FOUND`).
 
-**Không toggle:** mỗi lần gọi = +1, bất kể user đã tim trước đó chưa. Bảng `chat_message_bookmarks` không có unique constraint — 1 user có thể có nhiều row cho 1 tin.
+**Không toggle:** mỗi lần gọi = +1, bất kể user đã like trước đó chưa. UPSERT trên `chat_message_bookmarks` — 1 row/user/tin, cột `count` tích lũy.
 
 **Response 200**
 ```jsonc
 { "data": { "liked": true, "likeCount": 3 } }
 ```
 
-### 2.3 Bỏ tim 1 lần (DELETE 1 like, count -1)
+### 2.3 Unlike (xóa hết like của user, giảm count tương ứng)
 
 ```
-POST /chat/messages/:messageId/untim
+POST /chat/messages/:messageId/unlike
 Content-Type: application/json
 ```
 
@@ -151,17 +151,18 @@ Content-Type: application/json
 { "roomId": "r2662-..." }
 ```
 
-**Gate:** giống tim.
+**Gate:** giống like.
 
-**Semantics:** xóa 1 like (bất kỳ, cũ nhất) của user này cho tin này. Nếu không còn like nào → `{ liked: false, likeCount }` (no-op, count giữ nguyên).
+**Semantics:** DELETE row duy nhất cho (userId, messageId), giảm `timCount` bằng đúng `count` (số lần user đã like). Nếu chưa like → `{ liked: false, likeCount }` (no-op, count giữ nguyên).
 
 **Response 200**
 ```jsonc
 { "data": { "liked": false, "likeCount": 2 } }
-// liked = false khi user đã bỏ hết like của mình; true nếu vẫn còn ≥1 like
 ```
 
-**Tối ưu backend:** cả `tim` và `untim` đều dùng **transaction atomic**: INSERT/DELETE 1 like + `increment/decrement ChatMessage.timCount` trong cùng transaction (DB-side `UPDATE ... SET timCount = timCount +/- 1` — không đọc-then-ghi, không race). `timCount` denormalized trên từng tin → đọc history/search **không cần COUNT JOIN**. Sau mỗi thao tác server **broadcast `chat:tim:changed`** cả phòng để client tự update count/liked (không refresh history). `likedByMe` trong history = `COUNT(like) > 0` cho user đó.
+**Tối ưu backend:** cả `like` và `unlike` đều dùng **transaction atomic**: UPSERT + increment / DELETE + decrement, DB-side `UPDATE ... SET timCount = timCount +/- 1`. `timCount` denormalized → đọc history **không cần COUNT JOIN**. Sau mỗi thao tác server **broadcast `chat:like:changed`** cả phòng. `likedByMe` trong history = `COUNT > 0` (unique nên chỉ 1 row).
+
+### 2.4 Tạo bookmark (lưu tin giữ list — bổ sung)
 
 ### 2.4 Tạo bookmark (lưu tin giữ list — bổ sung)
 
@@ -298,14 +299,21 @@ Quy tắc:
 {
   "roomId": "r2662-...",
   "readReceipts": {
-    "user-bbbb": "2026-08-18T09:00:01.000Z"
+    "user-bbbb": "2026-08-19T09:00:01.000Z"
   },
-  "roomEndsAt": 1766102400000
+  "readReceiptDetails": [
+    {
+      "userId": "user-bbbb",
+      "lastReadAt": "2026-08-19T09:00:01.000Z",
+      "displayName": "Nguyễn Văn B",
+      "avatarUrl": "https://cdn.mayogu.test/avatars/bbbb.jpg"
+    }
+  ]
 }
 ```
 
-- Bản đồ **đầy đủ** {`userId`: `lastReadAt`} — client **replace state** (hoặc merge per-user, an toàn cả 2).
-- Client tính "đã xem" cho tin của mình: tồn tại `userId != me` với `lastReadAt >= message.createdAt`.
+- `readReceipts`: bản đồ **đầy đủ** `{userId: lastReadAt}` — client dùng để so sánh `message.createdAt <= lastReadAt` tính tick `✓✓`.
+- `readReceiptDetails`: mảng enrich tên + avatar cho từng user — client render avatar tick mà **không cần lookup member list** (fail-open: rỗng nếu user-community không trả kịp, client fallback dùng `readReceipts` + member list có sẵn).
 - Có thể nhận nhiều event trong 1 giây nếu nhiều người đọc; payload nhỏ (≤6 member).
 
 ### 3.2 chat:joined — initial state (đã bổ sung readReceipts)
@@ -334,7 +342,7 @@ Quy tắc:
 | `chat:message:updated` | nhận | tin bị edit |
 | `chat:message:deleted` | nhận | tin bị soft-delete |
 | `chat:read:update` | nhận | cập nhật read receipt |
-| `chat:tim:changed` | nhận | 1 tin vừa tim/bỏ tim (delta {messageId, userId, liked, likeCount}) |
+| `chat:like:changed` | nhận | 1 tin vừa like/unlike (delta {messageId, userId, liked, likeCount}) |
 | `chat:joined` | nhận | ack join + members + readReceipts initial |
 | `chat:error` | nhận | `{code, message}` (FORBIDDEN, SEND_FAILED, AUTH_STALE…) |
 
@@ -357,13 +365,13 @@ Quy tắc:
 5. Server validate member → persist `mentionedUserIds`.
 6. Client của người bị tag: `mentionedUserIds.contains(myId)` → highlight bubble.
 
-### 4.3 Tim tin nhắn (like — cộng dồn, có bỏ tim)
-1. Bấm ❤️ trên bubble → `POST /chat/messages/:id/tim {roomId}` → **luôn +1**, không toggle.
-2. Khi `likedByMe` = true → xuất hiện nút **"Bỏ tim"** → `POST /chat/messages/:id/untim {roomId}` → **-1** (xóa 1 like cũ nhất).
-3. Server: gate member + message còn tồn tại → **transaction atomically**: INSERT/DELETE 1 like + incr/decr `timCount` → trả `{liked, likeCount}`.
-4. Client **optimistic** cập nhật count ngay; server **broadcast `chat:tim:changed`** → mọi người trong phòng update count/liked (không refresh history).
-5. History (`GET /chat/rooms/:id/messages`) trả kèm `timCount` + `likedByMe` (gắn theo user đang xem, 1 query batch với `distinct: [messageId]`).
-6. `POST/DELETE/GET /chat/bookmarks` giữ làm danh sách cá nhân (bổ sung — không dùng cho tim).
+### 4.3 Like (cộng dồn, có unlike)
+1. Bấm ❤️ trên bubble → `POST /chat/messages/:id/like {roomId}` → **luôn +1** (UPSERT count).
+2. Khi `likedByMe` = true → xuất hiện nút **"Unlike"** → `POST /chat/messages/:id/unlike {roomId}` → **xóa hết like** của user, giảm count tương ứng.
+3. Server: gate member + message còn tồn tại → **transaction atomic**: UPSERT + increment / DELETE + decrement `timCount` → trả `{liked, likeCount}`.
+4. Client **optimistic** cập nhật count ngay; server **broadcast `chat:like:changed`** → mọi người trong phòng update count/liked (không refresh history).
+5. History (`GET /chat/rooms/:id/messages`) trả kèm `timCount` + `likedByMe` (1 row/user/tin nhờ unique).
+6. `POST/DELETE/GET /chat/bookmarks` giữ làm danh sách cá nhân (bổ sung — không dùng cho like).
 
 ### 4.4 Read receipt
 1. Client nhận tin mới / user ở đáy → debounce 1.2s → `chat:read {roomId, lastReadAt: <createdAt tin mới nhất>}`.
