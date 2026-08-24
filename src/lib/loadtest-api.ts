@@ -26,6 +26,12 @@ import type {
   UserSortDir,
   UserSortField,
   UsersResponse,
+  TicketRegisterRequest,
+  TicketRegisterResult,
+  LoadtestPool,
+  TicketSourceCommunity,
+  TicketSourceEvent,
+  TicketSourceTicketType,
 } from '@/types/loadtest';
 
 const client = axios.create({ baseURL: '/api/loadtest', timeout: 20000 });
@@ -233,10 +239,34 @@ export const loadtestApi = {
   },
   pools: async () => {
     const res = await client.get('/pools');
-    return unwrap<{ pools: unknown[] }>(res.data);
+    return unwrap<{ pools: LoadtestPool[] }>(res.data);
   },
   cleanup: async (runId: string, dryRun = true) => {
     const res = await client.post('/cleanup', { runId, dryRun });
     return unwrap<CleanupResult>(res.data);
+  },
+
+  // ── Tool đăng ký vé (ticket-register) ──
+  // Chạy đồng bộ ở server — run có thể mất vài chục giây (mỗi user: login + POST) → timeout 5 phút.
+  ticketRegister: async (req: TicketRegisterRequest) => {
+    const res = await client.post('/ticket-register', req, { timeout: 300_000 });
+    return unwrap<TicketRegisterResult>(res.data);
+  },
+
+  // ── Nguồn dữ liệu dropdown ticket-register (GET /ticket-source/*) ──
+  /** Danh sách cộng đồng mà explorer (account đầu pool) nhìn thấy. */
+  ticketSourceCommunities: async (poolFile?: string) => {
+    const res = await client.get('/ticket-source/communities', { params: poolFile ? { poolFile } : undefined });
+    return unwrap<{ communities: TicketSourceCommunity[]; gateway: string }>(res.data);
+  },
+  /** Event đang mở đăng ký của 1 community. */
+  ticketSourceEvents: async (communityId: string, poolFile?: string) => {
+    const res = await client.get('/ticket-source/events', { params: { communityId, ...(poolFile ? { poolFile } : {}) } });
+    return unwrap<{ events: TicketSourceEvent[] }>(res.data);
+  },
+  /** Ticket type của 1 event. */
+  ticketSourceTicketTypes: async (eventId: string, poolFile?: string) => {
+    const res = await client.get('/ticket-source/ticket-types', { params: { eventId, ...(poolFile ? { poolFile } : {}) } });
+    return unwrap<{ ticketTypes: TicketSourceTicketType[] }>(res.data);
   },
 };

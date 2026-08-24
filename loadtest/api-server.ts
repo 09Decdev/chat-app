@@ -37,6 +37,8 @@ import { authHandlers } from './routes/auth';
 import { runHandlers } from './routes/run';
 import { historyHandlers } from './routes/history';
 import { settingsHandlers } from './routes/settings';
+import { ticketHandlers } from './routes/tickets';
+import { ticketSourceHandlers } from './routes/ticket-source';
 
 type RouteHandler = (ctx: RouteCtx, req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>;
 
@@ -92,6 +94,12 @@ const ROUTES: Route[] = [
   route('GET', '/api/loadtest/logs', runHandlers.logs, { auth: true }),
   route('GET', '/api/loadtest/report', runHandlers.report, { auth: true }),
   route('GET', '/api/loadtest/report/export', runHandlers.reportExport, { auth: true }),
+  // Tool đăng ký vé — chạy in-process qua runTicketRegistration (routes/tickets.ts)
+  route('POST', '/api/loadtest/ticket-register', ticketHandlers.run, { auth: true, rate: 'write' }),
+  // Nguồn dữ liệu dropdown (routes/ticket-source.ts) — GET read-only, auth Bearer, KHÔNG rate.
+  route('GET', '/api/loadtest/ticket-source/communities', ticketSourceHandlers.communities, { auth: true }),
+  route('GET', '/api/loadtest/ticket-source/events', ticketSourceHandlers.events, { auth: true }),
+  route('GET', '/api/loadtest/ticket-source/ticket-types', ticketSourceHandlers.ticketTypes, { auth: true }),
   // Settings
   route('GET', '/api/loadtest/config', settingsHandlers.config, { auth: true }),
   route('GET', '/api/loadtest/allowlist', settingsHandlers.allowlistGet, { auth: true }),

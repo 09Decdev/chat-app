@@ -45,5 +45,6 @@ export const routes = {
   loadtestLogin: "/loadtest/login",
   loadtestRegister: "/loadtest/register",
   loadtestHistory: "/loadtest/history",
+  loadtestTicketRegister: "/loadtest/ticket-register",
   feed: "/feed",
 } as const;

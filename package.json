@@ -28,7 +28,8 @@
     "loadtest:join-community": "tsx scripts/join-community.ts",
     "smoke:chat-features": "tsx loadtest/smoke-chat-features.ts",
     "secret:scan": "gitleaks detect --source . --no-banner --log-opts=--all && gitleaks detect --source . --no-banner --no-git",
-    "secret:scan:tree": "gitleaks detect --source . --no-banner --no-git"
+    "secret:scan:tree": "gitleaks detect --source . --no-banner --no-git",
+    "loadtest:ticket-register": "tsx loadtest/ticket-register.ts"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.3",

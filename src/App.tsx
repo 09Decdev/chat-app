@@ -27,6 +27,7 @@ const HistoryPage = lazy(() => import('@/pages/loadtest/HistoryPage'));
 const RunDetailPage = lazy(() => import('@/pages/loadtest/RunDetailPage'));
 const ComparePage = lazy(() => import('@/pages/loadtest/ComparePage'));
 const ImpersonationConsolePage = lazy(() => import('@/pages/loadtest/ImpersonationConsolePage'));
+const TicketRegisterPage = lazy(() => import('@/pages/loadtest/TicketRegisterPage'));
 const FeedTestPage = lazy(() => import('@/pages/feed/FeedTestPage'));
 const HomePage = lazy(() => import('@/pages/HomePage'));
 
@@ -90,6 +91,7 @@ export default function App() {
                   <Route path="history/:runId" element={<RunDetailPage />} />
                   <Route path="compare" element={<ComparePage />} />
                   <Route path="console" element={<ImpersonationConsolePage />} />
+                  <Route path="ticket-register" element={<TicketRegisterPage />} />
                 </Route>
               </Route>
               <Route path="*" element={<Navigate to={routes.home} replace />} />

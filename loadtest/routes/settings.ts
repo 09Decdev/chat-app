@@ -28,6 +28,8 @@ export const settingsHandlers = {
       reportsDir: ctx.env.reportsDir,
       // D-17: frontend ẩn CTA đăng ký khi false (additive — không phá toApiError).
       allowRegister: ctx.env.allowRegister,
+      // pool file mặc định của server (LOADTEST_POOL_FILE) — frontend dùng làm "pool mặc định".
+      poolFile: ctx.env.poolFile,
     });
   },
 
@@ -62,12 +64,18 @@ export const settingsHandlers = {
             failed: pl.failed,
             importedFromFile: pl.importedFromFile,
             mtimeMs: pl.createdAt,
+            // Đường dẫn tuyệt đối file pool trên server — frontend chọn pool → gửi thẳng vào ticket-register.
+            poolFile: poolPath(ctx.env.dataDir, pl.poolId),
           })),
         });
       }
     }
     // fallback: file JSON khi DB trống/chưa import (PRD §2.5)
-    return ctx.ok(res, { pools: listPools(ctx.env.dataDir) });
+    const filePools = listPools(ctx.env.dataDir).map((p) => ({
+      ...p,
+      poolFile: poolPath(ctx.env.dataDir, p.runId),
+    }));
+    return ctx.ok(res, { pools: filePools });
   },
 
   cleanup: async (ctx: RouteCtx, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {

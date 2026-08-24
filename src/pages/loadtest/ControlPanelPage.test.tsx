@@ -47,6 +47,7 @@ function makeConfig(gatewayUrl: string, allowlist: string[]): LoadTestConfig {
     hasRedisConfigured: true,
     reportsDir: './docs/loadtest-reports',
     allowRegister: false,
+    poolFile: '',
   };
 }
 

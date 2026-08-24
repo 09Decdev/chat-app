@@ -171,6 +171,8 @@ export interface LoadTestConfig {
   reportsDir: string;
   /** Register gate (T-06, SEC-6) — false → frontend ẩn CTA đăng ký (D-17). */
   allowRegister: boolean;
+  /** Pool file mặc định của server (LOADTEST_POOL_FILE — có thể rỗng). */
+  poolFile: string;
 }
 
 /** Tick 1s tổng hợp — UI-SPEC §4.1. */
@@ -376,4 +378,172 @@ export interface LoadtestLogEvent {
   ts: number;
   level: string;
   msg: string;
+}
+
+// ─── Ticket Registration (đăng ký vé — POST /api/loadtest/ticket-register) ───
+// Khớp contract loadtest/ticket-register.ts (RunSummary / AttackOutcome / routes/tickets.ts).
+
+/** Outcome 1 account khi tấn công đăng ký vé — khớp AttackOutcome (ticket-register.ts). */
+export type TicketOutcome =
+  | 'REGISTERED'
+  | 'QUEUED'
+  | 'RATE_LIMITED'
+  | 'CONFLICT'
+  | 'FORBIDDEN'
+  | 'BAD_REQUEST'
+  | 'NOT_FOUND'
+  | 'SERVER'
+  | 'LOGIN_FAIL'
+  | 'NETWORK'
+  | 'OTHER';
+
+/** Body POST /api/loadtest/ticket-register — trường thiếu → fallback env server. */
+export interface TicketRegisterRequest {
+  poolFile?: string;
+  gateway?: string;
+  communityId?: string;
+  /** Ghim thẳng event/ticket type — bỏ trống → server tự tìm event mở đăng ký. */
+  eventId?: string;
+  ticketTypeId?: string;
+  /** true → server quét MỌI event mở đăng ký, mỗi event 1 ticket type, chia đều pool account. */
+  allEvents?: boolean;
+  quantity: number;
+  concurrency: number;
+  /** undefined = tất cả account trong pool. */
+  limit?: number;
+  verifyMembers: boolean;
+  minSuccessRate: number;
+}
+
+/** Latency tổng hợp (ms) — khớp RunSummary.latencyMs. */
+export interface TicketLatency {
+  avg: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+}
+
+/** Summary 1 event trong chế độ allEvents — khớp EventRunSummary (loadtest/ticket-register.ts). */
+export interface TicketEventRunSummary {
+  eventId: string;
+  eventTitle: string;
+  ticketTypeId: string;
+  ticketTypeName: string;
+  participants: number;
+  durationMs: number;
+  results: Record<TicketOutcome, number>;
+  byStatus: Record<string, number>;
+  errors: Record<string, number>;
+  actionOk: number;
+  actionFail: number;
+  successRate: number;
+  latencyMs: TicketLatency;
+}
+
+/** Summary 1 run ticket-register — khớp RunSummary (loadtest/ticket-register.ts). */
+export interface TicketRegisterSummary {
+  gateway: string;
+  communityId: string | null;
+  eventId: string | null;
+  eventTitle: string | null;
+  ticketTypeId: string | null;
+  ticketTypeName: string | null;
+  quantity: number;
+  participants: number;
+  startedAt: number;
+  durationMs: number;
+  results: Record<TicketOutcome, number>;
+  byStatus: Record<string, number>;
+  errors: Record<string, number>;
+  /** REGISTERED + QUEUED. */
+  actionOk: number;
+  actionFail: number;
+  successRate: number;
+  latencyMs: TicketLatency;
+  /** Phân tích theo từng event — luôn có khi allEvents (và cả chế độ đơn). */
+  events?: TicketEventRunSummary[];
+}
+
+/** Response POST /api/loadtest/ticket-register. */
+export interface TicketRegisterResult {
+  summary: TicketRegisterSummary;
+  /** 0=đạt min-success-rate · 1=không đạt · 2=config/discovery lỗi (lỗi trả qua HTTP 400). */
+  exitCode: 0 | 1 | 2;
+  pass: boolean;
+}
+
+/** Nhãn tiếng Việt cho outcome — hiển thị ở TicketRegisterPage. */
+export const TICKET_OUTCOME_LABELS: Record<TicketOutcome, string> = {
+  REGISTERED: 'Đã đăng ký (201)',
+  QUEUED: 'Trong hàng đợi (202)',
+  CONFLICT: 'Xung đột (409)',
+  FORBIDDEN: 'Bị từ chối (403)',
+  BAD_REQUEST: 'Lỗi request (400)',
+  NOT_FOUND: 'Không tìm thấy (404)',
+  RATE_LIMITED: 'Rate-limit (429)',
+  SERVER: 'Lỗi server (5xx)',
+  LOGIN_FAIL: 'Login thất bại',
+  NETWORK: 'Network/timeout',
+  OTHER: 'Khác',
+};
+
+/** Thứ tự hiển thị outcome (giống thứ tự in của CLI). */
+export const TICKET_OUTCOME_ORDER: TicketOutcome[] = [
+  'REGISTERED',
+  'QUEUED',
+  'CONFLICT',
+  'FORBIDDEN',
+  'BAD_REQUEST',
+  'NOT_FOUND',
+  'RATE_LIMITED',
+  'SERVER',
+  'NETWORK',
+  'LOGIN_FAIL',
+  'OTHER',
+];
+
+// ─── Nguồn dữ liệu dropdown TicketRegisterPage (GET /ticket-source/* + /pools + /config) ───
+// Khớp loadtest/routes/ticket-source.ts + settings.ts (pools endpoint).
+
+/** Row GET /api/loadtest/pools — pool dùng được cho ticket-register. */
+export interface LoadtestPool {
+  runId: string;
+  targetUsers: number;
+  gatewayUrl: string;
+  accountCount?: number;
+  registered?: number;
+  loggedIn?: number;
+  failed?: number;
+  importedFromFile?: boolean;
+  mtimeMs: number;
+  /** Đường dẫn file pool trên server — truyền thẳng vào ticket-register.poolFile. */
+  poolFile?: string;
+}
+
+/** 1 cộng đồng trong dropdown — GET /ticket-source/communities. */
+export interface TicketSourceCommunity {
+  id: string;
+  name: string;
+  code?: string;
+}
+
+/** 1 event trong dropdown — GET /ticket-source/events (event đang mở đăng ký của community). */
+export interface TicketSourceEvent {
+  id: string;
+  title: string;
+  status: string;
+  registrationState?: string;
+}
+
+/** 1 ticket type trong dropdown — GET /ticket-source/ticket-types. */
+export interface TicketSourceTicketType {
+  id: string;
+  eventId: string;
+  name: string;
+  price: number;
+  remainingStock: number;
+  soldOut: boolean;
+  saleStartsAt?: string | null;
+  saleEndsAt?: string | null;
 }
