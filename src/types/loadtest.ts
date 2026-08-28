@@ -413,6 +413,12 @@ export interface TicketRegisterRequest {
   limit?: number;
   verifyMembers: boolean;
   minSuccessRate: number;
+  /** Phase 0: pool tự join community (public auto-join) trước khi register. */
+  autoJoin?: boolean;
+  /** Phase 2: tự check-in vé sau khi register — internal x-service-token path, không cần per-user quyền. */
+  checkin?: boolean;
+  /** Concurrency riêng phase check-in (mặc định = concurrency register). */
+  checkinConcurrency?: number;
 }
 
 /** Latency tổng hợp (ms) — khớp RunSummary.latencyMs. */
@@ -463,6 +469,12 @@ export interface TicketRegisterSummary {
   latencyMs: TicketLatency;
   /** Phân tích theo từng event — luôn có khi allEvents (và cả chế độ đơn). */
   events?: TicketEventRunSummary[];
+  /** Phase 2 auto check-in — chỉ có khi checkin chạy thành công. */
+  checkin?: TicketCheckinSummary;
+  /** Lý do phase check-in bị bỏ qua (khi checkin bật nhưng skip) — UI hiển thị thay vì im lặng. */
+  checkinSkip?: string;
+  /** Phase 0 auto-join community — chỉ có khi autoJoin chạy. */
+  join?: TicketJoinSummary;
 }
 
 /** Response POST /api/loadtest/ticket-register. */
@@ -500,6 +512,71 @@ export const TICKET_OUTCOME_ORDER: TicketOutcome[] = [
   'SERVER',
   'NETWORK',
   'LOGIN_FAIL',
+  'OTHER',
+];
+
+// ─── Auto check-in (phase 2 — POST /tickets/check-in theo ticketId, DB-only) ───
+// Khớp CheckinOutcome / CheckinRunSummary (loadtest/ticket-register.ts).
+
+export type TicketCheckinOutcome =
+  | 'CHECKED_IN'
+  | 'CONFLICT'
+  | 'FORBIDDEN'
+  | 'BAD_REQUEST'
+  | 'NOT_FOUND'
+  | 'RATE_LIMITED'
+  | 'SERVER'
+  | 'NETWORK'
+  | 'OTHER';
+
+/** Summary phase check-in — khớp CheckinRunSummary (loadtest/ticket-register.ts). */
+export interface TicketCheckinSummary {
+  checker: string;
+  participants: number;
+  durationMs: number;
+  results: Record<TicketCheckinOutcome, number>;
+  byStatus: Record<string, number>;
+  errors: Record<string, number>;
+  actionOk: number;
+  actionFail: number;
+  successRate: number;
+  latencyMs: TicketLatency;
+}
+
+/** Summary phase auto-join — khớp JoinRunSummary (loadtest/ticket-register.ts). */
+export interface TicketJoinSummary {
+  communityId: string;
+  participants: number;
+  durationMs: number;
+  joined: number;
+  pending: number;
+  skip: number;
+  fail: number;
+  /** (joined + skip) / participants * 100. */
+  successRate: number;
+}
+
+export const TICKET_CHECKIN_OUTCOME_LABELS: Record<TicketCheckinOutcome, string> = {
+  CHECKED_IN: 'Đã check-in (200)',
+  CONFLICT: 'Xung đột (409)',
+  FORBIDDEN: 'Không quyền (403)',
+  BAD_REQUEST: 'Vé đã dùng/hủy (400)',
+  NOT_FOUND: 'Không tìm thấy (404)',
+  RATE_LIMITED: 'Rate-limit (429)',
+  SERVER: 'Lỗi server (5xx)',
+  NETWORK: 'Network/timeout',
+  OTHER: 'Khác',
+};
+
+export const TICKET_CHECKIN_OUTCOME_ORDER: TicketCheckinOutcome[] = [
+  'CHECKED_IN',
+  'CONFLICT',
+  'FORBIDDEN',
+  'BAD_REQUEST',
+  'NOT_FOUND',
+  'RATE_LIMITED',
+  'SERVER',
+  'NETWORK',
   'OTHER',
 ];
 

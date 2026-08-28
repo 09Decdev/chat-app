@@ -24,10 +24,15 @@ export const ticketHandlers = {
   /**
    * POST /api/loadtest/ticket-register
    * Body: { poolFile?, gateway?, communityId?, eventId?, ticketTypeId?, allEvents?,
-   *         quantity?, concurrency?, limit?, verifyMembers?, minSuccessRate? }
+   *         quantity?, concurrency?, limit?, verifyMembers?, minSuccessRate?,
+   *         autoJoin?, checkin?, checkinConcurrency? }
    * Trường thiếu → fallback env của server (LOADTEST_POOL_FILE / GATEWAY_URL / COMMUNITY_ID).
    * allEvents=true (với communityId, không cắm event/ticket) → mọi event mở đăng ký,
    * mỗi event 1 ticket type, chia đều pool account; summary kèm events[] per-event.
+   * autoJoin=true → pool tự vào community (public auto-join) trước khi register.
+   * checkin=true → bắn /content-service/internal/distribution/check-in theo ticketCode
+   * qua x-service-token (server-side LOADTEST_CONTENT_SERVICE_URL +
+   * LOADTEST_INTERNAL_SERVICE_TOKEN) — KHÔNG cần account checker hay phân quyền per-user.
    * Kết quả: { summary, exitCode, pass } — exitCode 0=đạt min-success-rate,
    * 1=không đạt, 2=config/discovery lỗi → HTTP 400 (kèm summary.error làm message).
    * Chạy đồng bộ (run trong ~vài chục giây tùy concurrency) — client dùng timeout dài.
@@ -45,6 +50,7 @@ export const ticketHandlers = {
         : Math.floor(limitNum);
 
     const reportPath = path.join(ctx.env.reportsDir, `ticket-${Date.now().toString(36)}.json`);
+    const checkinConcurrency = toNum(body.checkinConcurrency, 0);
     const result = await runTicketRegistration({
       poolFile: toStr(body.poolFile) || ctx.env.poolFile || undefined,
       gateway: toStr(body.gateway) || ctx.env.gatewayUrl,
@@ -58,6 +64,9 @@ export const ticketHandlers = {
       allEvents: body.allEvents === true,
       minSuccessRate: toNum(body.minSuccessRate, 90),
       reportPath,
+      checkin: body.checkin === true,
+      autoJoin: body.autoJoin === true,
+      checkinConcurrency: checkinConcurrency > 0 ? checkinConcurrency : undefined,
     });
 
     if (result.exitCode === 2 || !result.summary) {

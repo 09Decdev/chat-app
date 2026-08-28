@@ -58,6 +58,10 @@ export interface LoadTestEnv {
   fixturePostIds: string[];
   /** Giới hạn action like/comment/view/read vào đúng 1 community (rỗng = toàn app). */
   communityId: string;
+  /** Phase 2 ticket-register --checkin: URL direct tới content-service (vd http://localhost:3004). Rỗng → derive từ gatewayUrl host + :3004. */
+  contentServiceUrl: string;
+  /** x-service-token cho internal check-in — env LOADTEST_INTERNAL_SERVICE_TOKEN, phải khớp INTERNAL_SERVICE_TOKEN của content-service. KHÔNG log. */
+  internalServiceToken: string;
   /** Tên phòng chat test (matching không cần — server tự tạo). */
   debug: boolean;
   /** Bắt buộc DB kết nối để server start (Q-2) — mặc định true. */
@@ -80,6 +84,22 @@ export interface LoadTestEnv {
   trustProxy: boolean;
   /** Tổng timeout graceful shutdown (ms) — mặc định 10s (PRD §5.2). */
   shutdownTimeoutMs: number;
+}
+
+/**
+ * Suy ra URL direct content-service từ gateway URL: giữ host, đổi port thành 3004
+ * (CONTENT_PORT chuẩn — deployment .env). Cùng host với gateway-auth-service trong
+ * hầu hết setup. Vd http://192.168.0.165:3000 → http://192.168.0.165:3004.
+ * Override bằng LOADTEST_CONTENT_SERVICE_URL khi content-service chạy máy khác.
+ */
+export function deriveContentServiceUrl(gatewayUrl: string): string {
+  try {
+    const u = new URL(normalizeUrl(gatewayUrl) || 'http://localhost:3000');
+    u.port = '3004';
+    return `${u.protocol}//${u.hostname}:3004`;
+  } catch {
+    return 'http://localhost:3004';
+  }
 }
 
 export function loadDotEnv(dir: string): Record<string, string> {
@@ -185,6 +205,8 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
     dataDir: env.LOADTEST_DATA_DIR || './loadtest/data',
     reportsDir: env.LOADTEST_REPORTS_DIR || './docs/loadtest-reports',
     poolFile: env.LOADTEST_POOL_FILE || '',
+    contentServiceUrl: env.LOADTEST_CONTENT_SERVICE_URL || deriveContentServiceUrl(env.LOADTEST_GATEWAY_URL || 'http://localhost:3000'),
+    internalServiceToken: env.LOADTEST_INTERNAL_SERVICE_TOKEN || '',
     databaseUrl: env.LOADTEST_DATABASE_URL || PLACEHOLDER_DB_URL,
     scrapeIntervalMs: num('LOADTEST_SCRAPE_METRICS_INTERVAL_MS', 5000),
     registerRamp: num('LOADTEST_REGISTER_RAMP', 100),

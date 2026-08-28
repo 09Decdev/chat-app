@@ -10,7 +10,18 @@
  *     [--pool-file <path>] [--gateway <url>] [--community-id <id>] \
  *     [--event-id <id>] [--ticket-type-id <id>] [--quantity 1] \
  *     [--concurrency 20] [--limit <n>] [--min-success-rate 90] \
- *     [--verify-members] [--all-events] [--report <path>]
+ *     [--verify-members] [--all-events] [--auto-join] [--checkin] \
+ *     [--checkin-concurrency <n>] [--report <path>]
+ *
+ * Phase 0 (--auto-join): pool account tự JOIN community (public auto-join) trước
+ * khi register — không cần owner accept (community public). Idempotent (skip nếu đã member).
+ *
+ * Phase 2 (--checkin): sau khi register, bắn đồng loạt POST
+ * /content-service/internal/distribution/check-in (path INTERNAL x-service-token)
+ * theo ticketCode rút từ response 201. KHÔNG cần phân quyền per-user — ServiceTokenGuard
+ * chỉ so x-service-token === INTERNAL_SERVICE_TOKEN. Cấp qua env LOADTEST_CONTENT_SERVICE_URL
+ * (mặc định = gateway host + :3004) + LOADTEST_INTERNAL_SERVICE_TOKEN (phải khớp
+ * INTERNAL_SERVICE_TOKEN của content-service — giống ticket-mayo).
  *
  * Không truyền event/ticket cụ thể → tool tự tìm:
  *   1. GET /content-service/event/open-registration/{communityId}
@@ -23,8 +34,8 @@
  * ticket type đang bán, chia đều pool account cho từng event rồi bắn đồng loạt.
  * Summary trả thêm `events[]` (phân tích theo từng event) bên cạnh tổng hợp.
  *
- * Account nguồn (pool) phải là member của community — dùng script
- * `npm run loadtest:join-community` trước nếu chưa join.
+ * Account nguồn (pool) phải là member của community — hoặc bật --auto-join để
+ * tool tự join (public auto-join, không cần owner accept) trước khi register.
  *
  * Exit code: 0 = đạt min-success-rate (mặc định 90%) · 1 = không đạt · 2 = lỗi config/discovery.
  */
@@ -55,6 +66,11 @@ interface Args {
   allEvents: boolean;
   report?: string;
   minSuccessRate: number;
+  /** Phase 0: pool tự join community (public auto-join) trước khi register. */
+  autoJoin: boolean;
+  /** Phase 2: tự check-in vé sau khi register (path internal x-service-token, không cần per-user quyền). */
+  checkin: boolean;
+  checkinConcurrency?: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -76,6 +92,9 @@ function parseArgs(argv: string[]): Args {
     allEvents: a.includes('--all-events'),
     report: get('report'),
     minSuccessRate: get('min-success-rate') ? Number(get('min-success-rate')) : 90,
+    autoJoin: a.includes('--auto-join'),
+    checkin: a.includes('--checkin'),
+    checkinConcurrency: get('checkin-concurrency') ? Number(get('checkin-concurrency')) : undefined,
   };
 }
 
@@ -99,6 +118,12 @@ export interface TicketRegistrationOptions {
   allEvents?: boolean;
   /** Ghi report JSON ra file (CLI --report; API ghi vào reportsDir). */
   reportPath?: string;
+  /** Phase 0: pool tự join community (public auto-join) trước khi register. */
+  autoJoin?: boolean;
+  /** Phase 2: sau khi register, bắn /internal/distribution/check-in (x-service-token) cho mọi vé 201. */
+  checkin?: boolean;
+  /** Concurrency riêng cho phase check-in (mặc định = concurrency register). */
+  checkinConcurrency?: number;
 }
 
 /** Kết quả run — exitCode 0=đạt min-success-rate · 1=không đạt · 2=config/discovery lỗi. */
@@ -258,6 +283,54 @@ export interface AttackResult {
   status: number;
   code: string;
   latencyMs: number;
+  /** ticketCode rút từ response 201 REGISTERED — feeding phase check-in (internal path theo ticketCode). Rỗng khi không phải REGISTERED. */
+  ticketCodes?: string[];
+}
+
+// ─── Auto check-in (phase 2: checker login → POST /tickets/check-in theo ticketId) ──
+
+export type CheckinOutcome =
+  | 'CHECKED_IN' // 200 — vé đã check-in (hoặc alreadyCheckedIn — idempotent)
+  | 'CONFLICT' // 409 — vé không ở trạng thái VALID (đã hủy)
+  | 'FORBIDDEN' // 403/401 — x-service-token sai/thiếu
+  | 'BAD_REQUEST' // 400 — ticketCode rỗng / DTO sai
+  | 'NOT_FOUND' // 404 — ticketCode không tồn tại
+  | 'RATE_LIMITED' // 429
+  | 'SERVER' // 5xx
+  | 'NETWORK' // timeout/network
+  | 'OTHER';
+
+export interface CheckinResult {
+  ticketCode: string;
+  outcome: CheckinOutcome;
+  status: number;
+  code: string;
+  latencyMs: number;
+}
+
+export interface CheckinRunSummary {
+  checker: string;
+  participants: number;
+  durationMs: number;
+  results: Record<CheckinOutcome, number>;
+  byStatus: Record<string, number>;
+  errors: Record<string, number>;
+  actionOk: number; // CHECKED_IN
+  actionFail: number;
+  successRate: number; // CHECKED_IN / participants
+  latencyMs: { avg: number; p50: number; p95: number; p99: number; max: number };
+}
+
+/** Summary phase 0 auto-join — chỉ có khi --auto-join chạy. */
+export interface JoinRunSummary {
+  communityId: string;
+  participants: number;
+  durationMs: number;
+  joined: number; // public auto-join OK (member ngay)
+  pending: number; // private/paid → chờ owner accept
+  skip: number; // đã là member / đã gửi request
+  fail: number; // login fail / network
+  successRate: number; // (joined + skip) / participants
 }
 
 const TICKET_PATH = '/content-service/tickets/register';
@@ -279,7 +352,37 @@ async function attackOne(
     timeoutMs: 30_000,
   });
   const outcome: AttackOutcome = classify(r);
-  return { account: account.email, userId: decodeSub(login.accessToken), outcome, status: r.status, code: r.code, latencyMs: r.latencyMs };
+  // Phase 2 feeding: rút ticketCode từ response 201 (đăng ký thành công ngay).
+  const ticketCodes = outcome === 'REGISTERED' ? extractTicketCodes(r.data) : [];
+  return { account: account.email, userId: decodeSub(login.accessToken), outcome, status: r.status, code: r.code, latencyMs: r.latencyMs, ticketCodes };
+}
+
+/** Rút ticketCode từ body POST /tickets/register (201). Body là mảng Ticket entity
+ *  Prisma (registerAndFinalize trả thẳng) — có thể wrap { statusCode, data: [] } của
+ *  controller (requestJson KHÔNG unwrap vì thiếu key `success`). */
+function extractTicketCodes(body: unknown): string[] {
+  const findArray = (v: unknown): unknown[] | null => {
+    if (Array.isArray(v)) return v;
+    if (v && typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      if (Array.isArray(o.data)) return o.data;
+      if (o.data && typeof o.data === 'object' && Array.isArray((o.data as Record<string, unknown>).tickets))
+        return (o.data as Record<string, unknown>).tickets as unknown[];
+      if (Array.isArray(o.tickets)) return o.tickets;
+    }
+    return null;
+  };
+  const arr = findArray(body);
+  if (!arr) return [];
+  const codes: string[] = [];
+  for (const t of arr) {
+    if (t && typeof t === 'object') {
+      const o = t as Record<string, unknown>;
+      const code = typeof o.ticketCode === 'string' ? o.ticketCode : '';
+      if (code) codes.push(code);
+    }
+  }
+  return codes;
 }
 
 function classify(r: HttpResult<unknown>): AttackOutcome {
@@ -296,6 +399,145 @@ function classify(r: HttpResult<unknown>): AttackOutcome {
       if (r.failClass === 'SERVER') return 'SERVER';
       if (r.failClass === 'OK') return 'OTHER';
       return 'OTHER';
+  }
+}
+
+// ─── Check-in attack (INTERNAL path — x-service-token, không cần per-user quyền) ──
+// Path /content-service/internal/distribution/check-in của content-service (ServiceTokenGuard).
+// Body { ticketCode, checkerId, gateId? }. Response idempotent: 200 + alreadyCheckedIn nếu đã quét.
+
+const CHECKIN_INTERNAL_PATH = '/content-service/internal/distribution/check-in';
+
+function classifyCheckin(r: HttpResult<unknown>): CheckinOutcome {
+  if (r.failClass === 'NETWORK') return 'NETWORK';
+  switch (r.status) {
+    case 200: return 'CHECKED_IN';
+    case 429: return 'RATE_LIMITED';
+    case 409: return 'CONFLICT';
+    case 403: return 'FORBIDDEN';
+    case 401: return 'FORBIDDEN';
+    case 400: return 'BAD_REQUEST';
+    case 404: return 'NOT_FOUND';
+    default:
+      if (r.failClass === 'SERVER') return 'SERVER';
+      return 'OTHER';
+  }
+}
+
+async function checkinOne(contentServiceUrl: string, serviceToken: string, ticketCode: string): Promise<CheckinResult> {
+  const r: HttpResult<unknown> = await requestJson(contentServiceUrl, CHECKIN_INTERNAL_PATH, {
+    method: 'POST',
+    headers: { 'x-service-token': serviceToken },
+    // Internal path: không có Bearer, không cần quyền CHECK_IN — chỉ ServiceTokenGuard.
+    body: { ticketCode, checkerId: 'loadtest' },
+    timeoutMs: 30_000,
+  });
+  return { ticketCode, outcome: classifyCheckin(r), status: r.status, code: r.code, latencyMs: r.latencyMs };
+}
+
+/** Bắn check-in đồng loạt cho N ticketCode qua internal path (1 x-service-token). */
+async function attackCheckin(
+  contentServiceUrl: string,
+  serviceToken: string,
+  ticketCodes: string[],
+  concurrency: number,
+): Promise<CheckinResult[]> {
+  return mapLimit(ticketCodes, concurrency, (code) => checkinOne(contentServiceUrl, serviceToken, code));
+}
+
+// ─── Auto-join (Phase 0): pool tự vào community trước khi register ─────────
+// Mirror scripts/join-community.ts: thử public auto-join trước, 4xx → private pending.
+
+type JoinOutcome = 'JOINED' | 'PENDING' | 'SKIP' | 'FAIL';
+
+async function joinOne(gateway: string, account: TestAccount, communityId: string): Promise<JoinOutcome> {
+  const login = await loginOneAccount(gateway, account.email, account.password, account.deviceInfo);
+  if (!login.ok) return 'FAIL';
+  // 1. Public auto-join (community public → member ngay, không cần owner accept).
+  const pubR: HttpResult<unknown> = await requestJson(gateway, '/user-community/join-request/community-public', {
+    method: 'POST',
+    token: login.accessToken,
+    body: { communityId },
+    timeoutMs: 15_000,
+  });
+  if (pubR.ok) return 'JOINED';
+  // 2. 4xx → private/paid → tạo pending request (owner accept sau).
+  const privR: HttpResult<unknown> = await requestJson(gateway, '/user-community/join-request', {
+    method: 'POST',
+    token: login.accessToken,
+    body: { communityId },
+    timeoutMs: 15_000,
+  });
+  if (privR.ok) return 'PENDING';
+  // 3. 409/400 "already exists" / "already member" → đã trong group / đã gửi request → skip.
+  const msg = (privR.message || '').toLowerCase();
+  if (privR.status === 409 || privR.status === 400 || msg.includes('already') || msg.includes('member') || msg.includes('exist')) return 'SKIP';
+  return 'FAIL';
+}
+
+async function attackJoin(gateway: string, accounts: TestAccount[], communityId: string, concurrency: number): Promise<JoinOutcome[]> {
+  return mapLimit(accounts, concurrency, (acc) => joinOne(gateway, acc, communityId));
+}
+
+function summarizeCheckin(results: CheckinResult[], durationMs: number, checker: string): CheckinRunSummary {
+  const res: Record<CheckinOutcome, number> = {
+    CHECKED_IN: 0, CONFLICT: 0, FORBIDDEN: 0, BAD_REQUEST: 0, NOT_FOUND: 0,
+    RATE_LIMITED: 0, SERVER: 0, NETWORK: 0, OTHER: 0,
+  };
+  const byStatus: Record<string, number> = {};
+  const errors: Record<string, number> = {};
+  const latencies: number[] = [];
+  let actionOk = 0;
+  let actionFail = 0;
+  for (const r of results) {
+    res[r.outcome]++;
+    const st = String(r.status);
+    byStatus[st] = (byStatus[st] ?? 0) + 1;
+    if (r.outcome === 'CHECKED_IN') actionOk++;
+    else actionFail++;
+    if (r.code) errors[r.code] = (errors[r.code] ?? 0) + 1;
+    if (r.latencyMs > 0) latencies.push(r.latencyMs);
+  }
+  latencies.sort((a, b) => a - b);
+  const avg = latencies.length ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0;
+  return {
+    checker,
+    participants: results.length,
+    durationMs,
+    results: res,
+    byStatus,
+    errors,
+    actionOk,
+    actionFail,
+    successRate: (actionOk / Math.max(1, results.length)) * 100,
+    latencyMs: {
+      avg: Math.round(avg),
+      p50: percentile(latencies, 50),
+      p95: percentile(latencies, 95),
+      p99: percentile(latencies, 99),
+      max: latencies.length ? latencies[latencies.length - 1] : 0,
+    },
+  };
+}
+
+function printCheckinSummary(c: CheckinRunSummary): void {
+  const pct = (n: number) => `${((n / Math.max(1, c.participants)) * 100).toFixed(1)}%`;
+  const order: CheckinOutcome[] = ['CHECKED_IN', 'CONFLICT', 'FORBIDDEN', 'BAD_REQUEST', 'NOT_FOUND', 'RATE_LIMITED', 'SERVER', 'NETWORK', 'OTHER'];
+  console.log('──────────────────────────────────────');
+  console.log('[checkin] KẾT QUẢ: POST /content-service/internal/distribution/check-in (x-service-token)');
+  console.log(`[checkin] checker     : ${c.checker}`);
+  console.log(`[checkin] participants: ${c.participants}`);
+  console.log(`[checkin] duration    : ${(c.durationMs / 1000).toFixed(1)}s (${(c.participants / Math.max(1, c.durationMs / 1000)).toFixed(0)} req/s)`);
+  for (const o of order) {
+    if (c.results[o] > 0) console.log(`  ${o.padEnd(13)} ${c.results[o]}  (${pct(c.results[o])})`);
+  }
+  console.log(`  SUCCESS(200): ${c.actionOk} (${pct(c.actionOk)}) | FAIL: ${c.actionFail} (${pct(c.actionFail)})`);
+  console.log(`  success rate: ${c.successRate.toFixed(1)}%`);
+  console.log(`  latency ms   : avg ${c.latencyMs.avg} | p50 ${c.latencyMs.p50} | p95 ${c.latencyMs.p95} | p99 ${c.latencyMs.p99} | max ${c.latencyMs.max}`);
+  const topErr = Object.entries(c.errors).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  if (topErr.length > 0) {
+    console.log('  top errors  :');
+    for (const [code, count] of topErr) console.log(`    ${code}: ${count}`);
   }
 }
 
@@ -327,6 +569,12 @@ export interface RunSummary {
   latencyMs: { avg: number; p50: number; p95: number; p99: number; max: number };
   /** Chỉ có khi --all-events: phân tích theo từng event (aggregate ở ngoài vẫn là tổng). */
   events?: EventRunSummary[];
+  /** Phase 2 auto check-in — chỉ có khi --checkin chạy thành công. */
+  checkin?: CheckinRunSummary;
+  /** Lý do phase check-in bị bỏ qua (khi --checkin bật nhưng skip) — để UI hiển thị thay vì im lặng. */
+  checkinSkip?: string;
+  /** Phase 0 auto-join community (--auto-join) — chỉ có khi chạy. */
+  join?: JoinRunSummary;
 }
 
 /** Kết quả 1 event trong chế độ --all-events. */
@@ -426,6 +674,10 @@ function printSummary(s: RunSummary): void {
     }
     console.log('  ─────────────────────────');
   }
+  if (s.join) {
+    console.log(`  join: ${s.join.joined} joined (public) | ${s.join.pending} pending | ${s.join.skip} skip | ${s.join.fail} fail — ${(s.join.durationMs / 1000).toFixed(1)}s`);
+    if (s.join.pending > 0) console.log(`    ⚠ ${s.join.pending} account join PENDING — community riêng tư cần owner duyệt; check-in vé vẫn chạy bình thường.`);
+  }
   const topErr = Object.entries(s.errors).sort((a, b) => b[1] - a[1]).slice(0, 8);
   if (topErr.length > 0) {
     console.log('  top errors  :');
@@ -521,6 +773,28 @@ export async function runTicketRegistration(opts: TicketRegistrationOptions): Pr
       return { exitCode: 2, error: err };
     }
     explorerToken = explorer.accessToken;
+  }
+
+  // 0b. Auto-join (Phase 0): pool tự vào community trước khi register (public auto-join).
+  let joinSummary: JoinRunSummary | undefined;
+  if (opts.autoJoin && communityId) {
+    const t0j = Date.now();
+    console.log(`[join] ${accounts.length} account → join community ${communityId} (conn=${concurrency})`);
+    const jres = await attackJoin(gateway, accounts, communityId, concurrency);
+    let joined = 0, pending = 0, skip = 0, fail = 0;
+    for (const o of jres) {
+      if (o === 'JOINED') joined++;
+      else if (o === 'PENDING') pending++;
+      else if (o === 'SKIP') skip++;
+      else fail++;
+    }
+    const dj = Date.now() - t0j;
+    const sr = ((joined + skip) / Math.max(1, accounts.length)) * 100;
+    joinSummary = { communityId, participants: accounts.length, durationMs: dj, joined, pending, skip, fail, successRate: sr };
+    console.log(`[join] → ${joined} joined (public) | ${pending} pending | ${skip} skip | ${fail} fail — ${(dj / 1000).toFixed(1)}s (success ${(sr).toFixed(1)}%)`);
+    if (pending > 0) ltLog.warn(`[join] ⚠ ${pending} account join PENDING — community riêng tư cần owner accept (PUT /user-community/join-request/${communityId}/accept-all). Register/check-in vẫn chạy.`);
+  } else if (opts.autoJoin && !communityId) {
+    ltLog.warn('[join] skip --auto-join: thiếu community-id');
   }
 
   // 1. Verify members (optional — bước "lấy toàn bộ user trong community").
@@ -675,6 +949,7 @@ export async function runTicketRegistration(opts: TicketRegistrationOptions): Pr
     successRate: (agg.actionOk / Math.max(1, allResults.length)) * 100,
     latencyMs: agg.latencyMs,
     events: eventSummaries,
+    join: joinSummary,
   };
 
   // verify-members overlap (userId lấy từ JWT sub sau mỗi lần login).
@@ -687,6 +962,40 @@ export async function runTicketRegistration(opts: TicketRegistrationOptions): Pr
     console.log('        (giải thích: pool accounts là member → explorer gọi open-registration OK; tỷ lệ thấp = pool chưa join đủ — chạy loadtest:join-community.)');
   }
 
+  // 5. Auto check-in (phase 2 tuỳ chọn): checker login 1 lần → bắn /tickets/check-in
+  //    cho mọi ticketId thu được từ REGISTERED (201). DB-only (không signed token).
+  if (opts.checkin) {
+    // Thu ticketCode từ kết quả register (201 trả raw Prisma Ticket có ticketCode).
+    const ticketCodes: string[] = [];
+    for (const r of allResults) {
+      if (r.outcome === 'REGISTERED' && r.ticketCodes) for (const c of r.ticketCodes) ticketCodes.push(c);
+    }
+    const contentServiceUrl = env.contentServiceUrl;
+    const serviceToken = env.internalServiceToken;
+    if (ticketCodes.length === 0) {
+      summary.checkinSkip =
+        'Không có ticketCode nào thu được từ vé đăng ký (201). Có thể register trả QUEUED 202 (async) hoặc response không chứa ticketCode — xem server log chi tiết.';
+      ltLog.warn('[checkin] không có vé nào đăng ký thành công (201) → bỏ qua phase check-in');
+    } else if (!contentServiceUrl) {
+      summary.checkinSkip = 'Thiếu LOADTEST_CONTENT_SERVICE_URL (URL content-service, vd http://localhost:3004). Set trong loadtest/.env.';
+      ltLog.warn('[checkin] thiếu contentServiceUrl → bỏ qua phase check-in');
+    } else if (!serviceToken) {
+      summary.checkinSkip =
+        'Thiếu LOADTEST_INTERNAL_SERVICE_TOKEN (phải khớp INTERNAL_SERVICE_TOKEN của content-service). Set trong loadtest/.env — không cần phân quyền per-user.';
+      ltLog.warn('[checkin] thiếu internalServiceToken → bỏ qua phase check-in');
+    } else {
+      const cc =
+        Number.isFinite(opts.checkinConcurrency) && (opts.checkinConcurrency as number) >= 1
+          ? Math.floor(opts.checkinConcurrency as number)
+          : concurrency;
+      console.log(`[checkin] ${ticketCodes.length} vé → POST internal/distribution/check-in (x-service-token, conn=${cc})`);
+      const t0c = Date.now();
+      const cresults = await attackCheckin(contentServiceUrl, serviceToken, ticketCodes, cc);
+      summary.checkin = summarizeCheckin(cresults, Date.now() - t0c, 'internal');
+      printCheckinSummary(summary.checkin);
+    }
+  }
+
   printSummary(summary);
 
   if (opts.reportPath) {
@@ -695,8 +1004,10 @@ export async function runTicketRegistration(opts: TicketRegistrationOptions): Pr
     console.log(`[ticket] report: ${opts.reportPath}`);
   }
 
-  const pass = summary.successRate >= opts.minSuccessRate;
-  console.log(`[ticket] ${pass ? 'PASS' : 'FAIL'} — success rate ${summary.successRate.toFixed(1)}% ≥ ${opts.minSuccessRate}%`);
+  let pass = summary.successRate >= opts.minSuccessRate;
+  if (summary.checkin) pass = pass && summary.checkin.successRate >= opts.minSuccessRate;
+  const checkinNote = summary.checkin ? ` | checkin ${summary.checkin.successRate.toFixed(1)}%` : '';
+  console.log(`[ticket] ${pass ? 'PASS' : 'FAIL'} — success rate ${summary.successRate.toFixed(1)}% ≥ ${opts.minSuccessRate}%${checkinNote}`);
   return { exitCode: pass ? 0 : 1, summary };
 }
 
@@ -722,6 +1033,9 @@ async function main(): Promise<number> {
     allEvents: args.allEvents,
     minSuccessRate: args.minSuccessRate,
     reportPath: args.report,
+    checkin: args.checkin,
+    autoJoin: args.autoJoin,
+    checkinConcurrency: args.checkinConcurrency,
   });
   return res.exitCode;
 }

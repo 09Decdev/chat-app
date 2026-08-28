@@ -36,7 +36,10 @@ import { fmtClock, fmtDateTime, fmtMs, fmtNum } from '@/lib/loadtest-format';
 import {
   TICKET_OUTCOME_LABELS,
   TICKET_OUTCOME_ORDER,
+  TICKET_CHECKIN_OUTCOME_LABELS,
+  TICKET_CHECKIN_OUTCOME_ORDER,
   type TicketOutcome,
+  type TicketCheckinOutcome,
   type TicketRegisterRequest,
   type TicketRegisterResult,
   type LoadTestConfig,
@@ -98,6 +101,11 @@ interface FormState {
   limit: string;
   minSuccessRate: string;
   verifyMembers: boolean;
+  /** Phase 0: pool tự vào community (public auto-join) trước khi register. */
+  autoJoin: boolean;
+  /** Phase 2: tự check-in vé sau khi register (internal x-service-token, không cần per-user quyền). */
+  checkin: boolean;
+  checkinConcurrency: string;
 }
 
 const FORM_DEFAULTS: FormState = {
@@ -112,6 +120,9 @@ const FORM_DEFAULTS: FormState = {
   limit: '',
   minSuccessRate: '90',
   verifyMembers: false,
+  autoJoin: false,
+  checkin: false,
+  checkinConcurrency: '',
 };
 
 function readForm(): FormState {
@@ -347,6 +358,9 @@ export default function TicketRegisterPage() {
       limit: form.limit.trim() ? toInt(form.limit, 1) : undefined,
       verifyMembers: form.verifyMembers,
       minSuccessRate: toInt(form.minSuccessRate, 90),
+      checkin: form.checkin,
+      autoJoin: form.autoJoin,
+      checkinConcurrency: form.checkinConcurrency.trim() ? toInt(form.checkinConcurrency, 1) : undefined,
     };
     try {
       const res = await loadtestApi.ticketRegister(req);
@@ -391,6 +405,17 @@ export default function TicketRegisterPage() {
     NETWORK: 'bg-warning',
   };
 
+  const CHECKIN_BAR_COLOR: Partial<Record<TicketCheckinOutcome, string>> = {
+    CHECKED_IN: 'bg-success',
+    CONFLICT: 'bg-warning',
+    FORBIDDEN: 'bg-destructive',
+    BAD_REQUEST: 'bg-warning',
+    NOT_FOUND: 'bg-destructive',
+    RATE_LIMITED: 'bg-warning',
+    SERVER: 'bg-destructive',
+    NETWORK: 'bg-warning',
+  };
+
   return (
     <div className="space-y-4" aria-busy={running}>
       <div className="flex flex-wrap items-center gap-2">
@@ -417,6 +442,13 @@ export default function TicketRegisterPage() {
             <span>Số vé/user: <span className="font-mono">{toInt(form.quantity, 1)}</span></span>
             <span>Concurrency: <span className="font-mono">{toInt(form.concurrency, 20)}</span></span>
             {form.limit.trim() !== '' && <span>Limit: <span className="font-mono">{toInt(form.limit, 1)}</span></span>}
+            {form.autoJoin && <span>Tự vào nhóm: <span className="font-mono">bật</span></span>}
+            {form.checkin && (
+              <span>
+                Check-in: <span className="font-mono">internal · token</span> · conn{' '}
+                <span className="font-mono">{form.checkinConcurrency.trim() ? toInt(form.checkinConcurrency, 1) : toInt(form.concurrency, 20)}</span>
+              </span>
+            )}
           </div>
         </Card>
       )}
@@ -617,11 +649,57 @@ export default function TicketRegisterPage() {
                 Verify members (kiểm tra pool account có phải member của community không)
               </Label>
             </div>
+            <div className="flex items-center gap-3 md:col-span-2">
+              <Switch
+                id="tr-autojoin"
+                checked={form.autoJoin}
+                onCheckedChange={(v) => set('autoJoin', v)}
+                aria-label="Tự vào nhóm"
+              />
+              <Label htmlFor="tr-autojoin" className="text-sm">
+                Tự vào nhóm (auto-join)
+                <span className="ml-2 text-xs text-muted-foreground">
+                  phase 0: pool tự vào community trước khi register (public auto-join; group riêng tư → pending, cần owner duyệt)
+                </span>
+              </Label>
+            </div>
+            <div className="flex items-center gap-3 md:col-span-2">
+              <Switch
+                id="tr-checkin"
+                checked={form.checkin}
+                onCheckedChange={(v) => set('checkin', v)}
+                aria-label="Tự check-in sau khi đăng ký"
+              />
+              <Label htmlFor="tr-checkin" className="text-sm">
+                Tự check-in sau khi đăng ký
+                <span className="ml-2 text-xs text-muted-foreground">
+                  phase 2: bắn /content-service/internal/distribution/check-in (x-service-token) cho mọi vé 201 — KHÔNG cần account checker hay phân quyền CHECK_IN
+                </span>
+              </Label>
+            </div>
+            {form.checkin && (
+              <div className="space-y-1.5 md:col-span-2">
+                <Label htmlFor="tr-checkin-concurrency">Check-in concurrency</Label>
+                <Input
+                  id="tr-checkin-concurrency"
+                  type="number"
+                  min={1}
+                  value={form.checkinConcurrency}
+                  onChange={(e) => set('checkinConcurrency', e.target.value)}
+                  placeholder="Bỏ trống = dùng concurrency register"
+                  className="font-mono text-sm"
+                  aria-label="Check-in concurrency"
+                />
+              </div>
+            )}
           </div>
         </fieldset>
         <p className="mt-3 text-xs text-muted-foreground">
-          Pool accounts phải là member của community — chạy <span className="font-mono">npm run loadtest:join-community</span> trước nếu chưa join.
-          Để community trống + ghim event-id/ticket-type-id để bỏ qua bước tự tìm.
+          Bật <span className="font-mono">Tự vào nhóm</span> để pool tự vào community trước khi register. Check-in dùng
+          path nội bộ <span className="font-mono">/internal/distribution/check-in</span> với service-token từ{' '}
+          <span className="font-mono">.env</span> (LOADTEST_INTERNAL_SERVICE_TOKEN, khớp INTERNAL_SERVICE_TOKEN của
+          content-service) — KHÔNG cần account checker hay phân quyền CHECK_IN. Để community trống + ghim
+          event-id/ticket-type-id để bỏ qua bước tự tìm.
         </p>
       </Card>
 
@@ -693,6 +771,113 @@ export default function TicketRegisterPage() {
                   hint="POST register thành công ngay"
                 />
               </div>
+
+              {summary.join && (
+                <Card className="mt-4 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-sm font-medium">TỰ VÀO NHÓM (PHASE 0)</h2>
+                    <Badge variant="secondary" className="font-mono text-[10px]">
+                      {pnum(summary.join.participants)} account · {ppct(summary.join.successRate)}
+                    </Badge>
+                    <span className="ml-auto text-xs text-muted-foreground font-mono">{summary.join.communityId}</span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
+                    <span>
+                      Đã vào: <span className="font-mono font-semibold text-success">{pnum(summary.join.joined)}</span>
+                    </span>
+                    <span>
+                      Chờ duyệt: <span className="font-mono font-semibold text-warning">{pnum(summary.join.pending)}</span>
+                    </span>
+                    <span>
+                      Đã ở trong: <span className="font-mono font-semibold">{pnum(summary.join.skip)}</span>
+                    </span>
+                    <span>
+                      Thất bại: <span className="font-mono font-semibold text-destructive">{pnum(summary.join.fail)}</span>
+                    </span>
+                    <span>Thời gian: <span className="font-mono">{psecs(summary.join.durationMs)}</span></span>
+                  </div>
+                  {summary.join.pending > 0 && (
+                    <p className="mt-2 text-xs text-warning">
+                      ⚠ {pnum(summary.join.pending)} account join PENDING — community riêng tư cần owner duyệt (PUT
+                      /user-community/join-request/{summary.join.communityId}/accept-all). Register/check-in vẫn chạy.
+                    </p>
+                  )}
+                </Card>
+              )}
+
+              {summary.checkin && (
+                <Card className="mt-4 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-sm font-medium">CHECK-IN (PHASE 2)</h2>
+                    <Badge variant="secondary" className="font-mono text-[10px]">
+                      {pnum(summary.checkin.participants)} vé · {ppct(summary.checkin.successRate)}
+                    </Badge>
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      checker <span className="font-mono">{summary.checkin.checker}</span>
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
+                    <span>
+                      Thành công: <span className="font-mono font-semibold text-success">{pnum(summary.checkin.actionOk)}</span>
+                    </span>
+                    <span>
+                      Thất bại: <span className="font-mono font-semibold text-destructive">{pnum(summary.checkin.actionFail)}</span>
+                    </span>
+                    <span>
+                      Công suất:{' '}
+                      <span className="font-mono">
+                        {pnum(Math.round(summary.checkin.participants / Math.max(1, summary.checkin.durationMs / 1000)))} req/s
+                      </span>
+                    </span>
+                    <span>
+                      Latency:{' '}
+                      <span className="font-mono">
+                        avg {pms(summary.checkin.latencyMs?.avg)} · p95 {pms(summary.checkin.latencyMs?.p95)}
+                      </span>
+                    </span>
+                  </div>
+                  {TICKET_CHECKIN_OUTCOME_ORDER.filter((o) => (summary.checkin!.results[o] ?? 0) > 0).length > 0 && (
+                    <ul className="mt-3 divide-y divide-border">
+                      {TICKET_CHECKIN_OUTCOME_ORDER.filter((o) => (summary.checkin!.results[o] ?? 0) > 0).map((o) => {
+                        const n = summary.checkin!.results[o] ?? 0;
+                        const pct = n / Math.max(1, summary.checkin!.participants);
+                        return (
+                          <li key={o} className="flex items-center gap-2 py-2">
+                            <span className="flex-1 text-sm">{TICKET_CHECKIN_OUTCOME_LABELS[o]}</span>
+                            <div
+                              className="h-2.5 w-36 overflow-hidden rounded-full bg-muted sm:w-48"
+                              role="meter"
+                              aria-label={`${TICKET_CHECKIN_OUTCOME_LABELS[o]}: ${ppct(pct * 100)}`}
+                              aria-valuenow={Math.round(pct * 100)}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                            >
+                              <div
+                                className={`h-full rounded-full ${CHECKIN_BAR_COLOR[o] ?? 'bg-primary'}`}
+                                style={{ width: `${pct * 100}%` }}
+                              />
+                            </div>
+                            <span className="w-14 text-right font-mono text-sm tabular-nums">{pnum(n)}</span>
+                            <span className="w-14 text-right font-mono text-xs tabular-nums text-muted-foreground">
+                              {ppct(pct * 100)}
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </Card>
+              )}
+
+              {summary.checkinSkip && (
+                <Card className="mt-4 border-warning/40 bg-warning/10 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-sm font-medium text-warning">CHECK-IN (PHASE 2) — BỎ QUA</h2>
+                    <Badge variant="warning" className="font-mono text-[10px]">skipped</Badge>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">{summary.checkinSkip}</p>
+                </Card>
+              )}
 
               {summary.events && summary.events.length > 0 && (
                 <div className="mt-4 space-y-3">
