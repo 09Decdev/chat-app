@@ -130,6 +130,7 @@ interface ChatState {
   onTimChanged: (p: ChatTimChangedPayload) => void;
   likeMessage: (messageId: string) => void;
   unlikeMessage: (messageId: string) => void;
+  deleteForMe: (messageId: string) => void;
   onTopicCreated: (p: TopicCreatedPayload) => void;
   onTopicUpdated: (p: TopicUpdatedPayload) => void;
   onTopicDeleted: (p: TopicDeletedPayload) => void;
@@ -451,7 +452,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ loadingHistory: true });
     try {
       const page = await chatApi.messages(roomId, null);
-      const reversed = page.messages.slice().reverse();
+      // Bỏ tin mình đã ẩn ("xóa phía mình") — server trả hiddenByMe
+      const reversed = page.messages
+        .filter((m) => !m.hiddenByMe)
+        .slice().reverse();
       console.log('%c[chat] loadHistory', 'color:#a855f7', {
         roomId,
         msgCount: reversed.length,
@@ -486,8 +490,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ loadingOlder: true });
     try {
       const page = await chatApi.messages(s.roomId, s.nextCursor);
+      const older = page.messages.filter((m) => !m.hiddenByMe).slice().reverse();
       set((st) => ({
-        messages: dedupeById([...page.messages.slice().reverse(), ...st.messages]),
+        messages: dedupeById([...older, ...st.messages]),
         nextCursor: page.nextCursor,
         loadingOlder: false,
       }));
@@ -1034,6 +1039,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ),
         }));
         toast.error('Bo tim that bai.');
+      });
+  },
+
+  deleteForMe: (messageId) => {
+    const s = get();
+    const roomId = s.roomId;
+    const target = s.messages.find((m) => m.id === messageId);
+    if (!roomId || !messageId || !target) return;
+    // Optimistic: remove khỏi list; rollback restore khi API lỗi
+    const index = s.messages.indexOf(target);
+    set((st) => ({ messages: st.messages.filter((m) => m.id !== messageId) }));
+    void chatApi
+      .hideMessage(roomId, messageId)
+      .catch(() => {
+        set((st) => {
+          const messages = st.messages.slice();
+          const restoreAt = Math.min(index, messages.length);
+          messages.splice(restoreAt, 0, target);
+          return { messages: dedupeById(messages) };
+        });
+        toast.error('Xoa tin that bai, thu lai.');
       });
   },
 }));

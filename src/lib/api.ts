@@ -275,6 +275,12 @@ export const chatApi = {
       `/content-service/chat/messages/${encodeURIComponent(messageId)}/unlike`,
       { roomId },
     ),
+  /** Xóa tin phía mình (per-user — thành viên khác vẫn thấy tin). */
+  hideMessage: (roomId: string, messageId: string) =>
+    apiPost<{ hidden: boolean }>(
+      `/content-service/chat/messages/${encodeURIComponent(messageId)}/hide`,
+      { roomId },
+    ),
   createBookmark: (roomId: string, messageId: string) =>
     apiPost<{ id: string }>('/content-service/chat/bookmarks', { roomId, messageId }),
   deleteBookmark: (bookmarkId: string) =>

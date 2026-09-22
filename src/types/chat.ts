@@ -29,6 +29,9 @@ export interface ChatMessage {
   // Tim/like: tổng lượt tim + trạng thái "mình đã tim" (likedByMe chỉ có trong GET history)
   timCount?: number;
   likedByMe?: boolean;
+  // "Xóa phía mình" — chỉ mình không thấy tin (thành viên khác vẫn thấy,
+  // isDeleted của server không đổi). Chỉ có trong GET history.
+  hiddenByMe?: boolean;
 }
 
 /** Trang thai phong cua nguoi dung. */

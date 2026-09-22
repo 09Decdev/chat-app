@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { format } from 'date-fns';
-import { Loader2, AlertCircle, Image as ImageIcon, MessageSquare, Heart } from 'lucide-react';
+import { Loader2, AlertCircle, Image as ImageIcon, MessageSquare, Heart, Trash2 } from 'lucide-react';
 import type { LocalMessage } from '@/store/chat.store';
 import { useChatStore } from '@/store/chat.store';
 import { useAuthStore } from '@/store/auth.store';
@@ -18,6 +18,7 @@ export const MessageBubble = memo(function MessageBubble({ message, showHeader }
   const setReplyTarget = useChatStore((s) => s.setReplyTarget);
   const likeMessage = useChatStore((s) => s.likeMessage);
   const unlikeMessage = useChatStore((s) => s.unlikeMessage);
+  const deleteForMe = useChatStore((s) => s.deleteForMe);
 
   const isMe = message.userId === me;
   const name = isMe && !message.displayName ? 'Ban' : message.displayName ?? 'Thanh vien';
@@ -96,6 +97,18 @@ export const MessageBubble = memo(function MessageBubble({ message, showHeader }
                 className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
               >
                 <Heart className="h-3 w-3" /> Bo tim
+              </button>
+            )}
+            {/* Xóa phía mình: tin biến mất khỏi view của mình (người khác vẫn thấy).
+                Không hiện cho tin local pending/failed (chưa có server id). */}
+            {!message._local && (
+              <button
+                type="button"
+                title="Xoa tin phia minh"
+                onClick={() => deleteForMe(message.id)}
+                className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <Trash2 className="h-3 w-3" /> Xoa
               </button>
             )}
           </div>
