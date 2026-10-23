@@ -249,6 +249,17 @@ export function useImpersonatedChat(email: string, opts: { historyLimit?: number
     s.emit('chat:typing', { roomId });
   }, []);
 
+  /** Rời phòng hiện tại (chat:leave) — để tạo phòng mới cho lần quay sau. */
+  const leave = useCallback(() => {
+    const s = socketRef.current;
+    const roomId = roomIdRef.current;
+    if (!s || !roomId) return;
+    s.emit('chat:leave', { roomId });
+    roomIdRef.current = null;
+    setStatus('idle');
+    setMessages([]);
+  }, []);
+
   return {
     status,
     error,
@@ -261,5 +272,6 @@ export function useImpersonatedChat(email: string, opts: { historyLimit?: number
     startMatching,
     send,
     sendTyping,
+    leave,
   };
 }

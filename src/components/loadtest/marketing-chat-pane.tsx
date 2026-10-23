@@ -15,6 +15,8 @@ import { cn } from '@/lib/utils';
 export interface MarketingChatPaneHandle {
   /** Đọc lại my-room → vào phòng (gọi sau khi tạo phòng chỉ định). */
   reconcile: () => void;
+  /** Rời phòng hiện tại. */
+  leave: () => void;
 }
 
 const SYSTEM_TEXT: Record<string, string> = {
@@ -31,11 +33,11 @@ function timeOf(iso: string): string {
 export const MarketingChatPane = forwardRef<MarketingChatPaneHandle, { email: string; label?: string }>(
   function MarketingChatPane({ email, label }, ref) {
     const chat = useImpersonatedChat(email, { historyLimit: 50 });
-    const { status, error, messages, typingHint, me, send, sendTyping, reconcile } = chat;
+    const { status, error, messages, typingHint, me, send, sendTyping, reconcile, leave } = chat;
     const [input, setInput] = useState('');
     const scrollRef = useRef<HTMLDivElement>(null);
 
-    useImperativeHandle(ref, () => ({ reconcile: () => void reconcile() }), [reconcile]);
+    useImperativeHandle(ref, () => ({ reconcile: () => void reconcile(), leave }), [reconcile, leave]);
 
     useEffect(() => {
       const el = scrollRef.current;

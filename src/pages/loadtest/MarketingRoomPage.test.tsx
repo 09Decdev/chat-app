@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   searchAccounts: vi.fn(),
   createMarketingRoom: vi.fn(),
   reconcile: vi.fn(),
+  leave: vi.fn(),
 }));
 
 vi.mock('@/lib/loadtest-api', () => ({
@@ -23,7 +24,7 @@ vi.mock('@/components/loadtest/marketing-chat-pane', async () => {
   const { forwardRef, useImperativeHandle } = await import('react');
   return {
     MarketingChatPane: forwardRef<unknown, { email: string }>(function Pane({ email }, ref) {
-      useImperativeHandle(ref, () => ({ reconcile: mocks.reconcile }));
+      useImperativeHandle(ref, () => ({ reconcile: mocks.reconcile, leave: mocks.leave }));
       return <div data-testid="pane">{email}</div>;
     }),
   };
@@ -65,6 +66,14 @@ describe('MarketingRoomPage', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Đã tạo phòng r1'));
     expect(mocks.createMarketingRoom).toHaveBeenCalledWith(['me@x', 'a@x', 'b@x', 'c@x']);
     expect(mocks.reconcile).toHaveBeenCalledTimes(3);
+  });
+
+  it('"Cho các ô rời phòng" (đã xác nhận) → mọi ô leave', () => {
+    localStorage.setItem('loadtest.marketingRoom', JSON.stringify({ me: 'me@x', panes: ['a@x', 'b@x'] }));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderPage();
+    fireEvent.click(screen.getByRole('button', { name: /Cho các ô rời phòng/ }));
+    expect(mocks.leave).toHaveBeenCalledTimes(2);
   });
 
   it('chọn trùng → báo lỗi, khóa nút', () => {

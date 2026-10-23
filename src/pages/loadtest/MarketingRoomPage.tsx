@@ -4,7 +4,7 @@
  * hàng chờ, người lạ không vào được) → hiện 5 ô chat để operator tự gõ dưới từng account.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Maximize2, Minimize2, Loader2, Users, Smartphone, CheckCircle2 } from 'lucide-react';
+import { Maximize2, Minimize2, Loader2, Users, Smartphone, CheckCircle2, LogOut } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
@@ -220,6 +220,18 @@ export default function MarketingRoomPage() {
           <Button onClick={() => void createRoom()} disabled={!canCreate} className="min-h-10">
             {creating && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
             Tạo phòng {chosen.length} người
+          </Button>
+          <Button
+            variant="outline"
+            className="min-h-10"
+            onClick={() => {
+              if (!window.confirm('Cho 5 tài khoản trên máy tính rời phòng hiện tại? (Tài khoản trên điện thoại bạn tự rời trong app.)')) return;
+              paneRefs.current.forEach((p) => p?.leave());
+              setCreated(null);
+            }}
+            disabled={paneEmails.length === 0}
+          >
+            <LogOut className="h-4 w-4" aria-hidden /> Cho các ô rời phòng
           </Button>
           <span className="text-xs text-muted-foreground">
             Mọi tài khoản phải đang không ở phòng nào. Phòng tồn tại 3 giờ.
