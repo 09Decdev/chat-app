@@ -3,6 +3,7 @@ import { NavLink, Outlet, Link, useLocation, useNavigate } from 'react-router-do
 import { toast } from 'sonner';
 import {
   Activity,
+  Clapperboard,
   FileBarChart,
   FlaskConical,
   History,
@@ -139,6 +140,7 @@ const NAV_ITEMS = [
   { to: routes.loadtest, label: 'Cấu hình', icon: Settings2 },
   { to: routes.loadtestScenario, label: 'Kịch bản', icon: FlaskConical },
   { to: routes.loadtestTicketRegister, label: 'Ticket', icon: Ticket },
+  { to: routes.loadtestMarketing, label: 'Marketing', icon: Clapperboard },
   { to: routes.loadtestLive, label: 'Live', icon: Activity },
   { to: routes.loadtestUsers, label: 'Users', icon: Users },
   { to: routes.loadtestHistory, label: 'Lịch sử', icon: History },

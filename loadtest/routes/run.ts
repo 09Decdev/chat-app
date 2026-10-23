@@ -22,6 +22,42 @@ const USER_PHASES: UserPhase[] = ['provisioned', 'connecting', 'connected', 'que
 // (store.probe query_timeout + Redis commandTimeout).
 const healthProbes = new WeakMap<LoadTestCoordinator, () => Promise<HealthReport>>();
 
+export interface PoolAccountLogin {
+  email: string;
+  password: string;
+  displayName: string;
+  deviceInfo: TestAccount['deviceInfo'];
+}
+
+/** Tìm account để mượn đăng nhập: memory (run active) → DB pool_accounts (run ended). null = không có. */
+export async function findPoolAccount(
+  ctx: RouteCtx,
+  email: string,
+): Promise<{ acc: PoolAccountLogin; memUserId: string } | null | 'DB_ERROR'> {
+  const mem = ctx.coordinator.findAccountInMemory(email);
+  if (mem) {
+    return {
+      acc: { email: mem.email, password: mem.password, displayName: mem.displayName, deviceInfo: mem.deviceInfo },
+      memUserId: mem.userId,
+    };
+  }
+  if (!ctx.store) return null;
+  const r = await ctx.store.findAccountByEmail(email);
+  if (!r.ok) return 'DB_ERROR';
+  const row = r.rows[0];
+  if (!row) return null;
+  let deviceInfo: TestAccount['deviceInfo'] | null = null;
+  try {
+    deviceInfo = JSON.parse(row.deviceInfoJson) as TestAccount['deviceInfo'];
+  } catch {
+    deviceInfo = null;
+  }
+  if (!deviceInfo || !deviceInfo.installationId || !deviceInfo.deviceFingerprint) {
+    deviceInfo = { installationId: `imp-${email}`, deviceFingerprint: `imp-${email}`, platform: 'web', deviceName: 'loadtest-impersonate' };
+  }
+  return { acc: { email: row.email, password: row.password, displayName: row.displayName, deviceInfo }, memUserId: '' };
+}
+
 export const runHandlers = {
   health: async (ctx: RouteCtx, _req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     // T-07 (US-OBS-1): DB down → status:'degraded'|'down', db:'down' — KHÔNG 500, KHÔNG 'ok' giả.
@@ -165,29 +201,10 @@ export const runHandlers = {
     const email = String(body.email ?? '').trim().toLowerCase();
     if (!email) return ctx.fail(res, 400, 'email bắt buộc');
     // 1. Tìm account: memory (run active) → DB pool_accounts (run ended).
-    let acc: { email: string; password: string; displayName: string; deviceInfo: TestAccount['deviceInfo'] } | null = null;
-    let memUserId = '';
-    const mem = ctx.coordinator.findAccountInMemory(email);
-    if (mem) {
-      acc = { email: mem.email, password: mem.password, displayName: mem.displayName, deviceInfo: mem.deviceInfo };
-      memUserId = mem.userId;
-    } else if (ctx.store) {
-      const r = await ctx.store.findAccountByEmail(email);
-      if (!r.ok) return ctx.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
-      const row = r.rows[0];
-      if (row) {
-        let deviceInfo: TestAccount['deviceInfo'] | null = null;
-        try {
-          deviceInfo = JSON.parse(row.deviceInfoJson) as TestAccount['deviceInfo'];
-        } catch {
-          deviceInfo = null;
-        }
-        if (!deviceInfo || !deviceInfo.installationId || !deviceInfo.deviceFingerprint) {
-          deviceInfo = { installationId: `imp-${email}`, deviceFingerprint: `imp-${email}`, platform: 'web', deviceName: 'loadtest-impersonate' };
-        }
-        acc = { email: row.email, password: row.password, displayName: row.displayName, deviceInfo };
-      }
-    }
+    const found = await findPoolAccount(ctx, email);
+    if (found === 'DB_ERROR') return ctx.fail(res, 503, 'Database lỗi', { error: 'DB_UNAVAILABLE' });
+    const acc = found?.acc ?? null;
+    const memUserId = found?.memUserId ?? '';
     if (!acc) return ctx.fail(res, 404, `Không tìm thấy account ${email}`, { error: 'NOT_FOUND' });
     // 2. Re-login fresh (gateway multi-session OK — không đá user thật ra).
     const gatewayUrl = ctx.coordinator.config?.gatewayUrl ?? ctx.env.gatewayUrl;

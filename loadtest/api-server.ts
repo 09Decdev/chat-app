@@ -38,6 +38,7 @@ import { runHandlers } from './routes/run';
 import { historyHandlers } from './routes/history';
 import { settingsHandlers } from './routes/settings';
 import { ticketHandlers } from './routes/tickets';
+import { marketingHandlers } from './routes/marketing';
 import { ticketSourceHandlers } from './routes/ticket-source';
 
 type RouteHandler = (ctx: RouteCtx, req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>;
@@ -83,6 +84,9 @@ const ROUTES: Route[] = [
   route('GET', '/api/loadtest/auth/me', authHandlers.me, { auth: true }),
   route('POST', '/api/loadtest/start', runHandlers.start, { auth: true, rate: 'start' }),
   route('POST', '/api/loadtest/impersonate', runHandlers.impersonate, { auth: true, rate: 'write' }),
+  // Phòng marketing (routes/marketing.ts) — chọn account trong pool → tạo phòng chỉ định
+  route('GET', '/api/loadtest/accounts', marketingHandlers.accounts, { auth: true }),
+  route('POST', '/api/loadtest/marketing-room', marketingHandlers.createRoom, { auth: true, rate: 'write' }),
   route('POST', '/api/loadtest/stop', runHandlers.stop, { auth: true }),
   route('POST', '/api/loadtest/kill', runHandlers.kill, { auth: true }),
   route('POST', '/api/loadtest/pause', runHandlers.pause, { auth: true }),
