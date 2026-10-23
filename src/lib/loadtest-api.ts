@@ -169,6 +169,16 @@ export const loadtestApi = {
     const res = await client.post('/impersonate', { email });
     return unwrap<{ accessToken: string; refreshToken: string; user: { id: string; email: string; displayName: string; avatar: string } }>(res.data);
   },
+  /** Phòng marketing: account trong pool để chọn (không có password). */
+  searchAccounts: async (q = '', limit = 200) => {
+    const res = await client.get('/accounts', { params: { q, limit } });
+    return unwrap<{ rows: Array<{ email: string; userId: string; displayName: string; gatewayUrl: string }> }>(res.data);
+  },
+  /** Phòng marketing: tạo phòng chỉ định đúng các account (2-6), không qua hàng chờ. */
+  createMarketingRoom: async (emails: string[]) => {
+    const res = await client.post('/marketing-room', { emails }, { timeout: 60000 });
+    return unwrap<{ roomId: string; roomEndsAt: number | null; members: Array<{ email: string; userId: string; displayName: string }> }>(res.data);
+  },
   stop: async (force = false) => {
     const res = await client.post(force ? '/kill' : '/stop', force ? { force: true } : {});
     return unwrap<{ stopped: boolean; force: boolean }>(res.data);

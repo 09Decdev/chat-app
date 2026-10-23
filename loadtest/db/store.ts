@@ -619,6 +619,20 @@ export class LoadtestStore {
     );
   }
 
+  /** Phòng marketing: tìm account trong MỌI pool theo email/displayName (KHÔNG trả password). 1 dòng/email (pool mới nhất). */
+  async searchAccounts(opts: { q?: string; limit?: number }): Promise<QueryResult<{ email: string; userId: string; displayName: string; gatewayUrl: string }>> {
+    const limit = Math.min(Math.max(1, opts.limit ?? 50), 200);
+    const q = (opts.q ?? '').trim();
+    return this.query<{ email: string; userId: string; displayName: string; gatewayUrl: string }>(
+      `SELECT DISTINCT ON (pa.email) pa.email, pa.user_id AS "userId", pa.display_name AS "displayName",
+              p.gateway_url AS "gatewayUrl"
+       FROM pool_accounts pa JOIN pools p ON p.pool_id = pa.pool_id
+       WHERE ($1 = '' OR pa.email ILIKE '%' || $1 || '%' OR pa.display_name ILIKE '%' || $1 || '%')
+       ORDER BY pa.email ASC, pa.id DESC LIMIT $2`,
+      [q, limit],
+    );
+  }
+
   async listPoolAccounts(poolId: string, opts?: { limit?: number; offset?: number; status?: string }): Promise<QueryResult<PoolAccountRow>> {
     const where: string[] = [`pool_id = $1`];
     const params: unknown[] = [poolId];
