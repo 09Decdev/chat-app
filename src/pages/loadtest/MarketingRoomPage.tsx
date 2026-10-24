@@ -1,144 +1,223 @@
 /**
- * Phòng marketing — quay video: chọn account của mình (dùng app trên điện thoại) + tối đa 5 account
- * trong pool → tạo phòng chỉ định (POST /marketing-room → content-service internal API, không qua
- * hàng chờ, người lạ không vào được) → hiện 5 ô chat để operator tự gõ dưới từng account.
+ * Phòng marketing — quay video:
+ * 1. Tìm user toàn hệ thống (id/email/SĐT khớp chính xác, tên gần đúng bỏ dấu) — thấy ngay ai đang rảnh.
+ * 2. Click chọn (chỉ user đang không ở phòng nào) → tạo phòng mới HOẶC thêm vào phòng đang có.
+ * 3. Danh sách phòng đang hoạt động; account có trong pool mở được ô chat để gõ tay thay user đó.
+ * API: content-service internal (qua loadtest server) — phòng chỉ định không nhận người lạ.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Maximize2, Minimize2, Loader2, Users, Smartphone, CheckCircle2, LogOut } from 'lucide-react';
+import {
+  Maximize2,
+  Minimize2,
+  Loader2,
+  Search,
+  RefreshCw,
+  X,
+  Plus,
+  MessageSquare,
+  LogOut,
+  CheckCircle2,
+  Lock,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { ComboBox, type ComboBoxOption } from '@/components/loadtest/combobox';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { UserAvatar } from '@/components/chat/UserAvatar';
 import { MarketingChatPane, type MarketingChatPaneHandle } from '@/components/loadtest/marketing-chat-pane';
-import { loadtestApi, toApiError } from '@/lib/loadtest-api';
+import { loadtestApi, toApiError, type ChatAdminRoom, type ChatAdminUser } from '@/lib/loadtest-api';
 import { cn } from '@/lib/utils';
 
-const PANE_COUNT = 5;
-const STORAGE_KEY = 'loadtest.marketingRoom';
+const MAX_MEMBERS = 6;
+const MAX_PANES = 6;
+const STORAGE_KEY = 'loadtest.marketingRoom.v2';
+const NEW_ROOM = '__new__';
 
+type Layout = 'grid' | 'row';
 interface Saved {
-  me: string;
   panes: string[];
   layout: Layout;
 }
-type Layout = 'grid' | 'row';
 
 function loadSaved(): Saved {
-  const empty: Saved = { me: '', panes: Array(PANE_COUNT).fill(''), layout: 'grid' };
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return empty;
-    const p = JSON.parse(raw) as Partial<Saved>;
-    const panes = Array.from({ length: PANE_COUNT }, (_, i) => (typeof p.panes?.[i] === 'string' ? p.panes[i] : ''));
-    return { me: typeof p.me === 'string' ? p.me : '', panes, layout: p.layout === 'row' ? 'row' : 'grid' };
+    const p = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<Saved>;
+    return {
+      panes: Array.isArray(p.panes) ? p.panes.filter((e): e is string => typeof e === 'string').slice(0, MAX_PANES) : [],
+      layout: p.layout === 'row' ? 'row' : 'grid',
+    };
   } catch {
-    return empty;
+    return { panes: [], layout: 'grid' };
   }
 }
 
-function save(s: Saved) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-  } catch {
-    /* private mode — bỏ qua */
-  }
+function shortRoom(id: string) {
+  return id.length > 10 ? `…${id.slice(-8)}` : id;
 }
+
+const MATCH_LABEL: Record<string, string> = { id: 'Khớp userId', email: 'Khớp email', phone: 'Khớp SĐT', name: 'Theo tên' };
 
 export default function MarketingRoomPage() {
   const initial = useMemo(loadSaved, []);
-  const [me, setMe] = useState(initial.me);
-  const [panes, setPanes] = useState<string[]>(initial.panes);
   const [layout, setLayout] = useState<Layout>(initial.layout);
+  const [panes, setPanes] = useState<string[]>(initial.panes);
   const [full, setFull] = useState(false);
+  const paneRefs = useRef(new Map<string, MarketingChatPaneHandle>());
 
-  const [accounts, setAccounts] = useState<ComboBoxOption[]>([]);
-  const [loadingAccounts, setLoadingAccounts] = useState(false);
-  const [accountsError, setAccountsError] = useState<string | null>(null);
+  // ── Tìm user ──
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState<ChatAdminUser[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const searchSeq = useRef(0);
 
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const [created, setCreated] = useState<{ roomId: string; count: number } | null>(null);
-  const paneRefs = useRef<(MarketingChatPaneHandle | null)[]>([]);
+  // ── Chọn + đích ──
+  const [selected, setSelected] = useState<ChatAdminUser[]>([]);
+  const [target, setTarget] = useState<string>(NEW_ROOM);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionOk, setActionOk] = useState<string | null>(null);
 
-  useEffect(() => save({ me, panes, layout }), [me, panes, layout]);
+  // ── Phòng ──
+  const [rooms, setRooms] = useState<ChatAdminRoom[]>([]);
+  const [roomsLoading, setRoomsLoading] = useState(false);
+  const [roomsError, setRoomsError] = useState<string | null>(null);
 
-  const fetchAccounts = useCallback(async () => {
-    setLoadingAccounts(true);
-    setAccountsError(null);
+  useEffect(() => {
     try {
-      const res = await loadtestApi.searchAccounts('', 200);
-      setAccounts(
-        res.rows.map((r) => ({
-          value: r.email,
-          label: r.displayName ? `${r.displayName} — ${r.email}` : r.email,
-          hint: r.gatewayUrl,
-        })),
-      );
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ panes, layout }));
+    } catch {
+      /* private mode */
+    }
+  }, [panes, layout]);
+
+  const runSearch = useCallback(async (term: string) => {
+    const seq = ++searchSeq.current;
+    if (!term.trim()) {
+      setResults([]);
+      setSearchError(null);
+      return;
+    }
+    setSearching(true);
+    setSearchError(null);
+    try {
+      const res = await loadtestApi.searchChatUsers(term.trim(), 30);
+      if (seq === searchSeq.current) setResults(res.rows);
     } catch (e) {
-      setAccountsError(toApiError(e).message);
+      if (seq === searchSeq.current) setSearchError(toApiError(e).message);
     } finally {
-      setLoadingAccounts(false);
+      if (seq === searchSeq.current) setSearching(false);
     }
   }, []);
 
   useEffect(() => {
-    void fetchAccounts();
-  }, [fetchAccounts]);
+    const t = setTimeout(() => void runSearch(q), 350);
+    return () => clearTimeout(t);
+  }, [q, runSearch]);
 
-  const chosen = [me, ...panes].map((e) => e.trim().toLowerCase()).filter(Boolean);
-  const duplicate = chosen.length !== new Set(chosen).size;
-  const paneEmails = panes.map((e) => e.trim()).filter(Boolean);
-  const canCreate = !!me.trim() && paneEmails.length >= 1 && !duplicate && !creating;
-
-  const setPane = (i: number, v: string) =>
-    setPanes((prev) => {
-      const n = [...prev];
-      n[i] = v;
-      return n;
-    });
-
-  const createRoom = async () => {
-    setCreating(true);
-    setCreateError(null);
-    setCreated(null);
+  const fetchRooms = useCallback(async () => {
+    setRoomsLoading(true);
+    setRoomsError(null);
     try {
-      const res = await loadtestApi.createMarketingRoom(chosen);
-      setCreated({ roomId: res.roomId, count: res.members.length });
-      // Ô chat có thể đã mở trước khi phòng tạo → đọc lại my-room để vào phòng ngay.
-      paneRefs.current.forEach((p) => p?.reconcile());
+      const res = await loadtestApi.listChatRooms();
+      setRooms(res.rows);
     } catch (e) {
-      setCreateError(toApiError(e).message);
+      setRoomsError(toApiError(e).message);
     } finally {
-      setCreating(false);
+      setRoomsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchRooms();
+    const iv = setInterval(() => void fetchRooms(), 15000);
+    return () => clearInterval(iv);
+  }, [fetchRooms]);
+
+  const targetRoom = rooms.find((r) => r.roomId === target) ?? null;
+  const freeSlots = targetRoom ? targetRoom.capacity - targetRoom.memberCount : MAX_MEMBERS;
+  const selectedIds = new Set(selected.map((u) => u.id));
+
+  const pick = (u: ChatAdminUser) => {
+    if (u.roomId || selectedIds.has(u.id) || selected.length >= MAX_MEMBERS) return;
+    setSelected((prev) => [...prev, u]);
+    setActionOk(null);
+  };
+  const unpick = (id: string) => setSelected((prev) => prev.filter((u) => u.id !== id));
+
+  const openPane = (email: string) =>
+    setPanes((prev) => (prev.includes(email) || prev.length >= MAX_PANES ? prev : [...prev, email]));
+  const closePane = (email: string) => setPanes((prev) => prev.filter((e) => e !== email));
+
+  const canSubmit =
+    !busy && (target === NEW_ROOM ? selected.length >= 2 : selected.length >= 1 && selected.length <= freeSlots);
+
+  const submit = async () => {
+    setBusy(true);
+    setActionError(null);
+    setActionOk(null);
+    const ids = selected.map((u) => u.id);
+    try {
+      const res =
+        target === NEW_ROOM
+          ? await loadtestApi.createChatRoom(ids)
+          : await loadtestApi.addChatRoomMembers(target, ids);
+      setActionOk(
+        target === NEW_ROOM
+          ? `Đã tạo phòng ${shortRoom(res.roomId)} với ${ids.length} người.`
+          : `Đã thêm ${ids.length} người vào phòng ${shortRoom(res.roomId)}.`,
+      );
+      // Mở sẵn ô chat cho người có trong pool (còn chỗ)
+      selected.forEach((u) => u.poolEmail && openPane(u.poolEmail));
+      setSelected([]);
+      setTarget(res.roomId);
+      void fetchRooms();
+      void runSearch(q);
+      paneRefs.current.forEach((p) => p.reconcile());
+    } catch (e) {
+      setActionError(toApiError(e).message);
+    } finally {
+      setBusy(false);
     }
   };
 
   const gridClass =
     layout === 'row'
-      ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-5'
-      : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 lg:[&>*]:col-span-2 lg:[&>*:nth-child(4)]:col-start-2';
+      ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-6'
+      : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3';
 
-  const grid = (
+  const paneGrid = (
     <div className={cn('grid min-h-0 flex-1 gap-3', gridClass, full ? 'auto-rows-fr' : 'auto-rows-[minmax(26rem,1fr)]')}>
-      {panes.map((email, i) =>
-        email.trim() ? (
+      {panes.map((email, i) => (
+        <div key={email} className="relative min-h-0">
           <MarketingChatPane
-            key={email.trim().toLowerCase()}
             ref={(h) => {
-              paneRefs.current[i] = h;
+              if (h) paneRefs.current.set(email, h);
+              else paneRefs.current.delete(email);
             }}
-            email={email.trim().toLowerCase()}
-            label={`Người ${i + 1}`}
+            email={email}
+            label={`Ô ${i + 1}`}
           />
-        ) : null,
-      )}
+          {!full && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="absolute right-1 top-1 h-7 w-7"
+              onClick={() => closePane(email)}
+              aria-label={`Đóng ô chat ${email}`}
+            >
+              <X className="h-4 w-4" aria-hidden />
+            </Button>
+          )}
+        </div>
+      ))}
     </div>
   );
 
   if (full) {
     return (
       <div className="fixed inset-0 z-50 flex flex-col bg-background p-3">
-        {grid}
+        {paneGrid}
         <Button
           variant="outline"
           size="sm"
@@ -156,105 +235,237 @@ export default function MarketingRoomPage() {
       <div>
         <h1 className="text-lg font-semibold">Phòng marketing</h1>
         <p className="text-sm text-muted-foreground">
-          Chọn tài khoản của bạn và tối đa 5 tài khoản khác → tạo phòng chỉ định (người lạ không vào được) → tự chat dưới từng
-          tài khoản ở các ô bên dưới.
+          Tìm user → click chọn người đang rảnh → tạo phòng mới hoặc thêm vào phòng đang có. Người có trong pool mở được ô
+          chat để bạn gõ tay thay họ.
         </p>
       </div>
 
-      <Card className="flex flex-col gap-4 p-4">
-        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="mk-me" className="flex items-center gap-1.5">
-              <Smartphone className="h-4 w-4" aria-hidden /> Tài khoản của bạn (dùng trên điện thoại)
-            </Label>
-            <ComboBox
-              id="mk-me"
-              label="Tài khoản của bạn"
-              allowCustom
-              value={me}
-              onValueChange={setMe}
-              options={accounts}
-              loading={loadingAccounts}
-              error={accountsError}
-              placeholder="Chọn hoặc gõ email"
-              emptyText="Không thấy account — gõ email trực tiếp hoặc «Tải lại»."
-              onRefresh={() => void fetchAccounts()}
+      <div className="grid gap-4 lg:grid-cols-2">
+        {/* ── 1. Tìm user ── */}
+        <Card className="flex min-h-0 flex-col gap-3 p-4">
+          <h2 className="text-sm font-semibold">1. Tìm user</h2>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Tên (không cần dấu), email, SĐT hoặc userId"
+              className="h-10 pl-9"
+              aria-label="Tìm user"
             />
+            {searching && (
+              <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" aria-label="Đang tìm" />
+            )}
           </div>
-          {panes.map((email, i) => (
-            <div key={i} className="flex flex-col gap-1.5">
-              <Label htmlFor={`mk-p${i}`} className="flex items-center gap-1.5">
-                <Users className="h-4 w-4" aria-hidden /> Người {i + 1} (ô chat trên máy tính)
-              </Label>
-              <ComboBox
-                id={`mk-p${i}`}
-                label={`Người ${i + 1}`}
-                allowCustom
-                value={email}
-                onValueChange={(v) => setPane(i, v)}
-                options={accounts}
-                loading={loadingAccounts}
-                error={accountsError}
-                placeholder="Chọn hoặc gõ email"
-                emptyText="Không thấy account — gõ email trực tiếp hoặc «Tải lại»."
-                onRefresh={() => void fetchAccounts()}
-              />
-            </div>
-          ))}
+          {searchError && <p className="text-sm text-destructive" role="alert">{searchError}</p>}
+          <ul className="max-h-[26rem] min-h-0 divide-y divide-border overflow-y-auto rounded-md border border-border" aria-label="Kết quả tìm user">
+            {results.length === 0 && (
+              <li className="p-3 text-sm text-muted-foreground">{q.trim() ? (searching ? 'Đang tìm…' : 'Không có kết quả.') : 'Gõ để tìm.'}</li>
+            )}
+            {results.map((u) => {
+              const busyUser = !!u.roomId;
+              const chosen = selectedIds.has(u.id);
+              const disabled = busyUser || chosen || selected.length >= MAX_MEMBERS;
+              return (
+                <li key={u.id}>
+                  <button
+                    type="button"
+                    onClick={() => pick(u)}
+                    disabled={disabled}
+                    className={cn(
+                      'flex w-full items-center gap-3 px-3 py-2 text-left transition-colors',
+                      disabled ? 'cursor-not-allowed opacity-60' : 'hover:bg-accent',
+                      chosen && 'bg-primary/10 opacity-100',
+                    )}
+                    aria-label={`${chosen ? 'Đã chọn' : busyUser ? 'Đang ở phòng' : 'Chọn'} ${u.displayName ?? u.email ?? u.id}`}
+                  >
+                    <UserAvatar name={u.displayName} userId={u.id} url={u.avatarUrl} size="sm" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{u.displayName || '(chưa đặt tên)'}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {[u.email, u.phoneNumber].filter(Boolean).join(' · ') || u.id}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <span className="text-[10px] text-muted-foreground">{MATCH_LABEL[u.matchedBy] ?? u.matchedBy}</span>
+                      <div className="flex gap-1">
+                        {u.inPool && <Badge variant="secondary" className="text-[10px]">Pool</Badge>}
+                        {busyUser ? (
+                          <Badge variant="warning" className="text-[10px]">Đang ở phòng {shortRoom(u.roomId!)}</Badge>
+                        ) : chosen ? (
+                          <Badge className="text-[10px]">Đã chọn</Badge>
+                        ) : (
+                          <Badge variant="success" className="text-[10px]">Rảnh</Badge>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </Card>
+
+        {/* ── 2. Xếp vào phòng ── */}
+        <Card className="flex flex-col gap-3 p-4">
+          <h2 className="text-sm font-semibold">2. Xếp vào phòng ({selected.length}/{MAX_MEMBERS} người đã chọn)</h2>
+          <div className="flex min-h-10 flex-wrap gap-2">
+            {selected.length === 0 && <p className="text-sm text-muted-foreground">Click user ở bên trái để chọn.</p>}
+            {selected.map((u) => (
+              <span key={u.id} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary py-1 pl-1 pr-2 text-sm">
+                <UserAvatar name={u.displayName} userId={u.id} url={u.avatarUrl} size="sm" className="h-6 w-6" />
+                {u.displayName || u.email || u.id.slice(0, 8)}
+                <button type="button" onClick={() => unpick(u.id)} className="rounded-full p-0.5 hover:bg-accent" aria-label={`Bỏ chọn ${u.displayName ?? u.id}`}>
+                  <X className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              </span>
+            ))}
+          </div>
+
+          <label className="flex flex-col gap-1.5 text-sm">
+            <span className="font-medium">Đích</span>
+            <select
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+              aria-label="Chọn phòng đích"
+            >
+              <option value={NEW_ROOM}>+ Tạo phòng mới (người lạ không vào được)</option>
+              {rooms
+                .filter((r) => r.memberCount < r.capacity)
+                .map((r) => (
+                  <option key={r.roomId} value={r.roomId}>
+                    Phòng {shortRoom(r.roomId)} · {r.memberCount}/{r.capacity} · {r.members.map((m) => m.displayName || m.userId.slice(0, 6)).join(', ')}
+                  </option>
+                ))}
+            </select>
+          </label>
+
+          {target !== NEW_ROOM && selected.length > freeSlots && (
+            <p className="text-sm text-destructive">Phòng này chỉ còn {freeSlots} chỗ.</p>
+          )}
+          {actionError && <p className="text-sm text-destructive" role="alert">{actionError}</p>}
+          {actionOk && (
+            <p className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400" role="status">
+              <CheckCircle2 className="h-4 w-4" aria-hidden /> {actionOk} Người dùng thật mở app vào mục chat là thấy phòng.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => void submit()} disabled={!canSubmit} className="min-h-10">
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Plus className="h-4 w-4" aria-hidden />}
+              {target === NEW_ROOM ? `Tạo phòng ${selected.length} người` : `Thêm ${selected.length} người vào phòng`}
+            </Button>
+            {selected.length > 0 && (
+              <Button variant="ghost" onClick={() => setSelected([])} className="min-h-10">
+                Bỏ chọn hết
+              </Button>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Phòng mới cần ít nhất 2 người. Chỉ chọn được người đang không ở phòng nào; phòng tồn tại 3 giờ.
+          </p>
+        </Card>
+      </div>
+
+      {/* ── 3. Phòng đang hoạt động ── */}
+      <Card className="flex flex-col gap-3 p-4">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold">3. Phòng đang hoạt động ({rooms.length})</h2>
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => void fetchRooms()} disabled={roomsLoading}>
+            <RefreshCw className={cn('h-4 w-4', roomsLoading && 'animate-spin')} aria-hidden /> Tải lại
+          </Button>
         </div>
+        {roomsError && <p className="text-sm text-destructive" role="alert">{roomsError}</p>}
+        {rooms.length === 0 && !roomsError && <p className="text-sm text-muted-foreground">Chưa có phòng nào.</p>}
+        <ul className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          {rooms.map((r) => {
+            const poolMembers = r.members.filter((m) => m.poolEmail);
+            return (
+              <li key={r.roomId} className={cn('rounded-lg border border-border p-3', target === r.roomId && 'ring-2 ring-primary')}>
+                <div className="mb-2 flex items-center gap-2 text-sm">
+                  <span className="font-mono font-medium">{shortRoom(r.roomId)}</span>
+                  <Badge variant="secondary" className="text-[10px]">{r.memberCount}/{r.capacity}</Badge>
+                  {r.curated && (
+                    <Badge variant="outline" className="gap-1 text-[10px]">
+                      <Lock className="h-3 w-3" aria-hidden /> Chỉ định
+                    </Badge>
+                  )}
+                  {r.memberCount < r.capacity && (
+                    <Button variant="link" size="sm" className="ml-auto h-auto p-0 text-xs" onClick={() => setTarget(r.roomId)}>
+                      Chọn làm đích
+                    </Button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {r.members.map((m) => {
+                    const open = !!m.poolEmail && panes.includes(m.poolEmail);
+                    return (
+                      <button
+                        key={m.userId}
+                        type="button"
+                        disabled={!m.poolEmail}
+                        onClick={() => m.poolEmail && (open ? closePane(m.poolEmail) : openPane(m.poolEmail))}
+                        className={cn(
+                          'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs',
+                          open ? 'border-primary bg-primary/15' : 'border-border',
+                          m.poolEmail ? 'hover:bg-accent' : 'cursor-default opacity-70',
+                        )}
+                        title={m.poolEmail ? (open ? 'Đóng ô chat' : 'Mở ô chat') : 'Không có trong pool — không mở được ô chat'}
+                      >
+                        {m.poolEmail && <MessageSquare className="h-3 w-3" aria-hidden />}
+                        {m.displayName || m.userId.slice(0, 8)}
+                      </button>
+                    );
+                  })}
+                </div>
+                {poolMembers.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2 h-8 text-xs"
+                    onClick={() => poolMembers.forEach((m) => openPane(m.poolEmail!))}
+                  >
+                    Mở ô chat cả phòng ({poolMembers.length})
+                  </Button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </Card>
 
-        {duplicate && <p className="text-sm text-destructive">Có tài khoản bị chọn trùng.</p>}
-        {createError && (
-          <p className="text-sm text-destructive" role="alert">
-            {createError}
-          </p>
-        )}
-        {created && (
-          <p className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400" role="status">
-            <CheckCircle2 className="h-4 w-4" aria-hidden />
-            Đã tạo phòng {created.roomId} ({created.count} người). Mở app trên điện thoại vào mục chat — app sẽ tự vào phòng.
-          </p>
-        )}
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => void createRoom()} disabled={!canCreate} className="min-h-10">
-            {creating && <Loader2 className="h-4 w-4 animate-spin" aria-hidden />}
-            Tạo phòng {chosen.length} người
+      {/* ── 4. Ô chat ── */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold">4. Ô chat ({panes.length}/{MAX_PANES})</h2>
+        <div className="ml-auto flex flex-wrap items-center gap-1">
+          <span className="text-xs text-muted-foreground">Bố cục:</span>
+          <Button variant={layout === 'grid' ? 'default' : 'outline'} size="sm" onClick={() => setLayout('grid')} aria-pressed={layout === 'grid'}>
+            3 cột
+          </Button>
+          <Button variant={layout === 'row' ? 'default' : 'outline'} size="sm" onClick={() => setLayout('row')} aria-pressed={layout === 'row'}>
+            1 hàng
           </Button>
           <Button
             variant="outline"
-            className="min-h-10"
+            size="sm"
+            disabled={panes.length === 0}
             onClick={() => {
-              if (!window.confirm('Cho 5 tài khoản trên máy tính rời phòng hiện tại? (Tài khoản trên điện thoại bạn tự rời trong app.)')) return;
-              paneRefs.current.forEach((p) => p?.leave());
-              setCreated(null);
+              if (!window.confirm('Cho tất cả tài khoản đang mở ô chat rời phòng hiện tại?')) return;
+              paneRefs.current.forEach((p) => p.leave());
+              setTimeout(() => void fetchRooms(), 1000);
             }}
-            disabled={paneEmails.length === 0}
           >
             <LogOut className="h-4 w-4" aria-hidden /> Cho các ô rời phòng
           </Button>
-          <span className="text-xs text-muted-foreground">
-            Mọi tài khoản phải đang không ở phòng nào. Phòng tồn tại 3 giờ.
-          </span>
-          <div className="ml-auto flex items-center gap-1">
-            <span className="text-xs text-muted-foreground">Bố cục:</span>
-            <Button variant={layout === 'grid' ? 'default' : 'outline'} size="sm" onClick={() => setLayout('grid')} aria-pressed={layout === 'grid'}>
-              3 + 2
-            </Button>
-            <Button variant={layout === 'row' ? 'default' : 'outline'} size="sm" onClick={() => setLayout('row')} aria-pressed={layout === 'row'}>
-              1 hàng
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setFull(true)} disabled={paneEmails.length === 0}>
-              <Maximize2 className="h-4 w-4" aria-hidden /> Full màn hình
-            </Button>
-          </div>
+          <Button variant="outline" size="sm" onClick={() => setFull(true)} disabled={panes.length === 0}>
+            <Maximize2 className="h-4 w-4" aria-hidden /> Full màn hình
+          </Button>
         </div>
-      </Card>
-
-      {paneEmails.length > 0 ? (
-        grid
+      </div>
+      {panes.length > 0 ? (
+        paneGrid
       ) : (
-        <p className="text-sm text-muted-foreground">Chọn ít nhất 1 người để hiện ô chat.</p>
+        <p className="text-sm text-muted-foreground">Mở ô chat từ danh sách phòng (thành viên có biểu tượng tin nhắn là người trong pool).</p>
       )}
     </div>
   );

@@ -112,6 +112,31 @@ function unwrap<T>(body: unknown): T {
   return body as T;
 }
 
+/** Phòng marketing — user tìm được (content-service + cờ pool). */
+export interface ChatAdminUser {
+  id: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  email: string | null;
+  phoneNumber: string | null;
+  matchedBy: 'id' | 'email' | 'phone' | 'name' | string;
+  /** Phòng hiện tại — null = đang rảnh. */
+  roomId: string | null;
+  /** Có trong pool loadtest → mở được ô chat (đăng nhập thay). */
+  inPool: boolean;
+  poolEmail: string | null;
+}
+
+export interface ChatAdminRoom {
+  roomId: string;
+  memberCount: number;
+  capacity: number;
+  curated: boolean;
+  createdAt: number | null;
+  expiresAt: number | null;
+  members: Array<{ userId: string; displayName: string | null; avatarUrl: string | null; inPool: boolean; poolEmail: string | null }>;
+}
+
 export const loadtestApi = {
   // ── Admin auth (PRD Module A) ──
   authRegister: async (username: string, email: string, password: string) => {
@@ -174,10 +199,25 @@ export const loadtestApi = {
     const res = await client.get('/accounts', { params: { q, limit } });
     return unwrap<{ rows: Array<{ email: string; userId: string; displayName: string; gatewayUrl: string }> }>(res.data);
   },
-  /** Phòng marketing: tạo phòng chỉ định đúng các account (2-6), không qua hàng chờ. */
-  createMarketingRoom: async (emails: string[]) => {
-    const res = await client.post('/marketing-room', { emails }, { timeout: 60000 });
-    return unwrap<{ roomId: string; roomEndsAt: number | null; members: Array<{ email: string; userId: string; displayName: string }> }>(res.data);
+  /** Phòng marketing: tìm user toàn hệ thống (id/email/SĐT chính xác, tên gần đúng) + phòng hiện tại. */
+  searchChatUsers: async (q: string, limit = 20) => {
+    const res = await client.get('/chat-users', { params: { q, limit } });
+    return unwrap<{ rows: ChatAdminUser[] }>(res.data);
+  },
+  /** Phòng marketing: phòng chat đang hoạt động + thành viên. */
+  listChatRooms: async () => {
+    const res = await client.get('/chat-rooms');
+    return unwrap<{ rows: ChatAdminRoom[] }>(res.data);
+  },
+  /** Phòng marketing: tạo phòng chỉ định 2-6 người (người lạ không vào được). */
+  createChatRoom: async (userIds: string[]) => {
+    const res = await client.post('/chat-rooms', { userIds }, { timeout: 30000 });
+    return unwrap<{ roomId: string; roomEndsAt: number }>(res.data);
+  },
+  /** Phòng marketing: thêm 1-6 người vào phòng đang có. */
+  addChatRoomMembers: async (roomId: string, userIds: string[]) => {
+    const res = await client.post(`/chat-rooms/${encodeURIComponent(roomId)}/members`, { userIds }, { timeout: 30000 });
+    return unwrap<{ roomId: string; roomEndsAt: number }>(res.data);
   },
   stop: async (force = false) => {
     const res = await client.post(force ? '/kill' : '/stop', force ? { force: true } : {});

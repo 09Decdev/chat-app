@@ -84,9 +84,12 @@ const ROUTES: Route[] = [
   route('GET', '/api/loadtest/auth/me', authHandlers.me, { auth: true }),
   route('POST', '/api/loadtest/start', runHandlers.start, { auth: true, rate: 'start' }),
   route('POST', '/api/loadtest/impersonate', runHandlers.impersonate, { auth: true, rate: 'write' }),
-  // Phòng marketing (routes/marketing.ts) — chọn account trong pool → tạo phòng chỉ định
+  // Phòng marketing (routes/marketing.ts) — tìm user, tạo phòng chỉ định / thêm vào phòng có sẵn
   route('GET', '/api/loadtest/accounts', marketingHandlers.accounts, { auth: true }),
-  route('POST', '/api/loadtest/marketing-room', marketingHandlers.createRoom, { auth: true, rate: 'write' }),
+  route('GET', '/api/loadtest/chat-users', marketingHandlers.searchUsers, { auth: true }),
+  route('GET', '/api/loadtest/chat-rooms', marketingHandlers.listRooms, { auth: true }),
+  route('POST', '/api/loadtest/chat-rooms', marketingHandlers.createRoom, { auth: true, rate: 'write' }),
+  route('POST', '/api/loadtest/chat-rooms/:roomId/members', marketingHandlers.addMembers, { auth: true, rate: 'write' }),
   route('POST', '/api/loadtest/stop', runHandlers.stop, { auth: true }),
   route('POST', '/api/loadtest/kill', runHandlers.kill, { auth: true }),
   route('POST', '/api/loadtest/pause', runHandlers.pause, { auth: true }),

@@ -633,6 +633,17 @@ export class LoadtestStore {
     );
   }
 
+  /** Phòng marketing: account nào có trong pool (mở được ô chat) — khớp theo email hoặc userId. */
+  async findPoolAccountsByIdentity(emails: string[], userIds: string[]): Promise<QueryResult<{ email: string; userId: string }>> {
+    return this.query<{ email: string; userId: string }>(
+      `SELECT DISTINCT ON (lower(email)) lower(email) AS email, user_id AS "userId"
+       FROM pool_accounts
+       WHERE lower(email) = ANY($1::text[]) OR (user_id <> '' AND user_id = ANY($2::text[]))
+       ORDER BY lower(email), id DESC`,
+      [emails.map((e) => e.toLowerCase()), userIds],
+    );
+  }
+
   async listPoolAccounts(poolId: string, opts?: { limit?: number; offset?: number; status?: string }): Promise<QueryResult<PoolAccountRow>> {
     const where: string[] = [`pool_id = $1`];
     const params: unknown[] = [poolId];
