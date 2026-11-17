@@ -90,6 +90,7 @@ const ROUTES: Route[] = [
   route('GET', '/api/loadtest/chat-rooms', marketingHandlers.listRooms, { auth: true }),
   route('POST', '/api/loadtest/chat-rooms', marketingHandlers.createRoom, { auth: true, rate: 'write' }),
   route('POST', '/api/loadtest/chat-rooms/:roomId/members', marketingHandlers.addMembers, { auth: true, rate: 'write' }),
+  route('POST', '/api/loadtest/marketing/impersonate', marketingHandlers.impersonate, { auth: true, rate: 'write' }),
   route('POST', '/api/loadtest/stop', runHandlers.stop, { auth: true }),
   route('POST', '/api/loadtest/kill', runHandlers.kill, { auth: true }),
   route('POST', '/api/loadtest/pause', runHandlers.pause, { auth: true }),

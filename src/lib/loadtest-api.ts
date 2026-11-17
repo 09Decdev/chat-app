@@ -204,10 +204,18 @@ export const loadtestApi = {
     const res = await client.get('/chat-users', { params: { q, limit } });
     return unwrap<{ rows: ChatAdminUser[] }>(res.data);
   },
-  /** Phòng marketing: phòng chat đang hoạt động + thành viên. */
+  /** Phòng marketing: phòng chat đang hoạt động + thành viên (mintEnabled = tool có thể mint token user thường). */
   listChatRooms: async () => {
     const res = await client.get('/chat-rooms');
-    return unwrap<{ rows: ChatAdminRoom[] }>(res.data);
+    return unwrap<{ rows: ChatAdminRoom[]; mintEnabled?: boolean }>(res.data);
+  },
+  /**
+   * Phòng marketing (F-mint): mint access token JWT cho USER THƯỜNG (ngoài pool, không cần
+   * password) — server ký bằng LOADTEST_MINT_JWT_SECRET. 503 MINT_DISABLED nếu chưa cấu hình.
+   */
+  impersonateMint: async (body: { userId: string; displayName?: string; avatar?: string }) => {
+    const res = await client.post('/marketing/impersonate', body);
+    return unwrap<{ accessToken: string; refreshToken: string; user: { id: string; email: string; displayName: string; avatar: string } }>(res.data);
   },
   /** Phòng marketing: tạo phòng chỉ định 2-6 người (người lạ không vào được). */
   createChatRoom: async (userIds: string[]) => {

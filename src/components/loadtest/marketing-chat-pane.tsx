@@ -9,7 +9,7 @@ import { Send, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { UserAvatar } from '@/components/chat/UserAvatar';
-import { useImpersonatedChat, type ImpersonatedMsg } from '@/hooks/useImpersonatedChat';
+import { useImpersonatedChat, type ImpersonatedMsg, type MintIdentity } from '@/hooks/useImpersonatedChat';
 import { cn } from '@/lib/utils';
 
 export interface MarketingChatPaneHandle {
@@ -30,9 +30,9 @@ function timeOf(iso: string): string {
   return Number.isNaN(d.getTime()) ? '' : format(d, 'HH:mm');
 }
 
-export const MarketingChatPane = forwardRef<MarketingChatPaneHandle, { email: string; label?: string }>(
-  function MarketingChatPane({ email, label }, ref) {
-    const chat = useImpersonatedChat(email, { historyLimit: 50 });
+export const MarketingChatPane = forwardRef<MarketingChatPaneHandle, { email: string; label?: string; mint?: MintIdentity }>(
+  function MarketingChatPane({ email, label, mint }, ref) {
+    const chat = useImpersonatedChat(email, { historyLimit: 50, mint });
     const { status, error, messages, typingHint, me, send, sendTyping, reconcile, leave } = chat;
     const [input, setInput] = useState('');
     const scrollRef = useRef<HTMLDivElement>(null);

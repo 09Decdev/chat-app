@@ -21,6 +21,8 @@ export {
 } from './logger';
 export type { LogFields, LogLevel, LogSubscriber, LogHistoryEntry, JsonlEntry, JsonlSink } from './logger';
 
+import { createHmac } from 'node:crypto';
+
 // ─── Random generators (deviceInfo đúng contract gateway-auth-service deviceInfo.dto.ts) ───
 
 const HEX = '0123456789abcdef';
@@ -159,4 +161,34 @@ export function normalizeUrl(url: string): string {
 export function parseBool(v: string | undefined, def = false): boolean {
   if (v === undefined) return def;
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
+}
+
+/** TTL string → giây. '1h' | '30m' | '45s' | '1d' | số thuần = giây. Mặc định 3600. */
+export function expiresInToSeconds(v: string): number {
+  const m = /^(\d+)\s*([smhd])?$/i.exec(v.trim());
+  if (!m) return 3600;
+  const n = Number(m[1]);
+  const unit = (m[2] ?? 's').toLowerCase();
+  const mult = unit === 'h' ? 3600 : unit === 'd' ? 86400 : unit === 'm' ? 60 : 1;
+  return Math.max(60, n * mult);
+}
+
+/**
+ * F-mint: ký JWT HS256 (header/payload/base64url + HMAC) — same alg as gateway
+ * (`jsonwebtoken` mặc định HS256). Dùng cho phòng marketing mở ô chat user thường
+ * (không có trong pool) mà không cần password. CHỈ dev — secret phải khớp
+ * ACCESS_TOKEN_SECRET của gateway đang trỏ.
+ */
+export function signJwtHS256(
+  secret: string,
+  payload: Record<string, unknown>,
+  expiresSec: number,
+): string {
+  const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const iat = Math.floor(Date.now() / 1000);
+  const body = { ...payload, iat, exp: iat + expiresSec };
+  const head = b64({ alg: 'HS256', typ: 'JWT' });
+  const claims = b64(body);
+  const sig = createHmac('sha256', secret).update(`${head}.${claims}`).digest('base64url');
+  return `${head}.${claims}.${sig}`;
 }
