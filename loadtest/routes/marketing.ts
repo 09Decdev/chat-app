@@ -9,7 +9,7 @@
 import * as http from 'node:http';
 import type { RouteCtx } from '../http-server';
 import { requestJson } from '../http';
-import { ltLog } from '../util';
+import { ltLog, signJwtHS256, expiresInToSeconds } from '../util';
 
 const MAX_MEMBERS = 6;
 
@@ -124,7 +124,7 @@ export const marketingHandlers = {
         return { ...m, inPool: !!poolEmail, poolEmail };
       }),
     }));
-    return ctx.ok(res, { rows });
+    return ctx.ok(res, { rows, mintEnabled: !!ctx.env.mintJwtSecret });
   },
 
   /** POST /chat-rooms {userIds: 2..6} — tạo phòng chỉ định (người lạ không vào được). */
@@ -157,5 +157,45 @@ export const marketingHandlers = {
     if (!r.ok) return failUpstream(ctx, res, r);
     ltLog.info(`[marketing] thêm ${userIds.length} người vào phòng ${roomId}`);
     return ctx.ok(res, r.data);
+  },
+
+  /**
+   * POST /marketing/impersonate {userId, displayName?, avatar?} — F-mint: ký access token
+   * HS256 bằng ACCESS_TOKEN_SECRET của gateway (LOADTEST_MINT_JWT_SECRET) cho USER THƯỜNG
+   * (ngoài pool, không cần password) để mở ô chat phòng marketing.
+   * Payload KHÔNG chứa tokenVersion/installationId → JwtThrottlerGuard bỏ qua check version
+   * (gateway-auth-service jwt-throttler.guard.ts), socket verify signature → cả hai đường đều qua.
+   * DEV ONLY: endpoint này mint token cho BẤT KỲ userId nào — chỉ bật khi trỏ gateway dev.
+   */
+  impersonate: async (ctx: RouteCtx, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+    if (!ctx.env.mintJwtSecret) {
+      return ctx.fail(res, 503, 'Mint JWT chưa bật — thêm LOADTEST_MINT_JWT_SECRET (= ACCESS_TOKEN_SECRET của gateway) vào loadtest/.env. Hoặc dùng account trong pool (nút impersonate thường).', { error: 'MINT_DISABLED' });
+    }
+    const body = await ctx.readBody(req, res);
+    if (body === undefined) return;
+    const userId = String(body.userId ?? '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) {
+      return ctx.fail(res, 400, 'userId phải là UUID hợp lệ', { error: 'INVALID_USER_ID' });
+    }
+    const displayName = String(body.displayName ?? '').trim() || 'Operator';
+    const avatar = String(body.avatar ?? '').trim();
+    const accessToken = signJwtHS256(
+      ctx.env.mintJwtSecret,
+      {
+        sub: userId,
+        email: `loadtest-mint@mayogu.test`,
+        displayName,
+        avatar,
+        dateOfBirth: null,
+        gender: null,
+      },
+      expiresInToSeconds(ctx.env.mintJwtExpires),
+    );
+    ltLog.info(`[marketing] mint token cho ${userId} (${displayName})`);
+    return ctx.ok(res, {
+      accessToken,
+      refreshToken: '',
+      user: { id: userId, email: `loadtest-mint@mayogu.test`, displayName, avatar },
+    });
   },
 };

@@ -84,6 +84,14 @@ export interface LoadTestEnv {
   trustProxy: boolean;
   /** Tổng timeout graceful shutdown (ms) — mặc định 10s (PRD §5.2). */
   shutdownTimeoutMs: number;
+  /**
+   * F-mint (phòng marketing): ACCESS_TOKEN_SECRET của gateway — set thì tool tự ký JWT
+   * HS256 cho USER THƯỜNG (ngoài pool, không cần password) để mở ô chat. DEV ONLY — secret
+   * lấy từ môi trường gateway đang trỏ tới. KHÔNG log giá trị.
+   */
+  mintJwtSecret: string;
+  /** TTL token mint (kiểu gateway: '1h', '30m', '45s', hoặc giây thuần) — mặc định '1h'. */
+  mintJwtExpires: string;
 }
 
 /**
@@ -226,6 +234,8 @@ export function getEnv(overrides: Record<string, string> = {}): LoadTestEnv {
     rateLimitWriteBucket: num('LOADTEST_RATE_LIMIT_WRITE_BUCKET', 0),
     trustProxy: parseBool(env.LOADTEST_TRUST_PROXY),
     shutdownTimeoutMs: num('LOADTEST_SHUTDOWN_TIMEOUT_MS', 10_000),
+    mintJwtSecret: env.LOADTEST_MINT_JWT_SECRET || '',
+    mintJwtExpires: env.LOADTEST_MINT_JWT_EXPIRES || '1h',
   };
   cachedEnv = cfg;
   return cfg;

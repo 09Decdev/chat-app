@@ -82,6 +82,8 @@ export default function MarketingRoomPage() {
   const [rooms, setRooms] = useState<ChatAdminRoom[]>([]);
   const [roomsLoading, setRoomsLoading] = useState(false);
   const [roomsError, setRoomsError] = useState<string | null>(null);
+  /** F-mint: tool có LOADTEST_MINT_JWT_SECRET → user thường (ngoài pool) cũng mở được ô chat. */
+  const [mintEnabled, setMintEnabled] = useState(false);
 
   useEffect(() => {
     try {
@@ -121,6 +123,7 @@ export default function MarketingRoomPage() {
     try {
       const res = await loadtestApi.listChatRooms();
       setRooms(res.rows);
+      setMintEnabled(!!res.mintEnabled);
     } catch (e) {
       setRoomsError(toApiError(e).message);
     } finally {
@@ -149,6 +152,16 @@ export default function MarketingRoomPage() {
     setPanes((prev) => (prev.includes(email) || prev.length >= MAX_PANES ? prev : [...prev, email]));
   const closePane = (email: string) => setPanes((prev) => prev.filter((e) => e !== email));
 
+  /** Key ô chat: pool → email; user thường (mint bật) → `mint:<userId>`. */
+  const paneKey = (m: { userId: string; poolEmail: string | null }) => m.poolEmail ?? `mint:${m.userId}`;
+  const isMintKey = (key: string) => key.startsWith('mint:');
+  const MINT_PREFIX = 'mint:';
+  const memberById = useMemo(() => {
+    const map = new Map<string, { displayName: string | null; avatarUrl: string | null }>();
+    rooms.forEach((r) => r.members.forEach((m) => map.set(m.userId, { displayName: m.displayName, avatarUrl: m.avatarUrl })));
+    return map;
+  }, [rooms]);
+
   const canSubmit =
     !busy && (target === NEW_ROOM ? selected.length >= 2 : selected.length >= 1 && selected.length <= freeSlots);
 
@@ -167,8 +180,11 @@ export default function MarketingRoomPage() {
           ? `Đã tạo phòng ${shortRoom(res.roomId)} với ${ids.length} người.`
           : `Đã thêm ${ids.length} người vào phòng ${shortRoom(res.roomId)}.`,
       );
-      // Mở sẵn ô chat cho người có trong pool (còn chỗ)
-      selected.forEach((u) => u.poolEmail && openPane(u.poolEmail));
+      // Mở sẵn ô chat: pool → login bằng password; user thường → mint token (nếu bật), còn chỗ thì mở
+      selected.forEach((u) => {
+        if (u.poolEmail) openPane(u.poolEmail);
+        else if (mintEnabled) openPane(`mint:${u.id}`);
+      });
       setSelected([]);
       setTarget(res.roomId);
       void fetchRooms();
@@ -188,14 +204,23 @@ export default function MarketingRoomPage() {
 
   const paneGrid = (
     <div className={cn('grid min-h-0 flex-1 gap-3', gridClass, full ? 'auto-rows-fr' : 'auto-rows-[minmax(26rem,1fr)]')}>
-      {panes.map((email, i) => (
-        <div key={email} className="relative min-h-0">
+      {panes.map((key, i) => {
+        const mint = isMintKey(key)
+          ? (() => {
+              const uid = key.slice(MINT_PREFIX.length);
+              const mem = memberById.get(uid);
+              return { userId: uid, displayName: mem?.displayName ?? undefined, avatar: mem?.avatarUrl ?? undefined };
+            })()
+          : undefined;
+        return (
+        <div key={key} className="relative min-h-0">
           <MarketingChatPane
             ref={(h) => {
-              if (h) paneRefs.current.set(email, h);
-              else paneRefs.current.delete(email);
+              if (h) paneRefs.current.set(key, h);
+              else paneRefs.current.delete(key);
             }}
-            email={email}
+            email={key}
+            mint={mint}
             label={`Ô ${i + 1}`}
           />
           {!full && (
@@ -203,14 +228,15 @@ export default function MarketingRoomPage() {
               variant="ghost"
               size="icon"
               className="absolute right-1 top-1 h-7 w-7"
-              onClick={() => closePane(email)}
-              aria-label={`Đóng ô chat ${email}`}
+              onClick={() => closePane(key)}
+              aria-label={`Đóng ô chat ${key}`}
             >
               <X className="h-4 w-4" aria-hidden />
             </Button>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 
@@ -235,8 +261,8 @@ export default function MarketingRoomPage() {
       <div>
         <h1 className="text-lg font-semibold">Phòng marketing</h1>
         <p className="text-sm text-muted-foreground">
-          Tìm user → click chọn người đang rảnh → tạo phòng mới hoặc thêm vào phòng đang có. Người có trong pool mở được ô
-          chat để bạn gõ tay thay họ.
+          Tìm user → click chọn người đang rảnh → tạo phòng mới hoặc thêm vào phòng đang có. Account trong pool mở ô chat
+          bằng password đã lưu{mintEnabled ? '; tool đang bật mint JWT nên user thường (ngoài pool) cũng mở được, không cần password' : ''}.
         </p>
       </div>
 
@@ -379,7 +405,7 @@ export default function MarketingRoomPage() {
         {rooms.length === 0 && !roomsError && <p className="text-sm text-muted-foreground">Chưa có phòng nào.</p>}
         <ul className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           {rooms.map((r) => {
-            const poolMembers = r.members.filter((m) => m.poolEmail);
+            const openableMembers = mintEnabled ? r.members : r.members.filter((m) => m.poolEmail);
             return (
               <li key={r.roomId} className={cn('rounded-lg border border-border p-3', target === r.roomId && 'ring-2 ring-primary')}>
                 <div className="mb-2 flex items-center gap-2 text-sm">
@@ -398,34 +424,46 @@ export default function MarketingRoomPage() {
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {r.members.map((m) => {
-                    const open = !!m.poolEmail && panes.includes(m.poolEmail);
+                    const canOpen = !!m.poolEmail || mintEnabled;
+                    const key = paneKey(m);
+                    const open = canOpen && panes.includes(key);
                     return (
                       <button
                         key={m.userId}
                         type="button"
-                        disabled={!m.poolEmail}
-                        onClick={() => m.poolEmail && (open ? closePane(m.poolEmail) : openPane(m.poolEmail))}
+                        disabled={!canOpen}
+                        onClick={() => canOpen && (open ? closePane(key) : openPane(key))}
                         className={cn(
                           'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs',
                           open ? 'border-primary bg-primary/15' : 'border-border',
-                          m.poolEmail ? 'hover:bg-accent' : 'cursor-default opacity-70',
+                          canOpen ? 'hover:bg-accent' : 'cursor-default opacity-70',
                         )}
-                        title={m.poolEmail ? (open ? 'Đóng ô chat' : 'Mở ô chat') : 'Không có trong pool — không mở được ô chat'}
+                        title={
+                          m.poolEmail
+                            ? open
+                              ? 'Đóng ô chat'
+                              : 'Mở ô chat'
+                            : mintEnabled
+                              ? open
+                                ? 'Đóng ô chat'
+                                : 'Mở ô chat (user thường — mint token, không cần password)'
+                              : 'Không có trong pool — bật LOADTEST_MINT_JWT_SECRET để mở user thường'
+                        }
                       >
-                        {m.poolEmail && <MessageSquare className="h-3 w-3" aria-hidden />}
+                        {canOpen && <MessageSquare className="h-3 w-3" aria-hidden />}
                         {m.displayName || m.userId.slice(0, 8)}
                       </button>
                     );
                   })}
                 </div>
-                {poolMembers.length > 0 && (
+                {openableMembers.length > 0 && (
                   <Button
                     variant="outline"
                     size="sm"
                     className="mt-2 h-8 text-xs"
-                    onClick={() => poolMembers.forEach((m) => openPane(m.poolEmail!))}
+                    onClick={() => openableMembers.forEach((m) => openPane(paneKey(m)))}
                   >
-                    Mở ô chat cả phòng ({poolMembers.length})
+                    Mở ô chat cả phòng ({openableMembers.length})
                   </Button>
                 )}
               </li>
@@ -465,7 +503,11 @@ export default function MarketingRoomPage() {
       {panes.length > 0 ? (
         paneGrid
       ) : (
-        <p className="text-sm text-muted-foreground">Mở ô chat từ danh sách phòng (thành viên có biểu tượng tin nhắn là người trong pool).</p>
+        <p className="text-sm text-muted-foreground">
+          {mintEnabled
+            ? 'Mở ô chat từ danh sách phòng — bấm vào thành viên là mở được (pool hoặc user thường qua mint token).'
+            : 'Mở ô chat từ danh sách phòng (thành viên có biểu tượng tin nhắn là người trong pool).'}
+        </p>
       )}
     </div>
   );

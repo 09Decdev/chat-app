@@ -34,7 +34,14 @@ export interface ImpersonatedUser {
 
 const CHAT_SEND_MIN_MS = 2000;
 
-export function useImpersonatedChat(email: string, opts: { historyLimit?: number } = {}) {
+/** F-mint: danh tính user thường (ngoài pool) — server mint JWT bằng LOADTEST_MINT_JWT_SECRET. */
+export interface MintIdentity {
+  userId: string;
+  displayName?: string;
+  avatar?: string;
+}
+
+export function useImpersonatedChat(email: string, opts: { historyLimit?: number; mint?: MintIdentity } = {}) {
   const historyLimit = opts.historyLimit ?? 20;
   const [status, setStatus] = useState<ImpersonatedStatus>('loading');
   const [error, setError] = useState<string | null>(null);
@@ -101,8 +108,17 @@ export function useImpersonatedChat(email: string, opts: { historyLimit?: number
         roomIdRef.current = null;
         setStatus('idle');
       }
-    } catch {
-      setStatus('idle');
+    } catch (e) {
+      // 404 = user thật sự chưa có phòng → idle. Còn lại (401/403/5xx, network) hiện lỗi thật —
+      // pane mint bị secret sai trước đây bị nuốt vào idle, khó debug (audit 06/11).
+      const err = toApiError(e);
+      if (err.statusCode === 404) {
+        roomIdRef.current = null;
+        setStatus('idle');
+        return;
+      }
+      setError(`Không đọc được phòng (my-room HTTP ${err.statusCode}): ${err.message}`);
+      setStatus('error');
     }
   }, [api, loadHistory]);
 
@@ -116,6 +132,9 @@ export function useImpersonatedChat(email: string, opts: { historyLimit?: number
   }, [api]);
 
   // boot: impersonate → token → socket → reconcile
+  const mintRef = useRef(opts.mint);
+  mintRef.current = opts.mint;
+  const mintIdentityKey = opts.mint ? `${opts.mint.userId}|${opts.mint.displayName ?? ''}|${opts.mint.avatar ?? ''}` : '';
   useEffect(() => {
     initialReconciled.current = false; // reset cho email mới
     let cancelled = false;
@@ -124,7 +143,10 @@ export function useImpersonatedChat(email: string, opts: { historyLimit?: number
     setMessages([]);
     (async () => {
       try {
-        const res = await loadtestApi.impersonate(email);
+        const mint = mintRef.current;
+        const res = mint
+          ? await loadtestApi.impersonateMint({ userId: mint.userId, displayName: mint.displayName, avatar: mint.avatar })
+          : await loadtestApi.impersonate(email);
         if (cancelled) return;
         userIdRef.current = res.user.id;
         setMe({ id: res.user.id, displayName: res.user.displayName, avatar: res.user.avatar });
@@ -215,7 +237,7 @@ export function useImpersonatedChat(email: string, opts: { historyLimit?: number
       socketRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email]);
+  }, [email, mintIdentityKey]);
 
   /** Gửi tin; trả false nếu bị chặn (chưa vào phòng / gửi quá nhanh / rỗng). */
   const send = useCallback((raw: string): boolean => {
